@@ -1,0 +1,43 @@
+{
+  "name": "pi-jfrog-boost",
+  "version": "0.1.0",
+  "description": "JFrog Boost integration for the pi coding agent — compresses noisy tool output to save tokens and context",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "jfrog",
+    "boost",
+    "token-optimization",
+    "agent",
+    "hooks"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "echo 'nothing to build' — pi loads TypeScript directly via jiti",
+    "clean": "rm -rf node_modules package-lock.json"
+  },
+  "pi": {
+    "extensions": [
+      "src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
