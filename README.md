@@ -62,7 +62,7 @@ pi install npm:pi-jfrog-boost
 Or from git:
 
 ```sh
-pi install git:github.com/<owner>/pi-jfrog-boost
+pi install git:github.com/darkdiamond/pi-jfrog-boost
 ```
 
 Restart pi (or run `/reload`) so the extension loads. To try it without
