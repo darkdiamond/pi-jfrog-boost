@@ -13,6 +13,12 @@
     "agent",
     "hooks"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darkdiamond/pi-jfrog-boost.git"
+  },
+  "homepage": "https://github.com/darkdiamond/pi-jfrog-boost#readme",
+  "bugs": "https://github.com/darkdiamond/pi-jfrog-boost/issues",
   "engines": {
     "node": ">=20"
   },
