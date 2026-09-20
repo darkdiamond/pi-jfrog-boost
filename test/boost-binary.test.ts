@@ -8,11 +8,17 @@ import {
 	resolveBoostBinary,
 } from "../src/boost-binary.ts";
 
-/** Pretend every path in `present` is an executable file and nothing else is. */
-const onDisk = (...present: string[]) => {
-	const set = new Set(present);
+/**
+ * Pretend every path in `present` is an executable file and nothing else is.
+ * Segments are joined the way the resolver joins them, so a fixture written as
+ * ["/usr/bin", "boost"] matches on Windows too, where that is `\usr\bin\boost`.
+ */
+const onDisk = (...present: (string | string[])[]) => {
+	const set = new Set(present.map((p) => (Array.isArray(p) ? join(...p) : p)));
 	return (path: string) => set.has(path);
 };
+
+const localBin = (home: string, name = "boost") => join(home, ".local", "bin", name);
 
 test("BOOST_BIN wins over every other candidate", () => {
 	const custom = "/opt/boost/bin/boost";
@@ -20,7 +26,7 @@ test("BOOST_BIN wins over every other candidate", () => {
 		env: { BOOST_BIN: custom, PATH: "/usr/bin" },
 		platform: "linux",
 		home: "/home/dev",
-		isExecutable: onDisk(custom, "/home/dev/.local/bin/boost", "/usr/bin/boost"),
+		isExecutable: onDisk(custom, localBin("/home/dev"), ["/usr/bin", "boost"]),
 	});
 	assert.equal(resolved, custom);
 });
@@ -30,9 +36,9 @@ test("an unusable BOOST_BIN falls through instead of disabling Boost", () => {
 		env: { BOOST_BIN: "/opt/missing/boost", PATH: "/usr/bin" },
 		platform: "linux",
 		home: "/home/dev",
-		isExecutable: onDisk("/usr/bin/boost"),
+		isExecutable: onDisk(["/usr/bin", "boost"]),
 	});
-	assert.equal(resolved, "/usr/bin/boost");
+	assert.equal(resolved, join("/usr/bin", "boost"));
 });
 
 test("the default install location is preferred over PATH", () => {
@@ -40,9 +46,9 @@ test("the default install location is preferred over PATH", () => {
 		env: { PATH: "/usr/bin" },
 		platform: "linux",
 		home: "/home/dev",
-		isExecutable: onDisk("/home/dev/.local/bin/boost", "/usr/bin/boost"),
+		isExecutable: onDisk(localBin("/home/dev"), ["/usr/bin", "boost"]),
 	});
-	assert.equal(resolved, join("/home/dev", ".local", "bin", "boost"));
+	assert.equal(resolved, localBin("/home/dev"));
 });
 
 test("PATH is searched in order when Boost is installed elsewhere", () => {
@@ -50,9 +56,9 @@ test("PATH is searched in order when Boost is installed elsewhere", () => {
 		env: { PATH: ["/a", "/b"].join(delimiter) },
 		platform: "linux",
 		home: "/home/dev",
-		isExecutable: onDisk("/b/boost"),
+		isExecutable: onDisk(["/b", "boost"]),
 	});
-	assert.equal(resolved, "/b/boost");
+	assert.equal(resolved, join("/b", "boost"));
 });
 
 test("Windows finds boost.exe under LOCALAPPDATA", () => {
@@ -89,7 +95,7 @@ test("an empty environment does not produce a bogus /.local/bin path", () => {
 			return false;
 		},
 	});
-	assert.ok(!seen.includes("/.local/bin/boost"), seen.join(", "));
+	assert.ok(!seen.includes(localBin("")), seen.join(", "));
 });
 
 test("parseBoostVersion reads the `boost v0.13.24` banner", () => {
