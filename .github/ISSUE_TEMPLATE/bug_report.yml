@@ -1,0 +1,36 @@
+name: Bug report
+description: Something behaved differently than documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Boost decides what to compact — output passing through unchanged is
+        normal and usually not a bug. `boost doctor` is a good first check.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. pi -e ... / pi install npm:pi-jfrog-boost
+        2. Ask the agent to run ...
+        3. ...
+    validations: { required: true }
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `pi --version`, `boost version`, `node --version`, and your OS.
+      render: shell
+    validations: { required: true }
+  - type: checkboxes
+    id: failopen
+    attributes:
+      label: Fail-open check
+      options:
+        - label: I confirmed the behaviour goes away with `DISABLE_BOOST=1`

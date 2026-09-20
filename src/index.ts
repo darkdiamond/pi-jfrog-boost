@@ -42,8 +42,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	let hint: string | undefined;
 	/** Latest assistant text, reported to Boost when the agent settles. */
 	let lastAssistantText = "";
-	/** The "Boost is not installed" notice is worth saying once, not every session. */
-	let noticeShown = false;
+	/** Each notice is worth saying once per process, not once per session. */
+	let missingNoticeShown = false;
+	let observeNoticeShown = false;
 
 	registerInstallCommand(pi, client);
 
@@ -57,10 +58,24 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		hint = undefined;
 		lastAssistantText = "";
 
-		if (!client.binary() && client.enabled() && !noticeShown) {
-			noticeShown = true;
-			ctx.ui.notify(`JFrog Boost is not installed — run /${COMMAND_NAME} to set it up.`, "info");
+		// Without a binary there is nothing else to say, this session or any later
+		// one, so this returns whether or not the notice has already been shown.
+		if (!client.binary() && client.enabled()) {
+			if (!missingNoticeShown) {
+				missingNoticeShown = true;
+				ctx.ui.notify(`JFrog Boost is not installed — run /${COMMAND_NAME} to set it up.`, "info");
+			}
 			return;
+		}
+
+		// Opting into telemetry costs this session its identity in `boost report`,
+		// because Boost's observe hook has no pi dialect. Say so out loud.
+		if (client.observeEnabled() && !observeNoticeShown) {
+			observeNoticeShown = true;
+			ctx.ui.notify(
+				"PI_BOOST_OBSERVE=1: this session will be recorded as claude_code in `boost report`, because Boost has no pi agent type.",
+				"warning",
+			);
 		}
 
 		// Not awaited: a session must never wait on telemetry. The reply carries
@@ -188,9 +203,10 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		client.observeDetached(meta(ctx), { hook_event_name: "postCompact" });
 	});
 
-	pi.on("session_shutdown", (event, ctx) => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		const hookMeta = meta(ctx);
-		client.observeDetached(hookMeta, { hook_event_name: "stop", reason: event.reason });
+		// No `stop` observe: it records nothing measurable and reattributes the
+		// session to claude_code. `boost sync` leaves attribution alone.
 		sync.flush(hookMeta);
 		sync.dispose();
 		startedAt.clear();

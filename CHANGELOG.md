@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-20
+
+### Changed
+
+- Telemetry: probing Boost v0.13.24 showed `boost hook observe` does not merely
+  file pi's rows under Claude Code — attribution is last-writer-wins, so
+  `sessionStart`, `PreToolUse`, and `stop` **overwrite** the correct `pi`
+  attribution the filter just recorded. `PI_BOOST_OBSERVE=1` now prints a
+  warning at session start instead of changing `boost report` quietly, and
+  README documents the measured per-event behaviour.
+
+### Removed
+
+- The `stop` observe on shutdown. It recorded nothing measurable and
+  reattributed the session; `boost sync` already handles shutdown and leaves
+  attribution alone.
+
+### Fixed
+
+- The "Boost is not installed" path fell through on the second and later
+  sessions, so a session could warn about telemetry for a Boost that was not
+  installed.
+
+### Added
+
+- `SECURITY.md`, `CONTRIBUTING.md`, issue templates, Dependabot, a logo, and
+  README badges.
+
 ## [0.1.0] - 2026-09-20
 
 ### Added
@@ -31,5 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/darkdiamond/pi-jfrog-boost/releases/tag/v0.1.0

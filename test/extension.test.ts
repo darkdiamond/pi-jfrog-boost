@@ -260,6 +260,27 @@ test("shutdown flushes the pending upload instead of waiting out the debounce", 
 	assert.equal(calls.filter((c) => c.kind === "sync").length, 1);
 });
 
+test("shutdown sends no observe: a `stop` event would reattribute the session", async () => {
+	const { fire, calls } = harness();
+	await fire("session_shutdown", { reason: "quit" });
+	assert.equal(observed(calls, "stop").length, 0);
+});
+
+test("opting into telemetry warns that the session loses its pi attribution", async () => {
+	const { fire, notices } = harness();
+	await fire("session_start", { reason: "startup" });
+	await fire("session_start", { reason: "new" });
+	assert.equal(notices.length, 1, "said once, not every session");
+	assert.match(notices[0] ?? "", /PI_BOOST_OBSERVE=1/);
+	assert.match(notices[0] ?? "", /claude_code/);
+});
+
+test("no such warning when telemetry is left off", async () => {
+	const { fire, notices } = harness({ observeEnabled: false });
+	await fire("session_start", { reason: "startup" });
+	assert.deepEqual(notices, []);
+});
+
 test("every payload carries the session id and working directory", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
 	await fire("tool_result", result("ls"));
