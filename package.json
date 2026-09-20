@@ -1,6 +1,6 @@
 {
 	"name": "pi-jfrog-boost",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "JFrog Boost integration for the pi coding agent \u2014 compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
@@ -26,7 +26,6 @@
 	"files": [
 		"src",
 		"skills",
-		".github/assets",
 		"README.md",
 		"LICENSE",
 		"CHANGELOG.md"
@@ -49,14 +48,15 @@
 		],
 		"skills": [
 			"./skills"
-		]
+		],
+		"image": "https://raw.githubusercontent.com/darkdiamond/pi-jfrog-boost/main/.github/assets/preview.png"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.14",
-		"@earendil-works/pi-coding-agent": "0.85.1",
+		"@earendil-works/pi-coding-agent": "^0.86.1",
 		"@types/node": "^22.10.0",
 		"typescript": "^5.7.0"
 	},

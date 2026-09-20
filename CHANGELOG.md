@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-20
+
+### Added
+
+- A gallery preview card, wired up as `pi.image` so the package renders with
+  artwork at https://pi.dev/packages instead of as plain text. pi accepts
+  PNG/JPEG/GIF/WebP there, not SVG, and fetches it by URL.
+
+### Changed
+
+- Bumped the `@earendil-works/pi-coding-agent` dev dependency to 0.86.1, so
+  typechecking runs against the SDK users actually have.
+- The README header now leads with the preview card.
+- Dropped `.github/assets` from the published `files`: both the gallery and the
+  README fetch the art by URL, so there was no reason to carry it in every
+  install.
+
 ## [0.2.1] - 2026-09-20
 
 ### Changed
@@ -67,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/darkdiamond/pi-jfrog-boost/releases/tag/v0.1.0
