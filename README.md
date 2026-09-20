@@ -1,57 +1,29 @@
 # pi-jfrog-boost
 
-[JFrog Boost](https://boost.jfrog.com/) integration for the [pi coding agent](https://pi.dev).
+[JFrog Boost](https://boost.jfrog.com/) for the [pi coding agent](https://pi.dev).
 
-Boost is a free CLI that compresses noisy tool output (and converts documents)
-before it reaches the model. This package wires Boost into pi using the same
-hook methodology as Boost's official integrations for Claude Code, Codex,
-Cursor, and OpenCode — so every tool result that would waste context gets
-filtered first.
+Boost is a free CLI that compacts noisy tool output before it reaches the model.
+This package pipes pi's tool results through it, so the output that would
+otherwise burn your context gets filtered first — and tells the model how to
+recover anything Boost dropped.
 
-## What it does
+> A community project. Not affiliated with, endorsed by, or supported by JFrog.
 
-| pi event | Boost hook | Effect |
-|---|---|---|
-| `tool_call` | `PreToolUse` → `boost hook claude` | Rewrites Bash commands so their output is piped through Boost; swaps `read` paths to pre-converted Markdown for HTML/docs |
-| `tool_result` | `PostToolUse` → `boost hook claude` | Replaces output with Boost's compressed version, appends context (e.g. `boost retrieve` hints) |
-| session / turn / compaction lifecycle | `boost hook observe claude` | Telemetry that powers `boost report` |
+## What it covers
 
-**Fail-open by design:** if the Boost binary is missing, slow, or returns
-nothing, every tool call and result passes through untouched. A broken Boost
-can never break your session.
+| pi tool | What Boost does |
+|---|---|
+| `bash`, `powershell` | Compacts the command's output |
+| `read` | Compacts file contents; retries PDFs and Office files through `boost read`, which pi cannot open at all |
+| `grep`, `find`, `ls` | Compacts the results |
+| `edit`, `write` | Nothing — pi already summarises these as diffs |
 
-## First run: automatic Boost install
+On top of that the extension adds a short block to the system prompt telling the
+model how to use `boost retrieve`, ships a `boost` skill with the longer version,
+and runs `boost sync` when the agent goes idle so `boost report` has data.
 
-You don't need Boost pre-installed. On first load, the extension checks for
-the binary and, if missing, installs it via the **official installer** from
-<https://boost.jfrog.com/llms-install.txt>:
-
-```sh
-curl -fsSL https://boost.jfrog.com/install.sh | bash
-boost init --accept-terms
-```
-
-- The install runs once, at extension load, before the session starts, and is
-  skipped when the binary already exists.
-- `boost init --accept-terms` (which records the
-  [Online Preview Agreement](https://boost.jfrog.com/preview-agreement/)) is
-  run with explicit flags for the editors detected on the machine; with none
-  detected it is skipped — the binary works fine for pi alone.
-- Every failure is non-fatal: the extension fail-opens and you can install
-  Boost manually at any time.
-- **Opt out** by setting `PI_JFROG_BOOST_AUTOINSTALL=0` (or
-  `BOOST_AUTOINSTALL=0`) before starting pi.
-
-## Requirements
-
-- [pi](https://pi.dev) coding agent
-- JFrog Boost CLI — installed automatically on first run (see above), or
-  manually:
-
-```sh
-curl -fsSL https://boost.jfrog.com/install.sh | bash
-boost init --accept-terms
-```
+**Fail-open by design.** If Boost is missing, too old, slow, or silent, every
+tool result passes through untouched. A broken Boost cannot break your session.
 
 ## Install
 
@@ -72,54 +44,119 @@ installing:
 pi -e npm:pi-jfrog-boost
 ```
 
+### The Boost CLI
+
+The extension needs the `boost` binary. It does **not** install anything on its
+own: if Boost is missing, pi says so once and `/boost-install` will show you the
+exact command and run it after you confirm.
+
+To do it yourself:
+
+```sh
+curl -fsSL https://boost.jfrog.com/install.sh | bash
+```
+
+Boost will ask you to accept its
+[Online Preview Agreement](https://boost.jfrog.com/preview-agreement/) the first
+time it needs to. This package never accepts it for you and never touches any
+other agent's configuration.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `DISABLE_BOOST` | unset | Set to `1` to disable the extension at runtime |
-| `BOOST_BIN` | `~/.local/bin/boost` | Path to the Boost binary |
-| `PI_JFROG_BOOST_AUTOINSTALL` | unset | Set to `0` to disable first-run auto-install |
-| `BOOST_AUTOINSTALL` | unset | Alias opt-out for first-run auto-install |
+| `DISABLE_BOOST` | unset | `1` disables the integration, for one command or a whole session |
+| `BOOST_BIN` | auto-detected | Path to the Boost binary |
+| `PI_BOOST_OBSERVE` | unset | `1` enables session telemetry — see the caveat below |
 
-Boost itself is configured via `boost filters` and `~/.boost/config.toml` —
-this package only relays decisions; Boost decides what to compress.
+Boost is auto-detected from `$BOOST_BIN`, then `~/.local/bin`, then
+`%LOCALAPPDATA%\boost\bin` on Windows, then `PATH` — the same order Boost's own
+hooks use.
+
+What Boost compacts is configured with `boost filters` and
+`~/.boost/config.toml`. This package only hands Boost the output; Boost decides.
+Plenty of output passes through unchanged, and that is normal.
+
+### Session telemetry is opt-in
+
+Boost's `boost report` can also show session timing — which tools ran, how long
+they took, where the session stalled. Feeding it that data means calling
+`boost hook observe <agent>`, and **Boost has no `pi` agent type**: it files
+whatever it receives under whichever agent the subcommand names, so pi's
+sessions would show up in your Claude Code numbers and skew them.
+
+Token savings do not have this problem — those go through Boost's agent-neutral
+filter, which records pi as `pi` — so they are always reported.
+
+Set `PI_BOOST_OBSERVE=1` if you want the timing data anyway and don't mind the
+label. It will be removed once Boost recognises pi.
 
 ## Usage
 
-Nothing to do — tool output is filtered automatically. Useful companions:
+Nothing to do — output is filtered automatically. Useful companions:
 
-- `boost report` — measured token savings and what slowed your agents down
-- `boost retrieve <id>` — recover original output that Boost compressed (run
-  it in the chat from the marker Boost left behind)
+- `boost report -t` — measured token savings
+- `boost retrieve <id>` — recover the original of something Boost compacted
+- `boost read <path>` — read a PDF or Office file
 - `boost doctor` — diagnose the install
+- `/boost-install` — install the Boost CLI from inside pi
 
 ## How it works
 
-The extension speaks the exact JSON hook protocol Boost's editor integrations
-use (verified against `boost hook claude` / `boost hook observe claude` from
-Boost v0.13.x):
+Boost exposes two kinds of surface. The `boost hook <agent>` dialects speak each
+editor's hook protocol but stamp every span with the agent the subcommand names
+— `boost hook claude` rewrites `agent_type` to `claude_code` even when the
+payload says `pi`. The agent-neutral surfaces take their identity from
+`BOOST_HOOK_META`. This integration uses only the latter, so pi's work is
+recorded as pi's.
 
-1. Before a `bash` or `read` tool runs, the extension sends a `PreToolUse`
-   payload. If Boost replies with `updatedInput`, the tool arguments are
-   patched in place (Bash commands get wrapped so output streams through
-   Boost; document reads get swapped to converted Markdown).
-2. After the tool finishes, the extension sends the result as `PostToolUse`.
-   Boost may reply with a compressed `updatedOutput` and/or
-   `additionalContext`, which replace/extend the tool result.
-3. Session lifecycle events (`sessionStart`, `afterAgentResponse`,
-   `preCompact`/`postCompact`, `SessionEnd`) are relayed to Boost's observe
-   hook, fire-and-forget, to feed `boost report`.
+1. **`tool_result`** pipes the output of a covered tool through Boost's stdin
+   filter, tagged with the shell command it stands in for (`ls -la <path>` for
+   the `ls` tool, and so on) because Boost's filters key on commands. If Boost
+   returns something shorter, that replaces the text the model sees.
+2. **A failed `read` of a document** is retried through `boost read`, which can
+   extract text from PDFs and Office files that pi rejects as binary. The result
+   is marked as converted so the model does not cite its line numbers as source
+   lines.
+3. **`before_agent_start`** adds a short block to the system prompt about
+   `boost retrieve <id>`.
+4. **`boost sync`** runs 8 seconds after the agent goes idle, flushed
+   immediately on shutdown, so measurements reach `boost report`.
 
-Hook calls have a 15-second kill timeout. Observe calls are detached and
-unref'ed so they never slow down or block shutdown.
+The trade-off of using only agent-neutral surfaces is that output is filtered
+after a tool runs rather than streamed through Boost while it runs. That is the
+same trade-off Boost's own OpenCode plugin makes on Windows, and pi bounds tool
+output before handing it over anyway.
+
+Filter calls have a 15-second kill timeout and a 4 MiB ceiling; anything larger,
+binary, or empty is passed straight through. `boost sync` is detached and
+unref'd, so it never delays a turn or holds up shutdown.
+
+### Not covered
+
+pi has no built-in MCP client. If you add one through a third-party package, its
+output is not routed through Boost — the tool names and payload shapes belong to
+that package, not pi, so there is nothing stable to key on.
 
 ## Security
 
 - This package runs the locally installed `boost` binary and passes it tool
-  names, arguments, and output. It does not send anything anywhere on its own;
-  Boost's own network behavior is governed by the
+  output and arguments. It sends nothing anywhere on its own; Boost's network
+  behaviour is governed by the
   [JFrog Online Preview Agreement](https://boost.jfrog.com/preview-agreement/).
-- As with any pi package, review the source before installing. It's short.
+- Nothing is installed, and no configuration is written, without you asking.
+- Boost wraps commands; it does not sandbox them. Its redaction is best effort,
+  not a security boundary.
+- As with any pi package, read the source before installing. It is under 900
+  lines across seven files, with no runtime dependencies.
+
+## Development
+
+```sh
+npm install
+npm run check          # lint, typecheck, tests
+pi -e ./src/index.ts   # run pi against the working tree
+```
 
 ## License
 
