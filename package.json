@@ -1,10 +1,10 @@
 {
 	"name": "pi-jfrog-boost",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "JFrog Boost integration for the pi coding agent \u2014 compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
-	"author": "Tzahi <zilbert@gmail.com>",
+	"author": "DarkDiamonD (https://github.com/darkdiamond)",
 	"keywords": [
 		"pi-package",
 		"pi",

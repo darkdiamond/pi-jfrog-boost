@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-20
+
+### Changed
+
+- `author` is now `DarkDiamonD (https://github.com/darkdiamond)` with no email
+  address, and the licence names the same. Earlier releases carried a personal
+  address in `package.json`.
+
 ## [0.2.0] - 2026-09-20
 
 ### Changed
@@ -59,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/darkdiamond/pi-jfrog-boost/releases/tag/v0.1.0
