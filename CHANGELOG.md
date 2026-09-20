@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-20
+
+No runtime changes. This release exists to exercise the publish path end to end
+now that it uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers)
+rather than a long-lived write token — the configuration cannot be verified from
+outside npm, so an actual release is the only test.
+
+### Changed
+
+- Releases are published with a short-lived OIDC credential; there is no publish
+  token in the repository's secrets.
+
 ## [0.2.2] - 2026-09-20
 
 ### Added
@@ -84,7 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.1.0...v0.2.0
