@@ -40,4 +40,10 @@ CI runs the suite on Linux and Windows across Node 22.19 and 24.
 1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
 2. Merge to `main` with CI green.
 3. Tag `vX.Y.Z` and push it. The publish workflow re-runs the full matrix,
-   checks the tag matches `package.json`, and publishes with provenance.
+   checks the tag matches `package.json`, and publishes.
+
+Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers):
+npm is configured to accept releases from this repository via
+`.github/workflows/publish.yml`, and the OIDC token GitHub mints for that run is
+exchanged for a short-lived credential. There is no publish token in the repo's
+secrets, and npm attaches provenance on its own.
