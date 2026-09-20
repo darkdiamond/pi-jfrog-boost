@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="pi-jfrog-boost">
+  <title>pi-jfrog-boost</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#40be46"/>
+      <stop offset="1" stop-color="#1f7a4d"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#g)"/>
+  <!-- A wide bar compacted into a narrow one: what Boost does to tool output. -->
+  <g fill="#fff">
+    <rect x="26" y="36" width="76" height="9" rx="4.5" opacity=".95"/>
+    <rect x="26" y="52" width="58" height="9" rx="4.5" opacity=".7"/>
+    <rect x="26" y="68" width="40" height="9" rx="4.5" opacity=".5"/>
+    <rect x="26" y="84" width="22" height="9" rx="4.5" opacity=".35"/>
+  </g>
+  <!-- Greek pi, for the agent it plugs into. -->
+  <g fill="#fff" opacity=".92">
+    <rect x="74" y="74" width="34" height="7" rx="3.5"/>
+    <rect x="80" y="81" width="7" height="24" rx="3.5"/>
+    <rect x="96" y="81" width="7" height="24" rx="3.5"/>
+  </g>
+</svg>

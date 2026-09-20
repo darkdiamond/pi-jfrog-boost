@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: JFrog Boost itself
+    url: https://boost.jfrog.com/
+    about: What Boost compacts, filter config, and the report are Boost's, not this package's.
+  - name: pi coding agent
+    url: https://github.com/earendil-works/pi
+    about: Questions about pi itself, its tools, or package installation.

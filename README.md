@@ -1,11 +1,23 @@
+<div align="center">
+
+<img src=".github/assets/logo.svg" alt="" width="96" height="96">
+
 # pi-jfrog-boost
 
-[JFrog Boost](https://boost.jfrog.com/) for the [pi coding agent](https://pi.dev).
+**[JFrog Boost](https://boost.jfrog.com/) for the [pi coding agent](https://pi.dev)** — compacts noisy tool output before it reaches the model.
 
-Boost is a free CLI that compacts noisy tool output before it reaches the model.
-This package pipes pi's tool results through it, so the output that would
-otherwise burn your context gets filtered first — and tells the model how to
-recover anything Boost dropped.
+[![npm](https://img.shields.io/npm/v/pi-jfrog-boost?logo=npm&color=cb3837)](https://www.npmjs.com/package/pi-jfrog-boost)
+[![CI](https://github.com/darkdiamond/pi-jfrog-boost/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/darkdiamond/pi-jfrog-boost/actions/workflows/ci.yml)
+[![provenance](https://img.shields.io/badge/provenance-attested-2ea44f?logo=github)](https://search.sigstore.dev/?q=pi-jfrog-boost)
+[![node](https://img.shields.io/node/v/pi-jfrog-boost?logo=nodedotjs&color=5fa04e)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/pi-jfrog-boost?color=blue)](./LICENSE)
+[![install size](https://img.shields.io/badge/dependencies-none-2ea44f)](./package.json)
+
+</div>
+
+```sh
+pi install npm:pi-jfrog-boost
+```
 
 > A community project. Not affiliated with, endorsed by, or supported by JFrog.
 
@@ -77,19 +89,34 @@ What Boost compacts is configured with `boost filters` and
 `~/.boost/config.toml`. This package only hands Boost the output; Boost decides.
 Plenty of output passes through unchanged, and that is normal.
 
-### Session telemetry is opt-in
+### Session telemetry is opt-in, and costs this session its identity
 
-Boost's `boost report` can also show session timing — which tools ran, how long
-they took, where the session stalled. Feeding it that data means calling
-`boost hook observe <agent>`, and **Boost has no `pi` agent type**: it files
-whatever it receives under whichever agent the subcommand names, so pi's
-sessions would show up in your Claude Code numbers and skew them.
+Boost's `boost report` can also show per-tool timing. Feeding it that data means
+calling `boost hook observe <agent>`, and **Boost has no `pi` agent type** — it
+takes the agent from the subcommand name and falls back to `claude_code` for
+anything it does not recognise. No environment variable overrides it.
 
-Token savings do not have this problem — those go through Boost's agent-neutral
-filter, which records pi as `pi` — so they are always reported.
+Attribution is last-writer-wins, so this is not merely extra rows in the wrong
+bucket: an observe call **overwrites** the correct `pi` attribution that the
+filter just recorded for the same session.
 
-Set `PI_BOOST_OBSERVE=1` if you want the timing data anyway and don't mind the
-label. It will be removed once Boost recognises pi.
+Measured against Boost v0.13.24:
+
+| observe event | effect on attribution | what it records |
+|---|---|---|
+| `sessionStart`, `PreToolUse`, `stop` | rewrites the session to `claude_code` | `PreToolUse` opens the tool-call row |
+| `PostToolUse`, `afterAgentResponse` | leaves it alone | `PostToolUse` closes the row with its duration |
+| `boost sync` | leaves it alone | — |
+
+There is no safe subset: `PreToolUse` is what creates the record, and it is one
+of the events that rewrites attribution. So telemetry is off by default, and
+turning it on prints a warning at session start rather than changing your
+numbers quietly. Token savings are unaffected either way — those go through
+Boost's agent-neutral filter, which records pi as `pi`.
+
+Set `PI_BOOST_OBSERVE=1` if you want per-tool timing and do not mind this
+session being labelled `claude_code`. This goes away if Boost ever recognises
+pi.
 
 ## Usage
 
