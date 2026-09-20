@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import {
 	isSupportedVersion,
@@ -47,7 +47,7 @@ test("the default install location is preferred over PATH", () => {
 
 test("PATH is searched in order when Boost is installed elsewhere", () => {
 	const resolved = resolveBoostBinary({
-		env: { PATH: ["/a", "/b"].join(":") },
+		env: { PATH: ["/a", "/b"].join(delimiter) },
 		platform: "linux",
 		home: "/home/dev",
 		isExecutable: onDisk("/b/boost"),

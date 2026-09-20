@@ -3,13 +3,22 @@
  * that matter here — a boost that exits before reading stdin, one that hangs,
  * one that prints something other than JSON — are process behaviours, and a
  * stub would only prove the stub works.
+ *
+ * That makes them POSIX-only: the stand-in binaries are `#!/bin/sh` scripts.
+ * The logic they cover is platform-independent, so skipping them on Windows
+ * loses nothing that the other suites do not already assert.
  */
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, test as nodeTest, type TestContext } from "node:test";
 import { createBoostClient, isFilterable, MAX_PAYLOAD_BYTES } from "../src/boost-client.ts";
+
+const posixOnly =
+	process.platform === "win32" ? { skip: "POSIX-only: uses shell scripts as stand-in binaries" } : {};
+
+const test = (name: string, fn: (t: TestContext) => void | Promise<void>) => nodeTest(name, posixOnly, fn);
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-"));
 after(() => rmSync(root, { recursive: true, force: true }));
