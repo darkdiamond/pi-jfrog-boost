@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/assets/logo.svg" alt="" width="96" height="96">
+<img src="https://raw.githubusercontent.com/darkdiamond/pi-jfrog-boost/main/.github/assets/preview.png" alt="pi-jfrog-boost: JFrog Boost for the pi coding agent" width="640">
 
 # pi-jfrog-boost
 
