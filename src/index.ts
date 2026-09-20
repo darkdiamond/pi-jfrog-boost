@@ -1,189 +1,202 @@
 /**
  * pi-jfrog-boost — JFrog Boost integration for the pi coding agent.
  *
- * Methodology mirrors Boost's official editor integrations (Claude Code,
- * Codex, Cursor, OpenCode):
+ * Boost compacts noisy tool output before it reaches the model. This extension
+ * pipes pi's tool results through it and tells the model how to get the
+ * original back:
  *
- *   pi event            Boost hook                    effect
- *   ------------------  ----------------------------  -------------------------
- *   tool_call           PreToolUse (`hook claude`)    Bash auto-rewrite, Read
- *                                                     doc conversion via
- *                                                     updatedInput
- *   tool_result         PostToolUse (`hook claude`)   compressed output +
- *                                                     additional context
- *   session/turn life   `hook observe claude`         telemetry for `boost
- *   cycle events                                      report`
+ *   pi event            Boost call        effect
+ *   ------------------  ----------------  ----------------------------------
+ *   tool_result         stdin filter      bash/powershell/read/grep/find/ls
+ *                                         output compacted
+ *   tool_result (read)  boost read        text pulled out of documents pi
+ *                                         cannot read
+ *   before_agent_start  (none)            teaches the model `boost retrieve`
+ *   agent_end/shutdown  boost sync        uploads what Boost measured
  *
- * Everything is fail-open: if Boost is missing, slow, or silent, tool calls
- * and results pass through untouched. Set DISABLE_BOOST=1 to disable.
+ * Everything is fail-open: with Boost missing, too old, slow, or silent, every
+ * tool result passes through untouched. `DISABLE_BOOST=1` turns it off at
+ * runtime, for one command or a whole session.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	applyUpdatedInput,
-	claudeToolName,
-	isBoostEnabled,
-	observeDetached,
-	runHook,
-	sessionId,
-	textOf,
-	toClaudeInput,
-	truncateForObserve,
-	type HookPayload,
-} from "./boost-client.js";
-import { ensureBoostInstalled } from "./bootstrap.js";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withAwareness } from "./awareness.ts";
+import { type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
+import { type ContentBlock, textOf, truncateForObserve, withText } from "./content.ts";
+import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
+import { createSyncScheduler } from "./sync.ts";
+import { equivalentCommand, isDocument, isFiltered } from "./tools.ts";
 
-type TextBlock = { type: "text"; text: string };
+export interface BoostExtensionDeps {
+	/** Injected by tests; defaults to a client talking to the real Boost binary. */
+	client?: BoostClient;
+	syncDelayMs?: number;
+}
 
-export default async function boostExtension(pi: ExtensionAPI) {
-	// pi awaits async factories before the session starts: install Boost on
-	// first run if it is missing (opt-out via PI_JFROG_BOOST_AUTOINSTALL=0).
-	await ensureBoostInstalled();
-	// Hint line returned by observe sessionStart (daily tips); injected once.
-	let pendingHint: string | undefined;
-	// Most recent assistant response text, for the afterAgentResponse observe.
+/** Wire Boost into a pi extension host. Exported so tests can drive it directly. */
+export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps = {}): void {
+	const client = deps.client ?? createBoostClient();
+	const sync = createSyncScheduler(client, deps.syncDelayMs);
+	const startedAt = new Map<string, number>();
+
+	/** Daily tip Boost may return from the sessionStart observe; injected once. */
+	let hint: string | undefined;
+	/** Latest assistant text, reported to Boost when the agent settles. */
 	let lastAssistantText = "";
+	/** The "Boost is not installed" notice is worth saying once, not every session. */
+	let noticeShown = false;
 
-	pi.on("session_start", async (_event, ctx) => {
-		pendingHint = undefined;
-		lastAssistantText = "";
-		observeDetached(
-			{ hook_event_name: "sessionStart", session_id: sessionId(ctx), cwd: ctx.cwd },
-			ctx,
-		);
+	registerInstallCommand(pi, client);
+
+	const meta = (ctx: ExtensionContext, toolCallId?: string): HookMeta => ({
+		session_id: ctx.sessionManager.getSessionId(),
+		cwd: ctx.cwd,
+		...(toolCallId ? { tool_use_id: toolCallId } : {}),
 	});
 
-	// Inject a sessionStart hint (e.g. daily tip) into the next system prompt,
-	// like the OpenCode integration's system transform does.
+	pi.on("session_start", (_event, ctx) => {
+		hint = undefined;
+		lastAssistantText = "";
+
+		if (!client.binary() && client.enabled() && !noticeShown) {
+			noticeShown = true;
+			ctx.ui.notify(`JFrog Boost is not installed — run /${COMMAND_NAME} to set it up.`, "info");
+			return;
+		}
+
+		// Not awaited: a session must never wait on telemetry. The reply carries
+		// Boost's daily tip, which the next turn picks up if it arrives in time.
+		void client
+			.observe(meta(ctx), { hook_event_name: "sessionStart" })
+			.then((reply) => {
+				const line = reply?.additional_context;
+				if (typeof line === "string" && line.trim()) hint = line.trim();
+			})
+			.catch(() => {
+				/* fail open */
+			});
+	});
+
 	pi.on("before_agent_start", async (event) => {
-		if (!pendingHint) return;
-		const line = pendingHint;
-		pendingHint = undefined;
-		return { systemPrompt: `${event.systemPrompt}\n\n${line}` };
+		if (!(await client.ready())) return;
+		const line = hint;
+		hint = undefined;
+		const systemPrompt = withAwareness(event.systemPrompt);
+		return { systemPrompt: line ? `${systemPrompt}\n\n${line}` : systemPrompt };
 	});
 
-	// PreToolUse: let Boost rewrite Bash commands and convert Read documents.
-	pi.on("tool_call", async (event, ctx) => {
-		const claudeName = claudeToolName(event.toolName);
-		if (!claudeName) return;
-
-		const res = await runHook(
-			["hook", "claude"],
-			{
-				session_id: sessionId(ctx),
-				cwd: ctx.cwd,
-				hook_event_name: "PreToolUse",
-				tool_name: claudeName,
-				tool_input: toClaudeInput(event.toolName, event.input as HookPayload),
-			},
-			ctx,
-		);
-
-		const out = res?.hookSpecificOutput as HookPayload | undefined;
-		if (out?.updatedInput && typeof out.updatedInput === "object") {
-			applyUpdatedInput(event.input as HookPayload, out.updatedInput as HookPayload);
+	// Nothing to do before a tool runs — Boost sees the output afterwards — but
+	// the start time is needed to report how long the tool took. A throw here is
+	// not caught by pi and would block the call outright, hence the guard.
+	pi.on("tool_call", (event) => {
+		try {
+			if (client.observeEnabled()) startedAt.set(event.toolCallId, Date.now());
+		} catch {
+			/* fail open: never block a tool call over a Boost problem */
 		}
 	});
 
-	// PostToolUse: Boost may replace the output with a compressed version and
-	// append context (e.g. `boost retrieve` hints).
 	pi.on("tool_result", async (event, ctx) => {
-		const claudeName = claudeToolName(event.toolName);
-		if (!claudeName) return;
-
+		const hookMeta = meta(ctx, event.toolCallId);
 		const text = textOf(event.content);
-		if (!text) return;
+		try {
+			if (event.isError) {
+				// pi's `read` rejects Office files and PDFs as binary. Boost can
+				// often extract them, so a failed document read is worth retrying
+				// through it rather than handing the model an error.
+				if (event.toolName === "read" && isDocument(event.input.path)) {
+					const extracted = await client.read(hookMeta, event.input.path);
+					if (extracted) {
+						return {
+							isError: false,
+							content: withText(
+								event.content,
+								`Boost extracted this document; line numbers are not source lines.\n\n${extracted}`,
+							),
+						};
+					}
+				}
+				return;
+			}
 
-		const res = await runHook(
-			["hook", "claude"],
-			{
-				session_id: sessionId(ctx),
-				cwd: ctx.cwd,
-				hook_event_name: "PostToolUse",
-				tool_name: claudeName,
-				tool_input: toClaudeInput(event.toolName, event.input as HookPayload),
-				tool_response: {
-					stdout: text,
-					stderr: "",
-					exitCode: (event.details as { exitCode?: number } | undefined)?.exitCode ?? 0,
-				},
-			},
-			ctx,
-		);
-		if (!res) return;
-
-		const out = res.hookSpecificOutput as HookPayload | undefined;
-		const additionalContext =
-			typeof out?.additionalContext === "string" ? out.additionalContext : undefined;
-		const updatedOutput =
-			typeof res.updatedOutput === "string" ? res.updatedOutput : undefined;
-		if (!additionalContext && !updatedOutput) return;
-
-		const content = [...event.content];
-
-		if (updatedOutput) {
-			const idx = content.findIndex(
-				(b) => (b as { type?: string } | null)?.type === "text",
+			if (!isFiltered(event.toolName) || !text) return;
+			const command = equivalentCommand(event.toolName, event.input);
+			const filtered = await client.filter(
+				hookMeta,
+				command ? { ...event.input, command } : event.input,
+				text,
 			);
-			const block: TextBlock = { type: "text", text: updatedOutput };
-			if (idx >= 0) content[idx] = block;
-			else content.push(block);
+			if (filtered) return { content: withText(event.content, filtered) };
+		} catch {
+			/* fail open: keep the original result */
+		} finally {
+			reportToolResult(hookMeta, event, text);
 		}
-		if (additionalContext) {
-			content.push({ type: "text", text: `[boost] ${additionalContext}` } satisfies TextBlock);
-		}
-		return { content };
+		return;
 	});
 
-	// Track the most recent assistant response for observe telemetry.
-	pi.on("message_end", async (event) => {
-		if (event.message?.role !== "assistant") return;
-		const text = textOf(event.message.content);
-		if (text.trim()) lastAssistantText = truncateForObserve(text);
+	/** Lifecycle telemetry, only when the user opted in. See `observeEnabled`. */
+	function reportToolResult(
+		hookMeta: HookMeta,
+		event: { toolCallId: string; toolName: string; input: Record<string, unknown>; isError: boolean },
+		text: string,
+	): void {
+		if (!client.observeEnabled()) return;
+		const started = startedAt.get(event.toolCallId);
+		startedAt.delete(event.toolCallId);
+		const duration = started === undefined ? undefined : Math.max(0, Date.now() - started);
+		const common = { tool_name: event.toolName, tool_input: event.input, duration_ms: duration };
+		client.observeDetached(
+			hookMeta,
+			event.isError
+				? {
+						...common,
+						hook_event_name: "PostToolUseFailure",
+						error_message: truncateForObserve(text) || "tool error",
+					}
+				: { ...common, hook_event_name: "PostToolUse", tool_output: truncateForObserve(text) },
+		);
+	}
+
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "assistant") return;
+		const text = textOf(event.message.content as ContentBlock[]).trim();
+		if (text) lastAssistantText = truncateForObserve(text);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!isBoostEnabled() || !lastAssistantText) return;
-		observeDetached(
-			{
+	pi.on("agent_end", (_event, ctx) => {
+		const hookMeta = meta(ctx);
+		if (lastAssistantText) {
+			client.observeDetached(hookMeta, {
 				hook_event_name: "afterAgentResponse",
-				session_id: sessionId(ctx),
-				cwd: ctx.cwd,
 				text: lastAssistantText,
-			},
-			ctx,
-		);
-		lastAssistantText = "";
+			});
+			lastAssistantText = "";
+		}
+		// Filtering is measured locally; `boost sync` is what gets those numbers
+		// into `boost report`.
+		sync.schedule(hookMeta);
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
-		observeDetached(
-			{
-				hook_event_name: "preCompact",
-				session_id: sessionId(ctx),
-				cwd: ctx.cwd,
-				trigger: event.reason === "manual" ? "manual" : "auto",
-			},
-			ctx,
-		);
+	pi.on("session_before_compact", (event, ctx) => {
+		client.observeDetached(meta(ctx), {
+			hook_event_name: "preCompact",
+			trigger: event.reason === "manual" ? "manual" : "auto",
+		});
 	});
 
-	pi.on("session_compact", async (_event, ctx) => {
-		observeDetached(
-			{ hook_event_name: "postCompact", session_id: sessionId(ctx), cwd: ctx.cwd },
-			ctx,
-		);
+	pi.on("session_compact", (_event, ctx) => {
+		client.observeDetached(meta(ctx), { hook_event_name: "postCompact" });
 	});
 
-	pi.on("session_shutdown", async (event, ctx) => {
-		// Detached + unref: shutdown must never block on the observe call.
-		observeDetached(
-			{
-				hook_event_name: "SessionEnd",
-				session_id: sessionId(ctx),
-				cwd: ctx.cwd,
-				reason: event.reason,
-			},
-			ctx,
-		);
+	pi.on("session_shutdown", (event, ctx) => {
+		const hookMeta = meta(ctx);
+		client.observeDetached(hookMeta, { hook_event_name: "stop", reason: event.reason });
+		sync.flush(hookMeta);
+		sync.dispose();
+		startedAt.clear();
 	});
+}
+
+export default function boostExtension(pi: ExtensionAPI): void {
+	createBoostExtension(pi);
 }

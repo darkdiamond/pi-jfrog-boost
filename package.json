@@ -1,49 +1,62 @@
 {
-  "name": "pi-jfrog-boost",
-  "version": "0.1.0",
-  "description": "JFrog Boost integration for the pi coding agent — compresses noisy tool output to save tokens and context",
-  "type": "module",
-  "license": "MIT",
-  "keywords": [
-    "pi-package",
-    "pi",
-    "jfrog",
-    "boost",
-    "token-optimization",
-    "agent",
-    "hooks"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/darkdiamond/pi-jfrog-boost.git"
-  },
-  "homepage": "https://github.com/darkdiamond/pi-jfrog-boost#readme",
-  "bugs": "https://github.com/darkdiamond/pi-jfrog-boost/issues",
-  "engines": {
-    "node": ">=20"
-  },
-  "files": [
-    "src",
-    "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
-  ],
-  "scripts": {
-    "check": "tsc --noEmit",
-    "build": "echo 'nothing to build' — pi loads TypeScript directly via jiti",
-    "clean": "rm -rf node_modules package-lock.json"
-  },
-  "pi": {
-    "extensions": [
-      "src/index.ts"
-    ]
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
-  }
+	"name": "pi-jfrog-boost",
+	"version": "0.1.0",
+	"description": "JFrog Boost integration for the pi coding agent — compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
+	"type": "module",
+	"license": "MIT",
+	"author": "Tzahi <zilbert@gmail.com>",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"jfrog",
+		"boost",
+		"token-optimization",
+		"agent",
+		"hooks"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/darkdiamond/pi-jfrog-boost.git"
+	},
+	"homepage": "https://github.com/darkdiamond/pi-jfrog-boost#readme",
+	"bugs": "https://github.com/darkdiamond/pi-jfrog-boost/issues",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"files": [
+		"src",
+		"skills",
+		"README.md",
+		"LICENSE",
+		"CHANGELOG.md"
+	],
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"scripts": {
+		"format": "biome check --write .",
+		"lint": "biome ci .",
+		"typecheck": "tsc --noEmit",
+		"test": "node --test \"test/*.test.ts\"",
+		"check": "npm run lint && npm run typecheck && npm test",
+		"prepublishOnly": "npm run check"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.14",
+		"@earendil-works/pi-coding-agent": "0.85.1",
+		"@types/node": "^22.10.0",
+		"typescript": "^5.7.0"
+	}
 }
