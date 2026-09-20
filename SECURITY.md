@@ -33,10 +33,13 @@ must not pass through a filter.
 ## Supply chain
 
 Releases are published from tagged commits by
-[a GitHub Actions workflow](.github/workflows/publish.yml) with
-[npm provenance](https://docs.npmjs.com/generating-provenance-statements), so
-every tarball is cryptographically linked to the commit and run that produced
-it. Verify with:
+[a GitHub Actions workflow](.github/workflows/publish.yml) using
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers). npm accepts
+releases only from this repository via that workflow, authenticated by a
+short-lived OIDC credential — no long-lived publish token exists in the repo's
+secrets. Every tarball carries
+[provenance](https://docs.npmjs.com/generating-provenance-statements) linking it
+to the commit and run that produced it. Verify with:
 
 ```sh
 npm audit signatures

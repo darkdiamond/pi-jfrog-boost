@@ -17,7 +17,9 @@ jobs:
     environment: npm
     permissions:
       contents: read
-      # Required for npm provenance.
+      # Required for npm trusted publishing: GitHub mints the OIDC token that
+      # npm exchanges for a short-lived publish credential. Also what makes
+      # provenance automatic.
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +37,11 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package version $version" >&2
             exit 1
           fi
+      # No NODE_AUTH_TOKEN: this package publishes through npm trusted
+      # publishing, configured at npmjs.com against this repository and this
+      # workflow filename. There is no long-lived write token to leak or
+      # rotate, and npm attaches provenance on its own.
+      #
+      # Requires npm >= 11.5.1 and Node >= 22.14.0, both satisfied by the
+      # Node 24 pinned above.
       - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
