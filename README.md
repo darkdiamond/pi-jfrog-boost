@@ -9,6 +9,7 @@
 [![npm](https://img.shields.io/npm/v/pi-jfrog-boost?logo=npm&color=cb3837)](https://www.npmjs.com/package/pi-jfrog-boost)
 [![CI](https://github.com/darkdiamond/pi-jfrog-boost/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/darkdiamond/pi-jfrog-boost/actions/workflows/ci.yml)
 [![provenance](https://img.shields.io/badge/provenance-attested-2ea44f?logo=github)](https://search.sigstore.dev/?q=pi-jfrog-boost)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/darkdiamond/pi-jfrog-boost/badge)](https://scorecard.dev/viewer/?uri=github.com/darkdiamond/pi-jfrog-boost)
 [![node](https://img.shields.io/node/v/pi-jfrog-boost?logo=nodedotjs&color=5fa04e)](https://nodejs.org)
 [![license](https://img.shields.io/npm/l/pi-jfrog-boost?color=blue)](./LICENSE)
 [![install size](https://img.shields.io/badge/dependencies-none-2ea44f)](./package.json)

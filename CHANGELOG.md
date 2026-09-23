@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No runtime changes; this is release and repository hardening.
+
+### Changed
+
+- Releases go through [npm staged publishing](https://docs.npmjs.com/cli/commands/npm-stage):
+  CI stages the tarball and a maintainer approves it with 2FA once npm's
+  malware scan has passed. CI cannot ship a version on its own.
+- The `npm` deployment environment requires a maintainer's approval and accepts
+  only `v*` tags.
+- `.npmrc` sets npm v12's install-time policy explicitly: no git or remote-URL
+  dependencies, and an install fails on any package whose install scripts have
+  not been reviewed in `allowScripts`. The three dev-tree packages that ship
+  scripts (`esbuild`, `protobufjs`, `@google/genai`) are denied; nothing needs
+  them.
+- Every workflow action is pinned to a full commit SHA, checkouts no longer
+  persist credentials, and the release job restores no cache.
+- Dependabot waits seven days before proposing a new release (security updates
+  are exempt) and groups GitHub Actions updates.
+
+### Added
+
+- CodeQL (TypeScript and workflows), zizmor and OpenSSF Scorecard scanning.
+- Dependency review on pull requests, and `npm audit signatures` in CI and before
+  every release.
+- `CODEOWNERS`.
+
 ## [0.2.3] - 2026-09-20
 
 No runtime changes. This release exists to exercise the publish path end to end
