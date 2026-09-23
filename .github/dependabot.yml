@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Let a new release age a week before proposing it, so a compromised
+    # version is usually caught and pulled first. Security updates ignore
+    # this and arrive immediately.
+    cooldown:
+      default-days: 7
     # Dev-only tree; group them so one PR covers a week's drift.
     groups:
       dev-dependencies:
@@ -12,3 +17,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

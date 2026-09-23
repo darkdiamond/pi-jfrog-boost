@@ -39,11 +39,29 @@ CI runs the suite on Linux and Windows across Node 22.19 and 24.
 
 1. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
 2. Merge to `main` with CI green.
-3. Tag `vX.Y.Z` and push it. The publish workflow re-runs the full matrix,
-   checks the tag matches `package.json`, and publishes.
+3. Tag `vX.Y.Z` and push it. The publish workflow re-runs the full matrix and
+   checks the tag matches `package.json`.
+4. Approve the `npm` environment deployment in the workflow run.
+5. The job *stages* the release. Once npm's malware scan finishes, approve it
+   at npmjs.com (package → Versions → Staged) or with
+   `npm stage list pi-jfrog-boost` and `npm stage approve <id>`. Either way
+   you'll get a 2FA prompt. Inspect the tarball first with
+   `npm stage download <id>` if you want to.
 
-Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers):
-npm is configured to accept releases from this repository via
-`.github/workflows/publish.yml`, and the OIDC token GitHub mints for that run is
-exchanged for a short-lived credential. There is no publish token in the repo's
-secrets, and npm attaches provenance on its own.
+Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers)
+in stage-only mode. npm accepts a staged release only from this repository, via
+`.github/workflows/publish.yml`, in the `npm` environment. There is no publish
+token anywhere, and npm attaches provenance on its own. See
+[SECURITY.md](SECURITY.md#supply-chain) for the full chain.
+
+## Dependencies
+
+`.npmrc` rejects git and remote-URL dependencies, and it fails the install on
+any package whose install scripts haven't been reviewed. If a dependency update
+adds one, CI fails with `install scripts not covered by allowScripts`. Check
+what the script does, then record your decision:
+
+```sh
+npm install-scripts deny <pkg>      # the default answer: nothing here needs them
+npm install-scripts approve <pkg>   # only if something breaks without it
+```

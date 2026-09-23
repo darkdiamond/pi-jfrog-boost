@@ -7,27 +7,44 @@ on:
 permissions:
   contents: read
 
+# Never run two releases at once, and never cancel one halfway.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   ci:
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
 
   publish:
     needs: ci
     runs-on: ubuntu-latest
-    environment: npm
+    # The `npm` environment is limited to v* tags and needs a maintainer's
+    # approval before this job starts. npm's trusted-publisher config names
+    # it, so an OIDC token minted outside it is refused.
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/pi-jfrog-boost
     permissions:
       contents: read
-      # Required for npm trusted publishing: GitHub mints the OIDC token that
-      # npm exchanges for a short-lived publish credential. Also what makes
-      # provenance automatic.
-      id-token: write
+      # GitHub mints the OIDC token that npm exchanges for a short-lived
+      # credential. Also what makes provenance automatic.
+      id-token: write # npm trusted publishing
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No `cache:` here on purpose: a release must not restore anything
+      # another workflow could have written.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
-          cache: npm
+          package-manager-cache: false
+      - name: Require npm with staged publishing
+        run: |
+          npm --version
+          node -e 'const [a,b]=process.argv[1].split(".").map(Number); if (a<11||(a===11&&b<15)) { console.error("npm >= 11.15.0 is required for npm stage publish"); process.exit(1) }' "$(npm --version)"
       - run: npm ci
       - name: Verify the tag matches package.json
         run: |
@@ -37,11 +54,14 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package version $version" >&2
             exit 1
           fi
-      # No NODE_AUTH_TOKEN: this package publishes through npm trusted
-      # publishing, configured at npmjs.com against this repository and this
-      # workflow filename. There is no long-lived write token to leak or
-      # rotate, and npm attaches provenance on its own.
+      - run: npm audit signatures
+      # Staged publishing: the tarball, with provenance, goes to npm's stage
+      # queue and is not installable until a maintainer approves it on
+      # npmjs.com or with `npm stage approve`. Both require a 2FA challenge,
+      # and npm allows approval only after its malware scan finishes. A stolen
+      # CI run can therefore stage a release but never ship one.
       #
-      # Requires npm >= 11.5.1 and Node >= 22.14.0, both satisfied by the
-      # Node 24 pinned above.
-      - run: npm publish
+      # No NODE_AUTH_TOKEN. The trusted-publisher config at npmjs.com allows
+      # staging only (not direct publish) from this repository, this workflow
+      # file and the `npm` environment.
+      - run: npm stage publish

@@ -1,7 +1,7 @@
 {
 	"name": "pi-jfrog-boost",
 	"version": "0.2.3",
-	"description": "JFrog Boost integration for the pi coding agent \u2014 compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
+	"description": "JFrog Boost integration for the pi coding agent — compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
 	"author": "DarkDiamonD (https://github.com/darkdiamond)",
@@ -60,5 +60,10 @@
 		"@types/node": "^22.10.0",
 		"typescript": "^5.7.0"
 	},
-	"funding": "https://github.com/sponsors/darkdiamond"
+	"funding": "https://github.com/sponsors/darkdiamond",
+	"allowScripts": {
+		"@google/genai": false,
+		"esbuild": false,
+		"protobufjs": false
+	}
 }
