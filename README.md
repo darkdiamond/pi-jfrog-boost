@@ -26,14 +26,19 @@ pi install npm:pi-jfrog-boost
 
 | pi tool | What Boost does |
 |---|---|
-| `bash`, `powershell` | Compacts the command's output |
-| `read` | Compacts file contents; retries PDFs and Office files through `boost read`, which pi cannot open at all |
+| `bash`, `powershell` | Compacts the command's output, failing commands included |
+| `read` | Compacts file contents; converts PDFs and Office files through `boost read`, which pi can only return as raw bytes |
 | `grep`, `find`, `ls` | Compacts the results |
 | `edit`, `write` | Nothing — pi already summarises these as diffs |
 
-On top of that the extension adds a short block to the system prompt telling the
-model how to use `boost retrieve`, ships a `boost` skill with the longer version,
-and runs `boost sync` when the agent goes idle so `boost report` has data.
+pi's own trailing notices — `Use offset=2001 to continue`, `Full output: /tmp/…`,
+`Command exited with code 1` — are kept verbatim, so compaction never costs the
+model its way to the rest of the output.
+
+On top of that the extension adds a short section to the system prompt telling
+the model how to use `boost retrieve`, ships a `boost` skill with the longer
+version, shows a running estimate of the tokens saved in pi's footer, and runs
+`boost sync` when the agent goes idle so `boost report` has data.
 
 **Fail-open by design.** If Boost is missing, too old, slow, or silent, every
 tool result passes through untouched. A broken Boost cannot break your session.
@@ -141,20 +146,25 @@ recorded as pi's.
 1. **`tool_result`** pipes the output of a covered tool through Boost's stdin
    filter, tagged with the shell command it stands in for (`ls -la <path>` for
    the `ls` tool, and so on) because Boost's filters key on commands. If Boost
-   returns something shorter, that replaces the text the model sees.
-2. **A failed `read` of a document** is retried through `boost read`, which can
-   extract text from PDFs and Office files that pi rejects as binary. The result
-   is marked as converted so the model does not cite its line numbers as source
-   lines.
-3. **`before_agent_start`** adds a short block to the system prompt about
-   `boost retrieve <id>`.
+   returns something shorter, that replaces the text the model sees. pi's
+   trailing notices are split off first and put back afterwards. Commands
+   carrying `DISABLE_BOOST=1`, and commands that run `boost` themselves, are
+   passed through untouched — the same rules Boost's OpenCode plugin applies.
+2. **A `read` of a PDF or Office file** is converted through `boost read`. pi
+   special-cases only images, so on its own it hands the model the file's raw
+   bytes. The result is marked as converted so the model does not cite its line
+   numbers as source lines.
+3. **`before_agent_start`** sets a `jfrog-boost` system prompt section about
+   `boost retrieve <id>`. pi diffs named sections, so an unchanged one keeps the
+   provider's prompt cache.
 4. **`boost sync`** runs 8 seconds after the agent goes idle, flushed
    immediately on shutdown, so measurements reach `boost report`.
 
 The trade-off of using only agent-neutral surfaces is that output is filtered
-after a tool runs rather than streamed through Boost while it runs. That is the
-same trade-off Boost's own OpenCode plugin makes on Windows, and pi bounds tool
-output before handing it over anyway.
+after a tool runs rather than streamed through Boost while it runs. In practice
+little is lost: on POSIX, `boost rewrite` turns a command into
+`(cmd) | boost`, the very stdin filter used here, and pi bounds tool output
+before handing it over anyway.
 
 Filter calls have a 15-second kill timeout and a 4 MiB ceiling; anything larger,
 binary, or empty is passed straight through. `boost sync` is detached and
@@ -175,7 +185,7 @@ that package, not pi, so there is nothing stable to key on.
 - Nothing is installed, and no configuration is written, without you asking.
 - Boost wraps commands; it does not sandbox them. Its redaction is best effort,
   not a security boundary.
-- As with any pi package, read the source before installing. It is under 900
+- As with any pi package, read the source before installing. It is about 1,000
   lines across seven files, with no runtime dependencies.
 
 ## Development

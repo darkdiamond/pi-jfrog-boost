@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { equivalentCommand, isDocument, isFiltered } from "../src/tools.ts";
+import { bypassesBoost, equivalentCommand, isDocument, isFiltered } from "../src/tools.ts";
 
 test("every tool whose output can be noisy is filtered", () => {
 	for (const tool of ["bash", "powershell", "read", "grep", "find", "ls"]) {
@@ -39,6 +39,43 @@ test("arguments that could change a command's meaning are quoted", () => {
 
 test("a quote in an argument cannot close the quoting", () => {
 	assert.equal(equivalentCommand("grep", { pattern: "it's", path: "." }), `grep -rn 'it'\\''s' .`);
+});
+
+test("pi's grep options carry over to the equivalent command", () => {
+	assert.equal(
+		equivalentCommand("grep", {
+			pattern: "todo",
+			path: "src",
+			ignoreCase: true,
+			literal: true,
+			glob: "*.ts",
+		}),
+		"grep -rniF --include='*.ts' todo src",
+	);
+});
+
+test("commands that opt out or already run Boost bypass the filter", () => {
+	for (const command of [
+		"DISABLE_BOOST=1 diff -u a b",
+		"make && DISABLE_BOOST=1 cat out.txt",
+		"$env:DISABLE_BOOST=1; Get-Content a.txt",
+		"boost retrieve 12 --query timeout",
+		"npm test | boost",
+	]) {
+		assert.equal(bypassesBoost(command), true, command);
+	}
+});
+
+test("ordinary commands, including ones that mention boost, are filtered", () => {
+	for (const command of [
+		"npm test",
+		"grep -rn boost src",
+		"cat boost.toml",
+		"DISABLE_BOOST=0 ls",
+		undefined,
+	]) {
+		assert.equal(bypassesBoost(command), false, String(command));
+	}
 });
 
 test("documents Boost can convert are recognised, case-insensitively", () => {

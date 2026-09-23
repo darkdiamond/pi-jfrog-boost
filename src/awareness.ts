@@ -9,8 +9,11 @@
  *
  * Keep it short: it is paid for on every single turn.
  */
-export const BOOST_AWARENESS = `<jfrog-boost>
-JFrog Boost is compacting this session's tool output. It covers \`bash\`,
+
+/** The system prompt section name; pi wraps the body as `<jfrog-boost>…</jfrog-boost>`. */
+export const AWARENESS_SECTION = "jfrog-boost";
+
+export const AWARENESS_BODY = `JFrog Boost is compacting this session's tool output. It covers \`bash\`,
 \`powershell\`, \`read\`, \`grep\`, \`find\`, and \`ls\`; results are filtered after the
 tool runs, so what you see may be shorter than what the command printed.
 
@@ -19,17 +22,20 @@ tool runs, so what you see may be shorter than what the command printed.
   detail it dropped, run that command instead of re-running the original tool.
   \`boost retrieve <id> --query "…"\` searches the cached output and
   \`boost retrieve <id> --lines 10-40\` prints a range.
-- pi's \`read\` rejects Office files (.docx, .xlsx, .pptx and similar) as binary.
-  Those are retried through Boost automatically; \`boost read <path>\` does it on
-  demand.
+- pi's \`read\` cannot decode PDFs or Office files (.docx, .xlsx, .pptx and
+  similar). Reading one is converted through Boost automatically;
+  \`boost read <path>\` does it on demand.
 - Never prefix a command with \`boost\` yourself.
 - Prefix a command with \`DISABLE_BOOST=1\` when it must return exact, unfiltered
   output.
 - Boost wraps commands, it does not sandbox them. Redaction is best effort, not
-  a security boundary.
-</jfrog-boost>`;
+  a security boundary.`;
+
+export const BOOST_AWARENESS = `<${AWARENESS_SECTION}>\n${AWARENESS_BODY}\n</${AWARENESS_SECTION}>`;
 
 /** Append the awareness block to a system prompt. */
 export function withAwareness(systemPrompt: string): string {
-	return systemPrompt.includes("<jfrog-boost>") ? systemPrompt : `${systemPrompt}\n\n${BOOST_AWARENESS}`;
+	return systemPrompt.includes(`<${AWARENESS_SECTION}>`)
+		? systemPrompt
+		: `${systemPrompt}\n\n${BOOST_AWARENESS}`;
 }

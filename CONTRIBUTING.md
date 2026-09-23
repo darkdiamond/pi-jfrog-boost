@@ -10,6 +10,8 @@ pi -e ./src/index.ts          # run pi against the working tree
 
 You'll want the [Boost CLI](https://boost.jfrog.com/) installed to exercise
 anything end to end. The unit tests don't need it — they drive stand-in binaries.
+With it installed, `npm run test:e2e` runs pi's real tools through the real
+extension and Boost binary.
 
 ## House rules
 
@@ -33,7 +35,17 @@ process behaviour (timeouts, non-zero exits, a boost that closes stdin early)
 drives a real child process, because a stubbed `spawn` would only prove the stub
 works. Those are POSIX-only and skip on Windows.
 
-CI runs the suite on Linux and Windows across Node 22.19 and 24.
+`test/e2e.test.ts` is the exception to stand-ins: pi's real `read`, `bash`, and
+`find` tools, the real extension, and the real Boost binary. It checks the
+assumptions everything else rests on — what pi's tools actually return, what
+Boost actually does with it — and asserts only what this integration
+guarantees, not how much a given Boost release compresses. It skips when Boost
+is not installed; `npm run test:e2e` makes a missing Boost a failure instead.
+Run it before a release, and whenever pi or Boost changes version.
+
+CI runs the suite on Linux and Windows across Node 22.19 and 24. The Boost
+installer asks the user to accept JFrog's preview agreement, so CI cannot
+install Boost and the end-to-end suite skips there.
 
 ## Releasing
 

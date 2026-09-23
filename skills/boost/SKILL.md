@@ -26,8 +26,9 @@ tokens, not to undo the compaction.
 
 ## Reading documents
 
-pi's `read` tool rejects PDFs and Office files as binary. A failed read of one
-is retried through Boost automatically, but you can also ask directly:
+pi's `read` tool cannot decode PDFs or Office files — on its own it returns their
+raw bytes. Reading one is converted through Boost automatically, but you can
+also ask directly:
 
 ```sh
 boost read ./quarterly-report.xlsx
@@ -45,6 +46,7 @@ DISABLE_BOOST=1 diff -u expected.txt actual.txt
 ```
 
 Start pi with `DISABLE_BOOST=1` to turn the integration off for a whole session.
+`boost` commands themselves, such as `boost retrieve`, are never compacted.
 
 ## Measuring and diagnosing
 

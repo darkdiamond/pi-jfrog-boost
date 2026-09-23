@@ -39,6 +39,7 @@
 		"lint": "biome ci .",
 		"typecheck": "tsc --noEmit",
 		"test": "node --test \"test/*.test.ts\"",
+		"test:e2e": "PI_BOOST_E2E=1 node --test test/e2e.test.ts",
 		"check": "npm run lint && npm run typecheck && npm test",
 		"prepublishOnly": "npm run check"
 	},

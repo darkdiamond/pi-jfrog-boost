@@ -1,3 +1,4 @@
 # Keep checkouts byte-identical across platforms: the Windows CI leg runs the
 # same formatter check as Linux, and CRLF would fail every file.
 * text=auto eol=lf
+*.docx binary

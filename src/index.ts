@@ -9,8 +9,8 @@
  *   ------------------  ----------------  ----------------------------------
  *   tool_result         stdin filter      bash/powershell/read/grep/find/ls
  *                                         output compacted
- *   tool_result (read)  boost read        text pulled out of documents pi
- *                                         cannot read
+ *   tool_result (read)  boost read        text pulled out of PDFs and Office
+ *                                         files pi decodes as raw bytes
  *   before_agent_start  (none)            teaches the model `boost retrieve`
  *   agent_end/shutdown  boost sync        uploads what Boost measured
  *
@@ -19,12 +19,30 @@
  * runtime, for one command or a whole session.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { withAwareness } from "./awareness.ts";
+import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
 import { type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
-import { type ContentBlock, textOf, truncateForObserve, withText } from "./content.ts";
+import {
+	type ContentBlock,
+	looksBinary,
+	splitNotices,
+	textOf,
+	truncateForObserve,
+	withText,
+} from "./content.ts";
 import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
 import { createSyncScheduler } from "./sync.ts";
-import { equivalentCommand, isDocument, isFiltered } from "./tools.ts";
+import { bypassesBoost, equivalentCommand, isDocument, isFiltered, isShell } from "./tools.ts";
+
+/** Footer slot for the running savings estimate. */
+const STATUS_KEY = "jfrog-boost";
+/** The usual rule of thumb for English text and code. */
+const CHARS_PER_TOKEN = 4;
+
+function formatTokens(tokens: number): string {
+	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+	if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+	return `${Math.round(tokens)}`;
+}
 
 export interface BoostExtensionDeps {
 	/** Injected by tests; defaults to a client talking to the real Boost binary. */
@@ -45,6 +63,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	/** Each notice is worth saying once per process, not once per session. */
 	let missingNoticeShown = false;
 	let observeNoticeShown = false;
+	/** Characters Boost removed from this session's tool output. */
+	let savedChars = 0;
 
 	registerInstallCommand(pi, client);
 
@@ -57,6 +77,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	pi.on("session_start", (_event, ctx) => {
 		hint = undefined;
 		lastAssistantText = "";
+		savedChars = 0;
+		try {
+			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+		} catch {
+			/* fail open */
+		}
 
 		// Without a binary there is nothing else to say, this session or any later
 		// one, so this returns whether or not the notice has already been shown.
@@ -95,6 +121,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		if (!(await client.ready())) return;
 		const line = hint;
 		hint = undefined;
+		// A named section is diffed against what the model already has, so an
+		// unchanged block keeps the provider's prompt cache. Replacing the whole
+		// prompt is the fallback for pi releases without structured sections.
+		const sections = event.systemPromptOptions?.sections;
+		if (sections) {
+			sections[AWARENESS_SECTION] = line ? `${AWARENESS_BODY}\n\n${line}` : AWARENESS_BODY;
+			return;
+		}
 		const systemPrompt = withAwareness(event.systemPrompt);
 		return { systemPrompt: line ? `${systemPrompt}\n\n${line}` : systemPrompt };
 	});
@@ -114,33 +148,40 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		const hookMeta = meta(ctx, event.toolCallId);
 		const text = textOf(event.content);
 		try {
-			if (event.isError) {
-				// pi's `read` rejects Office files and PDFs as binary. Boost can
-				// often extract them, so a failed document read is worth retrying
-				// through it rather than handing the model an error.
-				if (event.toolName === "read" && isDocument(event.input.path)) {
-					const extracted = await client.read(hookMeta, event.input.path);
-					if (extracted) {
-						return {
-							isError: false,
-							content: withText(
-								event.content,
-								`Boost extracted this document; line numbers are not source lines.\n\n${extracted}`,
-							),
-						};
-					}
-				}
-				return;
+			// pi's `read` special-cases only images: a PDF or Office file comes
+			// back as its raw bytes decoded as UTF-8, or as an error. Boost can
+			// extract the text, which is worth far more to the model than either.
+			if (event.toolName === "read" && isDocument(event.input.path) && (event.isError || looksBinary(text))) {
+				const extracted = await client.read(hookMeta, event.input.path);
+				if (!extracted) return;
+				return {
+					isError: false,
+					content: withText(
+						event.content,
+						`Boost extracted this document; line numbers are not source lines.\n\n${extracted}`,
+					),
+				};
 			}
 
+			// A failing test run or build is the noisiest output there is, so
+			// shell failures are compacted too; they stay marked as errors. Other
+			// tools fail with a one-line message that is not worth a round trip.
+			if (event.isError && !isShell(event.toolName)) return;
 			if (!isFiltered(event.toolName) || !text) return;
+			if (isShell(event.toolName) && bypassesBoost(event.input.command)) return;
+
+			const { body, notices } = splitNotices(text);
+			if (!body.trim()) return;
 			const command = equivalentCommand(event.toolName, event.input);
 			const filtered = await client.filter(
 				hookMeta,
 				command ? { ...event.input, command } : event.input,
-				text,
+				body,
 			);
-			if (filtered) return { content: withText(event.content, filtered) };
+			if (!filtered) return;
+			const replacement = notices ? `${filtered.trimEnd()}${notices}` : filtered;
+			recordSavings(ctx, text.length - replacement.length);
+			return { content: withText(event.content, replacement) };
 		} catch {
 			/* fail open: keep the original result */
 		} finally {
@@ -148,6 +189,22 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 		return;
 	});
+
+	/**
+	 * Keep a running total in pi's footer, so it is visible that Boost is doing
+	 * something without leaving the session. An estimate — `boost report -t`
+	 * has the measured numbers.
+	 */
+	function recordSavings(ctx: ExtensionContext, chars: number): void {
+		if (chars <= 0) return;
+		savedChars += chars;
+		try {
+			if (ctx.hasUI)
+				ctx.ui.setStatus(STATUS_KEY, `boost ~${formatTokens(savedChars / CHARS_PER_TOKEN)} saved`);
+		} catch {
+			/* fail open: a status line is never worth an error */
+		}
+	}
 
 	/** Lifecycle telemetry, only when the user opted in. See `observeEnabled`. */
 	function reportToolResult(
