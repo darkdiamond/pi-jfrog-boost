@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	type ContentBlock,
+	looksBinary,
 	OBSERVE_TEXT_LIMIT,
+	splitNotices,
 	textOf,
 	truncateForObserve,
 	withText,
@@ -56,4 +58,39 @@ test("text at or under the limit is passed through untouched", () => {
 	assert.equal(truncateForObserve("short"), "short");
 	const exact = "x".repeat(OBSERVE_TEXT_LIMIT);
 	assert.equal(truncateForObserve(exact), exact);
+});
+
+test("pi's trailing notices are split off, in order", () => {
+	const text =
+		"out\n\n[Showing lines 1-5 of 9. Full output: /tmp/pi-bash-1.log]\n\nCommand exited with code 2";
+	assert.deepEqual(splitNotices(text), {
+		body: "out",
+		notices: "\n\n[Showing lines 1-5 of 9. Full output: /tmp/pi-bash-1.log]\n\nCommand exited with code 2",
+	});
+});
+
+test("every pi notice shape is recognised", () => {
+	for (const notice of [
+		"[Showing lines 1-2000 of 5000 (50.0KB limit). Use offset=2001 to continue.]",
+		"[12 more lines in file. Use offset=41 to continue.]",
+		"[100 matches limit reached. Use limit=200 for more, or refine pattern]",
+		"[500 entries limit reached. Use limit=1000 for more]",
+		"Command timed out after 30 seconds",
+		"Command aborted",
+		"Command terminated without an exit code",
+	]) {
+		assert.equal(splitNotices(`body\n\n${notice}`).body, "body", notice);
+	}
+});
+
+test("brackets inside the body are not mistaken for notices", () => {
+	const text = "[INFO] build\n\n[WARN] deprecated\nmore output";
+	assert.deepEqual(splitNotices(text), { body: text, notices: "" });
+});
+
+test("raw document bytes look binary; text does not", () => {
+	assert.equal(looksBinary("%PDF-1.5\n\u0000\u0001stream"), true);
+	assert.equal(looksBinary("����ab"), true);
+	assert.equal(looksBinary("name,total\nalice,3\n"), false);
+	assert.equal(looksBinary(""), false);
 });

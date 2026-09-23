@@ -19,8 +19,9 @@
 const FILTERED: ReadonlySet<string> = new Set(["bash", "powershell", "read", "grep", "find", "ls"]);
 
 /**
- * Files Boost can convert to Markdown. pi's `read` rejects most of these as
- * binary, so a failed read is the signal to try `boost read` instead.
+ * Files Boost can convert to Markdown. pi's `read` decodes the binary ones as
+ * UTF-8 garbage rather than failing, so a binary-looking or failed read of one
+ * is the signal to try `boost read` instead.
  */
 const DOCUMENTS: ReadonlySet<string> = new Set([
 	".csv",
@@ -39,8 +40,33 @@ const DOCUMENTS: ReadonlySet<string> = new Set([
 	".xlsx",
 ]);
 
+/** Shell tools, whose failures are still worth compacting — think failing test runs. */
+const SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
+
+/** A command that already runs Boost: `boost retrieve 12`, `… | boost`. */
+const RUNS_BOOST = /(?:^|[|;&(]\s*)boost(?:\.exe)?(?:\s|$)|\|\s*boost(?:\.exe)?(?:\s|[;&)]|$)/i;
+/** The per-command opt-out: `DISABLE_BOOST=1 cmd`, or PowerShell's `$env:DISABLE_BOOST=1`. */
+const OPTED_OUT = /(?:^|\s)DISABLE_BOOST=1(?:\s|$)|\$env:DISABLE_BOOST\s*=\s*['"]?1['"]?/i;
+
 export function isFiltered(toolName: string): boolean {
 	return FILTERED.has(toolName);
+}
+
+export function isShell(toolName: string): boolean {
+	return SHELLS.has(toolName);
+}
+
+/**
+ * Whether a shell command's output must reach the model as it was printed.
+ *
+ * pi's shell runs in its own process, so `DISABLE_BOOST=1` in a command never
+ * reaches this extension's environment; it has to be spotted in the command
+ * text. Boost's own commands are skipped too — compacting `boost retrieve`
+ * would hand back another marker instead of the original. Both rules match
+ * Boost's OpenCode plugin.
+ */
+export function bypassesBoost(command: unknown): boolean {
+	return typeof command === "string" && (RUNS_BOOST.test(command) || OPTED_OUT.test(command));
 }
 
 /** Whether Boost might extract more from this path than pi's `read` can. */
@@ -77,8 +103,11 @@ export function equivalentCommand(
 			return `ls -la ${arg(input.path)}`;
 		case "find":
 			return `find ${arg(input.path)} -name ${arg(input.pattern, "*")}`;
-		case "grep":
-			return `grep -rn ${arg(input.pattern, "")} ${arg(input.path)}`;
+		case "grep": {
+			const flags = `-rn${input.ignoreCase === true ? "i" : ""}${input.literal === true ? "F" : ""}`;
+			const glob = typeof input.glob === "string" && input.glob ? ` --include=${arg(input.glob)}` : "";
+			return `grep ${flags}${glob} ${arg(input.pattern, "")} ${arg(input.path)}`;
+		}
 		default:
 			return undefined;
 	}

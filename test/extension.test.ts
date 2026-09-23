@@ -15,6 +15,8 @@ interface Recorded {
 	kind: "filter" | "read" | "observe" | "sync";
 	meta: HookMeta;
 	fields: HookPayload;
+	/** What the filter was handed, for filter calls. */
+	text?: string;
 }
 
 interface HarnessOptions {
@@ -28,6 +30,7 @@ function harness({ overrides = {}, filterResult, readResult, observeEnabled = tr
 	const handlers = new Map<string, Handler[]>();
 	const commands: string[] = [];
 	const notices: string[] = [];
+	const statuses: (string | undefined)[] = [];
 	const calls: Recorded[] = [];
 
 	const client: BoostClient = {
@@ -36,8 +39,8 @@ function harness({ overrides = {}, filterResult, readResult, observeEnabled = tr
 		binary: () => "/fake/boost",
 		refresh: () => {},
 		ready: async () => true,
-		filter: async (meta, toolInput, _text) => {
-			calls.push({ kind: "filter", meta, fields: toolInput });
+		filter: async (meta, toolInput, text) => {
+			calls.push({ kind: "filter", meta, fields: toolInput, text });
 			return filterResult;
 		},
 		read: async (meta, path) => {
@@ -65,7 +68,10 @@ function harness({ overrides = {}, filterResult, readResult, observeEnabled = tr
 		cwd: "/work",
 		hasUI: true,
 		sessionManager: { getSessionId: () => "sess-1" },
-		ui: { notify: (message: string) => notices.push(message) },
+		ui: {
+			notify: (message: string) => notices.push(message),
+			setStatus: (_key: string, text: string | undefined) => statuses.push(text),
+		},
 	} as unknown as ExtensionContext;
 
 	createBoostExtension(pi, { client, syncDelayMs: 5 });
@@ -78,7 +84,7 @@ function harness({ overrides = {}, filterResult, readResult, observeEnabled = tr
 		return results.at(-1);
 	};
 
-	return { fire, calls, commands, notices };
+	return { fire, calls, commands, notices, statuses };
 }
 
 const observed = (calls: Recorded[], name: string) =>
@@ -165,10 +171,102 @@ test("a document Boost also cannot extract stays an error", async () => {
 	);
 });
 
-test("a failed tool's output is never fed to the filter", async () => {
+test("a binary document pi decoded as garbage is replaced by Boost's extraction", async () => {
+	const { fire, calls } = harness({ readResult: "# Quarterly report" });
+	const patched = (await fire(
+		"tool_result",
+		result("read", {
+			input: { path: "/docs/q3.docx" },
+			content: [{ type: "text", text: "PK\u0003\u0004\u0000\u0000garbage" }],
+		}),
+	)) as { isError: boolean; content: { text: string }[] };
+	assert.equal(patched.isError, false);
+	assert.match(patched.content[0]?.text ?? "", /# Quarterly report/);
+	assert.equal(calls.find((c) => c.kind === "read")?.fields.path, "/docs/q3.docx");
+	assert.equal(calls.filter((c) => c.kind === "filter").length, 0, "garbage is never filtered");
+});
+
+test("a text document pi read fine is filtered, not converted", async () => {
+	const { fire, calls } = harness({ readResult: "converted", filterResult: "compacted" });
+	await fire(
+		"tool_result",
+		result("read", { input: { path: "data.csv" }, content: [{ type: "text", text: "a,b\n1,2" }] }),
+	);
+	assert.equal(calls.filter((c) => c.kind === "read").length, 0);
+	assert.equal(calls.filter((c) => c.kind === "filter").length, 1);
+});
+
+test("a failed shell command is still compacted, and stays an error", async () => {
+	const { fire, calls } = harness({ filterResult: "3 failures" });
+	const patched = await fire(
+		"tool_result",
+		result("bash", {
+			isError: true,
+			input: { command: "npm test" },
+			content: [{ type: "text", text: "…lots of test output…\n\nCommand exited with code 1" }],
+		}),
+	);
+	assert.deepEqual(patched, {
+		content: [{ type: "text", text: "3 failures\n\nCommand exited with code 1" }],
+	});
+	assert.equal(calls.find((c) => c.kind === "filter")?.text, "…lots of test output…");
+});
+
+test("other failed tools are not fed to the filter", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
-	await fire("tool_result", result("bash", { isError: true, input: { command: "false" } }));
+	await fire("tool_result", result("grep", { isError: true, input: { pattern: "(" } }));
 	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+});
+
+test("pi's continuation notices survive compaction verbatim", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted\n" });
+	const notice = "\n\n[Showing lines 1-2000 of 9000. Use offset=2001 to continue.]";
+	const patched = await fire(
+		"tool_result",
+		result("read", { input: { path: "big.log" }, content: [{ type: "text", text: `log lines${notice}` }] }),
+	);
+	assert.deepEqual(patched, { content: [{ type: "text", text: `compacted${notice}` }] });
+	assert.equal(calls.find((c) => c.kind === "filter")?.text, "log lines");
+});
+
+test("DISABLE_BOOST=1 on a command returns its output exactly", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted" });
+	for (const command of ["DISABLE_BOOST=1 diff -u a b", "cd x && DISABLE_BOOST=1 cat y"]) {
+		assert.equal(await fire("tool_result", result("bash", { input: { command } })), undefined, command);
+	}
+	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+});
+
+test("boost's own commands are not compacted a second time", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted" });
+	for (const command of ["boost retrieve 147", "boost retrieve 147 --lines 1-40", "boost read a.pdf"]) {
+		assert.equal(await fire("tool_result", result("bash", { input: { command } })), undefined, command);
+	}
+	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+});
+
+test("the footer shows a running estimate of what Boost saved", async () => {
+	const { fire, statuses } = harness({ filterResult: "short" });
+	await fire("session_start", { reason: "startup" });
+	await fire(
+		"tool_result",
+		result("bash", { input: { command: "npm test" }, content: [{ type: "text", text: "x".repeat(8005) }] }),
+	);
+	assert.equal(statuses.at(-1), "boost ~2.0k saved");
+	await fire("session_start", { reason: "new" });
+	assert.equal(statuses.at(-1), undefined, "a new session starts from zero");
+});
+
+test("the awareness block is a named prompt section when pi supports them", async () => {
+	const { fire } = harness();
+	const sections: Record<string, string> = {};
+	const patched = await fire("before_agent_start", {
+		systemPrompt: "base",
+		systemPromptOptions: { sections },
+	});
+	assert.equal(patched, undefined, "no whole-prompt replacement, so the prompt cache survives");
+	assert.match(sections["jfrog-boost"] ?? "", /boost retrieve <id>/);
+	assert.doesNotMatch(sections["jfrog-boost"] ?? "", /<jfrog-boost>/, "pi adds the tags itself");
 });
 
 test("the system prompt gains the Boost instructions and the daily tip", async () => {

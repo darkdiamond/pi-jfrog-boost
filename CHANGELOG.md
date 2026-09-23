@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-23
+
+### Fixed
+
+- PDFs and Office files read with `read` are converted through `boost read`.
+  pi does not reject them as binary, as earlier releases assumed: it returns
+  their raw bytes, so the conversion never ran and the model got garbage.
+- `DISABLE_BOOST=1 <command>` now returns exact output. pi runs the shell in
+  its own process, so the variable never reached the extension and the output
+  was compacted anyway.
+- `boost retrieve` and other commands that run Boost are no longer compacted a
+  second time, which replaced the recovered original with yet another marker.
+
+### Changed
+
+- Failed `bash` and `powershell` commands are compacted too, and stay errors.
+  A failing test run or build is the noisiest output there is.
+- pi's trailing notices (`Use offset=… to continue`, `Full output: …`,
+  `Command exited with code …`, `limit reached`) are split off before
+  filtering and restored verbatim, so they can never be dropped.
+- The awareness text is set as a `jfrog-boost` system prompt section where pi
+  supports it, so it is diffed rather than replacing the whole prompt and the
+  prompt cache survives. Older pi releases keep the previous behaviour.
+- `grep`'s `ignoreCase`, `literal`, and `glob` options are reflected in the
+  command Boost is told the output came from.
+
+### Added
+
+- A running estimate of the tokens Boost saved this session, in pi's footer.
+- An end-to-end suite (`test/e2e.test.ts`, `npm run test:e2e`) driving pi's
+  real tools through the extension and the real Boost binary. It skips where
+  Boost is not installed, which includes CI, and gives each run a throwaway
+  Boost history so it never counts towards Boost switching a filter off.
+
 ## [0.2.4] - 2026-09-23
 
 No runtime changes; this is release and repository hardening.
@@ -124,7 +158,8 @@ outside npm, so an actual release is the only test.
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.1...v0.2.2
