@@ -364,7 +364,7 @@ export interface PiStub {
 }
 
 /** A plain-text theme: `fg`/`bg`/`bold` return the text unchanged, so assertions see no ANSI. */
-const plainTheme = {
+export const plainTheme = {
 	fg: (_color: string, text: string) => text,
 	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,

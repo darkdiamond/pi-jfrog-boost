@@ -12,16 +12,41 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { type BoostClient, createBoostClient, type HookMeta, type HookPayload } from "../src/boost-client.ts";
 import type { ConfigReader } from "../src/boost-config.ts";
 import {
+	type Breaker,
+	type BreakerState,
 	type Counters,
 	createBreaker,
 	createCounters,
 	createReadiness,
 	type Readiness,
 } from "../src/health.ts";
-import { createBoostExtension, NO_BOOST_FLAG, TERMS_NOTICE } from "../src/index.ts";
+import {
+	createBoostExtension,
+	createNotices,
+	NO_BOOST_FLAG,
+	PROBE_UI_WAIT_MS,
+	TERMS_NOTICE,
+} from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
+import { STATS_ENTRY } from "../src/stats.ts";
+import {
+	filtersDisabledNotice,
+	MISSING_NOTICE,
+	type Notices,
+	pausedNotice,
+	SHELL_OFF_NOTICE,
+	tooOldNotice,
+} from "../src/status.ts";
 import { docx } from "./helpers/docx.ts";
-import { createPiStub, type PiLine, textOfBlocks, toolResultEvent } from "./helpers/harness.ts";
+import {
+	agentSettledEvent,
+	beforeAgentStartEvent,
+	createPiStub,
+	type PiLine,
+	plainTheme,
+	textOfBlocks,
+	toolResultEvent,
+} from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
 
 /**
@@ -131,6 +156,8 @@ function harness({
 		config,
 		readiness,
 		...(counters ? { counters } : {}),
+		// Each harness is its own process as far as once-only notices go.
+		notices: createNotices(),
 		syncDelayMs: 5,
 		firstTurnWaitMs: 50,
 	});
@@ -613,10 +640,11 @@ test("there is no tool_call handler: nothing can block a tool from running", () 
 test("the footer shows a running estimate of what Boost saved", async () => {
 	const { fire, statuses } = harness({ filterResult: "short" });
 	await fire("session_start", { reason: "startup" });
+	assert.equal(statuses.at(-1), "boost ✓");
 	await fire("tool_result", bashResult("npm test", "x".repeat(8005)));
-	assert.equal(statuses.at(-1), "boost ~2.0k saved");
+	assert.equal(statuses.at(-1), "boost ✓ ~2.0k saved (100%)");
 	await fire("session_start", { reason: "new" });
-	assert.equal(statuses.at(-1), undefined, "a new session starts from zero");
+	assert.equal(statuses.at(-1), "boost ✓", "a new session starts from zero");
 });
 
 test("the awareness block is a named prompt section when pi supports them", async () => {
@@ -649,8 +677,7 @@ test("a missing Boost is reported once, with the command that fixes it", async (
 	});
 	await fire("session_start", { reason: "startup" });
 	await fire("session_start", { reason: "new" });
-	assert.equal(notices.length, 1);
-	assert.match(notices[0] ?? "", /\/boost-install/);
+	assert.deepEqual(notices, [MISSING_NOTICE]);
 });
 
 test("tool telemetry is reported when opted in", async () => {
@@ -859,10 +886,12 @@ test("only the first turn waits for readiness, and at most the configured time",
 	await h.fire("session_start", { reason: "startup" });
 	assert.equal(await h.fire("before_agent_start", { systemPrompt: "base" }), undefined);
 	assert.equal(await h.fire("before_agent_start", { systemPrompt: "base" }), undefined);
-	assert.deepEqual(waits, [50], "the first turn waited once, bounded; the second did not wait");
+	// The UI's own wait for the probe (to paint what it settles on) is not a turn's.
+	const turnWaits = () => waits.filter((ms) => ms !== PROBE_UI_WAIT_MS);
+	assert.deepEqual(turnWaits(), [50], "the first turn waited once, bounded; the second did not wait");
 	await h.fire("session_start", { reason: "new" });
 	await h.fire("before_agent_start", { systemPrompt: "base" });
-	assert.deepEqual(waits, [50, 50], "a new session's first turn may wait again");
+	assert.deepEqual(turnWaits(), [50, 50], "a new session's first turn may wait again");
 });
 
 test("a first turn that waited past the probe gets the awareness section", async () => {
@@ -985,6 +1014,7 @@ function onStub(
 		settings: memorySettings({ env, ...(options.file ? { file: options.file } : {}) }),
 		config: fixedConfig(CLI_ON),
 		readiness: fixedReadiness(),
+		notices: createNotices(),
 	});
 	return { stub, used };
 }
@@ -1146,9 +1176,10 @@ test("loading the extension twice in one process keeps the two apart (reload)", 
 	const secondSoFar = second.used.length;
 	assert.ok(await first.stub.emitToolResult(failingBash("1.2")), "the first instance compacts");
 	assert.equal(second.used.length, secondSoFar, "nothing the first did reached the second's client");
-	const footer = (stub: typeof first.stub) => stub.ui.statuses.filter((s) => s.text).map((s) => s.text);
-	assert.equal(footer(first.stub).length, 1, "the first instance counted its saving");
-	assert.deepEqual(footer(second.stub), [], "the second saw none of it");
+	const footer = (stub: typeof first.stub) => stub.ui.statuses.at(-1)?.text;
+	const firstSaving = footer(first.stub);
+	assert.match(firstSaving ?? "", /saved/, "the first instance counted its saving");
+	assert.equal(footer(second.stub), "boost ✓", "the second saw none of it");
 
 	const before = first.used.length;
 	assert.ok(await second.stub.emitToolResult(failingBash("1.2")), "the second compacts on its own");
@@ -1156,7 +1187,8 @@ test("loading the extension twice in one process keeps the two apart (reload)", 
 	// A new session in one resets only that one.
 	await second.stub.fire("session_start", { type: "session_start", reason: "new" });
 	assert.ok(await first.stub.emitToolResult(failingBash("1.2")));
-	assert.equal(footer(first.stub).length, 2, "the first kept its running total");
+	assert.notEqual(footer(first.stub), firstSaving, "the first kept its running total, and added to it");
+	assert.match(footer(first.stub) ?? "", /saved/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1273,4 +1305,278 @@ test("a truncated result whose file is gone is compacted from pi's tail instead"
 	);
 	assert.equal(patched.content[0]?.text, `compacted\n\n[Showing lines 201-401 of 401. Full output: ${path}]`);
 	assert.equal(counters.skips()["full-unreadable"], 1);
+});
+
+// ---------------------------------------------------------------------------
+// Footer, notices, persisted stats and badges (spec §10.1, §10.3–§10.5)
+
+interface UiOptions {
+	line?: PiLine;
+	config?: string;
+	readiness?: Readiness;
+	breaker?: Breaker;
+	file?: Record<string, unknown>;
+	branch?: unknown[];
+	entries?: unknown[];
+	notices?: Notices;
+	client?: Partial<BoostClient>;
+	settings?: SettingsStore;
+}
+
+/** The extension on the shared stub with a UI, compacting every shell result it is sent. */
+function uiExtension(options: UiOptions = {}) {
+	const line = options.line ?? "1.2";
+	const stub = createPiStub({
+		line,
+		...(options.branch ? { branch: options.branch } : {}),
+		...(options.entries ? { entries: options.entries } : {}),
+	});
+	const settings = options.settings ?? memorySettings(options.file ? { file: options.file } : {});
+	const ext = createBoostExtension(stub.pi, {
+		client: stubClient({
+			filter: async () =>
+				call(
+					"3 failures\n[Boost compressed ~97%. Get the full original output simply with: boost retrieve 12]",
+				),
+			...options.client,
+		}),
+		env: {},
+		settings,
+		config: fixedConfig(options.config ?? CLI_ON),
+		readiness: options.readiness ?? fixedReadiness(),
+		...(options.breaker ? { breaker: options.breaker } : {}),
+		notices: options.notices ?? createNotices(),
+	});
+	const statusTexts = () => stub.ui.statuses.map((s) => s.text);
+	const noticeTexts = () => stub.ui.notices.map((n) => n.message);
+	return { stub, ext, settings, statusTexts, noticeTexts };
+}
+
+const start = (stub: ReturnType<typeof createPiStub>, reason = "startup") =>
+	stub.fire("session_start", { type: "session_start", reason });
+const settle = (stub: ReturnType<typeof createPiStub>) =>
+	stub.fire("agent_settled", agentSettledEvent(stub.line));
+
+test("the footer follows the state, painted only when its text changes", async () => {
+	const { stub, statusTexts } = uiExtension();
+	await start(stub);
+	assert.deepEqual(statusTexts(), ["boost ✓"]);
+	// Results that save nothing leave the footer as it is: no setStatus at all.
+	for (let i = 0; i < 3; i++) {
+		await stub.emitToolResult(
+			toolResultEvent("1.2", { toolName: "read", input: { path: "a.ts" }, content: "x" }),
+		);
+	}
+	await stub.fire("before_agent_start", beforeAgentStartEvent("1.2", { sections: {} }));
+	await settle(stub);
+	assert.deepEqual(statusTexts(), ["boost ✓"]);
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.equal(statusTexts().length, 2);
+	assert.match(statusTexts()[1] ?? "", /^boost ✓ ~1\.\dk saved \(\d+%\)$/);
+	assert.ok(stub.ui.statuses.every((s) => s.key === "jfrog-boost"));
+});
+
+test("with CLI filtering off the footer says so; with Boost missing or too old, it says that", async () => {
+	const off = uiExtension({ config: CLI_OFF });
+	await start(off.stub);
+	assert.deepEqual(off.statusTexts(), ["boost ✓ shell off"]);
+
+	const missing = uiExtension({
+		readiness: { ...fixedReadiness({ kind: "missing" }), binary: () => undefined },
+	});
+	await start(missing.stub);
+	assert.deepEqual(missing.statusTexts(), ["boost: not installed (/boost install)"]);
+
+	const old = uiExtension({ readiness: fixedReadiness({ kind: "too-old", version: [0, 12, 1] }) });
+	await start(old.stub);
+	assert.deepEqual(old.statusTexts(), ["boost: v0.12.1 too old"]);
+	assert.deepEqual(old.noticeTexts(), [tooOldNotice([0, 12, 1])]);
+});
+
+test("footer: false clears the slot", async () => {
+	const { stub, settings, statusTexts } = uiExtension();
+	await start(stub);
+	assert.deepEqual(statusTexts(), ["boost ✓"]);
+	settings.save({ footer: false });
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.deepEqual(statusTexts(), ["boost ✓", undefined]);
+
+	const never = uiExtension({ file: { footer: false } });
+	await start(never.stub);
+	await never.stub.emitToolResult(failingBash("1.2"));
+	assert.deepEqual(never.statusTexts(), [], "never shown, nothing to clear");
+});
+
+test("the shell-off notice comes on the first ready session with the gate off, once per process", async () => {
+	const notices = createNotices();
+	const first = uiExtension({ config: CLI_OFF, notices });
+	await start(first.stub);
+	await start(first.stub, "new");
+	// A reload builds a new instance; the process registry is shared.
+	const reloaded = uiExtension({ config: CLI_OFF, notices });
+	await start(reloaded.stub, "reload");
+	assert.deepEqual(first.noticeTexts(), [SHELL_OFF_NOTICE]);
+	assert.deepEqual(reloaded.noticeTexts(), []);
+
+	const chosen = uiExtension({ config: CLI_OFF, file: { shell: "off" } });
+	await start(chosen.stub);
+	assert.deepEqual(chosen.noticeTexts(), [], "the user turned it off; no need to say how to turn it on");
+	const on = uiExtension({ config: CLI_ON });
+	await start(on.stub);
+	assert.deepEqual(on.noticeTexts(), []);
+});
+
+test("filters Boost disabled after retrieves are announced once", async () => {
+	const notices = createNotices();
+	const config = `${CLI_ON}[filters]\ndisabled = ["npm-test"]\n`;
+	const a = uiExtension({ config, notices });
+	await start(a.stub);
+	await start(a.stub, "new");
+	assert.deepEqual(a.noticeTexts(), [filtersDisabledNotice(["npm-test"])]);
+});
+
+test("a missing Boost is announced once per process, across reloads", async () => {
+	const notices = createNotices();
+	const readiness = { ...fixedReadiness({ kind: "missing" }), binary: () => undefined };
+	const a = uiExtension({ readiness, notices });
+	const b = uiExtension({ readiness, notices });
+	await start(a.stub);
+	await start(b.stub, "reload");
+	assert.deepEqual([...a.noticeTexts(), ...b.noticeTexts()], [MISSING_NOTICE]);
+});
+
+test("when the breaker opens: the paused notice once, and the footer says paused", async () => {
+	let state: BreakerState = { kind: "closed" };
+	const breaker: Breaker = { allow: () => true, record: () => {}, reset: () => {}, state: () => state };
+	const { stub, statusTexts, noticeTexts } = uiExtension({ breaker });
+	await start(stub);
+	state = { kind: "open", until: Date.now() + 5 * 60_000, reason: "timeout" };
+	await stub.emitToolResult(failingBash("1.2"));
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.equal(statusTexts().at(-1), "boost: paused (slow)");
+	assert.deepEqual(noticeTexts(), [pausedNotice("timeout", 5)]);
+	// Re-opened later: the footer says it again; the notice was given.
+	state = { kind: "closed" };
+	await stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
+	assert.equal(statusTexts().at(-1), "boost ✓");
+	state = { kind: "open", until: Date.now() + 10 * 60_000, reason: "slow" };
+	await stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
+	assert.equal(statusTexts().at(-1), "boost: paused (slow)");
+	assert.equal(noticeTexts().length, 1);
+});
+
+/** The `jfrog-boost-stats` entries appended so far, as session entries. */
+const statsEntries = (stub: ReturnType<typeof createPiStub>) =>
+	stub.appended
+		.filter((a) => a.customType === STATS_ENTRY)
+		.map((a, i) => ({ type: "custom", id: `s${i}`, customType: a.customType, data: a.data }));
+
+test("stats are appended on settle and shutdown, only when they changed, numbers only", async () => {
+	const { stub } = uiExtension();
+	await start(stub);
+	await settle(stub);
+	assert.equal(statsEntries(stub).length, 0, "nothing happened, nothing written");
+	const patch = await stub.emitToolResult(failingBash("1.2"));
+	await settle(stub);
+	await settle(stub);
+	assert.equal(statsEntries(stub).length, 1, "one entry for the change, none for the idle settle");
+	await stub.emitToolResult(
+		toolResultEvent("1.2", { toolName: "bash", input: { command: "ls" }, content: "a" }),
+	);
+	await stub.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+	assert.equal(statsEntries(stub).length, 2, "shutdown writes what changed since");
+
+	// Nothing a tool printed or was asked is in an entry or in details.
+	const persisted = JSON.stringify(stub.appended);
+	for (const secret of ["npm test", "ok 1 - case 1", "3 failures", "Command exited"]) {
+		assert.equal(persisted.includes(secret), false, `entry holds ${secret}`);
+		assert.equal(JSON.stringify(patch?.details).includes(secret), false, `details hold ${secret}`);
+	}
+	const leaves: unknown[] = [];
+	const walk = (v: unknown) =>
+		typeof v === "object" && v !== null ? Object.values(v).forEach(walk) : leaves.push(v);
+	walk(statsEntries(stub).map((e) => e.data));
+	assert.ok(leaves.every((leaf) => typeof leaf === "number"));
+});
+
+test("stats survive a resume and a fork, and a new session starts from zero", async () => {
+	const first = uiExtension();
+	await start(first.stub);
+	await first.stub.emitToolResult(failingBash("1.2"));
+	await settle(first.stub);
+	const saved = first.statusTexts().at(-1);
+	assert.match(saved ?? "", /saved/);
+	const branch = [{ type: "message", id: "m1" }, ...statsEntries(first.stub)];
+
+	const resumed = uiExtension({ branch });
+	await start(resumed.stub, "resume");
+	assert.equal(resumed.statusTexts().at(-1), saved, "resume: the footer carries on");
+	assert.match(resumed.ext.statusReport(), /\n {2}session {3}~\S+ tokens saved \(\d+%\) — bash /);
+
+	const forked = uiExtension({ branch: [...branch, { type: "message", id: "m2" }] });
+	await start(forked.stub, "fork");
+	assert.equal(forked.statusTexts().at(-1), saved, "fork: the branch's numbers come along");
+	await forked.stub.emitToolResult(failingBash("1.2"));
+	await settle(forked.stub);
+	const after = forked.stub.appended.at(-1)?.data as { buckets: { bash: { compacted: number } } };
+	assert.equal(after.buckets.bash.compacted, 2, "and are added to");
+
+	const fresh = uiExtension({ branch: [], entries: branch });
+	await start(fresh.stub, "new");
+	assert.equal(fresh.statusTexts().at(-1), "boost ✓", "an empty branch is a session with nothing saved");
+});
+
+test("a compacted result gets a badge through the registered renderer", async () => {
+	const { stub } = uiExtension();
+	await start(stub);
+	assert.equal(stub.renderers.length, 1);
+	const patch = await stub.emitToolResult(failingBash("1.2"));
+	const resolver = stub.renderers[0] as (
+		name: string,
+		next: () => unknown,
+	) => {
+		renderResult: (...args: unknown[]) => { render(w: number): string[] };
+	};
+	const inner = { render: () => ["output"], invalidate: () => {} };
+	const renderers = resolver("bash", () => ({ renderResult: () => inner }));
+	const lines = renderers.renderResult(
+		{ content: patch?.content, details: patch?.details },
+		{},
+		plainTheme,
+		{},
+	);
+	assert.ok(patch);
+	const { before, after } = (patch.details as { jfrogBoost: { before: number; after: number } }).jfrogBoost;
+	const tokens = ((before - after) / 4 / 1000).toFixed(1);
+	const share = Math.round(((before - after) / before) * 100);
+	assert.deepEqual(lines.render(120), ["output", `boost −${tokens}k tokens (${share}%) · boost retrieve 12`]);
+});
+
+test("no renderer is registered on 0.86", async () => {
+	const { stub } = uiExtension({ line: "0.86" });
+	await start(stub);
+	assert.deepEqual(stub.renderers, []);
+});
+
+test("/boost status is built from the live state without spawning", async () => {
+	const spawned: string[] = [];
+	const { stub, ext } = uiExtension({
+		client: {
+			exec: async (args) => {
+				spawned.push(args.join(" "));
+				return call("");
+			},
+		},
+	});
+	await start(stub);
+	await stub.emitToolResult(failingBash("1.2"));
+	await stub.emitToolResult(
+		toolResultEvent("1.2", { toolName: "bash", input: { command: "ls" }, content: "a" }),
+	);
+	const report = ext.statusReport();
+	assert.match(report, /^JFrog Boost — ready\n {2}binary {4}\/fake\/boost {2}v0\.15\.4 \(validated\)/);
+	assert.match(report, /\n {2}shell {5}auto → on \(Boost flag boost-cli-filtering: user=true\)\n/);
+	assert.match(report, /\n {2}skipped {3}small 1 · exact 0/);
+	assert.deepEqual(spawned, []);
+	assert.equal(ext.footerText(), stub.ui.statuses.at(-1)?.text);
 });

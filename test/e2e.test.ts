@@ -48,7 +48,7 @@ import {
 import { createBoostClient } from "../src/boost-client.ts";
 import { createConfigReader } from "../src/boost-config.ts";
 import { createBreaker } from "../src/health.ts";
-import { createBoostExtension, TERMS_NOTICE } from "../src/index.ts";
+import { createBoostExtension, createNotices, TERMS_NOTICE } from "../src/index.ts";
 import { PI_MCP_OUTPUT_MAX_BYTES } from "../src/mcp.ts";
 import { createSettingsStore } from "../src/settings.ts";
 import { writeLongDocx } from "./helpers/docx.ts";
@@ -199,7 +199,9 @@ function piFor(map: Map<string, Handler[]>): ExtensionAPI {
  * set once Boost is ready.
  */
 async function startExtension(map: Map<string, Handler[]>, deps: Parameters<typeof createBoostExtension>[1]) {
-	createBoostExtension(piFor(map), { firstTurnWaitMs: 10_000, ...deps });
+	// Its own notice registry: "once per process" must not let one case's
+	// notice swallow another's in this shared test process.
+	createBoostExtension(piFor(map), { firstTurnWaitMs: 10_000, notices: createNotices(), ...deps });
 	for (const handler of map.get("session_start") ?? []) await handler(sessionStartEvent(), ctx());
 	const sections: Record<string, string> = {};
 	for (const handler of map.get("before_agent_start") ?? []) {

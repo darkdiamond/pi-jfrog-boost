@@ -18,6 +18,11 @@
  *   before_agent_start  (none)            teaches the model `boost retrieve`
  *   agent_end/shutdown  boost sync        uploads what Boost measured
  *
+ * What the user sees (status.ts, stats.ts, render.ts): a plain-text footer
+ * naming the state and the running savings, one-time notices, a badge under
+ * each changed result (pi ≥ 1.0.1), and numbers-only savings persisted in the
+ * session so `/resume` and forks keep them.
+ *
  * Which results are sent is decided by router.ts; reads of text files,
  * `edit`, `write`, `grep`, `find` and `ls` reach the model exactly. Every
  * replacement keeps the tool's `structuredContent` and records itself in
@@ -33,9 +38,11 @@
  * the session toggle, and the `enabled` setting (settings.ts). A command's
  * own `DISABLE_BOOST=1` prefix bypasses Boost for that command only.
  */
+
+import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
-import { binaryStamp } from "./boost-binary.ts";
+import { binaryStamp, onPath } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
 import {
 	type ConfigReader,
@@ -67,9 +74,11 @@ import {
 	createCounters,
 	createReadiness,
 	type Readiness,
+	type ReadinessState,
 } from "./health.ts";
-import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
+import { registerInstallCommand } from "./install.ts";
 import { compactMcpResult, isMcpTool } from "./mcp.ts";
+import { registerBadges } from "./render.ts";
 import { htmlAllowed, route } from "./router.ts";
 import { createSettingsStore, type SettingsStore } from "./settings.ts";
 import {
@@ -79,13 +88,35 @@ import {
 	FULL_OUTPUT_MAX_BYTES,
 	fullOutputPathOf,
 } from "./shell.ts";
+import {
+	type BucketName,
+	bucketFor,
+	createStats,
+	restoreSnapshot,
+	STATS_ENTRY,
+	type Stats,
+	totals,
+} from "./stats.ts";
+import {
+	createFooterPainter,
+	createNotices,
+	filtersDisabledNotice,
+	flagsFreshness,
+	footerText,
+	MISSING_NOTICE,
+	type Notices,
+	pausedNotice,
+	processNotices,
+	SHELL_OFF_NOTICE,
+	statusReport,
+	TERMS_NOTICE,
+	tooOldNotice,
+} from "./status.ts";
 import { createSyncScheduler } from "./sync.ts";
 import { equivalentCommand, resolveReadPath } from "./tools.ts";
 
-/** Footer slot for the running savings estimate. */
-const STATUS_KEY = "jfrog-boost";
-/** The usual rule of thumb for English text and code. */
-const CHARS_PER_TOKEN = 4;
+export { createNotices, TERMS_NOTICE };
+
 /** The CLI flag that starts pi with Boost off (spec §9). */
 export const NO_BOOST_FLAG = "no-boost";
 /**
@@ -95,15 +126,13 @@ export const NO_BOOST_FLAG = "no-boost";
  * costs the first turn at most this, and later turns nothing.
  */
 export const FIRST_TURN_WAIT_MS = 1_000;
-/** Spec §10.4 `terms`: why documents are left alone, and how the user can change that. */
-export const TERMS_NOTICE =
-	"Boost converts PDF/Office files once its Preview Agreement is accepted. In a terminal: boost init --dry-run, then boost init (it also offers hooks for other agents).";
-
-function formatTokens(tokens: number): string {
-	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-	if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
-	return `${Math.round(tokens)}`;
-}
+/**
+ * How long after session_start the UI waits for the readiness probe before
+ * painting the state it settled on (and showing a too-old or shell-off
+ * notice). A little over the probe's own 8 s timeout, so a hung `boost
+ * version` is reported as not responding rather than never.
+ */
+export const PROBE_UI_WAIT_MS = 9_000;
 
 export interface BoostExtensionDeps {
 	/** Injected by tests; defaults to a client talking to the real Boost binary. */
@@ -117,14 +146,32 @@ export interface BoostExtensionDeps {
 	breaker?: Breaker;
 	/** Injected by tests, to see what was counted. */
 	counters?: Counters;
+	/** Injected by tests; per-bucket savings persisted in the session. */
+	stats?: Stats;
+	/**
+	 * Which one-time notices were shown. Defaults to the process-wide
+	 * registry (once per process, across `/reload`); tests pass their own.
+	 */
+	notices?: Notices;
 	/** Live environment for kill switches and overrides; defaults to `process.env`. */
 	env?: NodeJS.ProcessEnv;
 	syncDelayMs?: number;
 	firstTurnWaitMs?: number;
 }
 
+/**
+ * What the factory hands back: the views the `/boost` command (WP8) is built
+ * on, and that tests read. pi ignores a factory's return value.
+ */
+export interface BoostExtension {
+	/** The `/boost status` report (spec §10.2). Spawns nothing. */
+	statusReport(): string;
+	/** The footer text for the current state, as painted. */
+	footerText(): string | undefined;
+}
+
 /** Wire Boost into a pi extension host. Exported so tests can drive it directly. */
-export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps = {}): void {
+export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps = {}): BoostExtension {
 	const env = deps.env ?? process.env;
 	/** Settings warnings wait here until a session with a UI can show them. */
 	const pendingWarnings: string[] = [];
@@ -148,6 +195,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	const config = deps.config ?? createConfigReader();
 	const breaker = deps.breaker ?? createBreaker();
 	const counters: Counters = deps.counters ?? createCounters();
+	const stats: Stats = deps.stats ?? createStats();
+	const notices: Notices = deps.notices ?? processNotices();
+	const footer = createFooterPainter();
 	const client =
 		deps.client ??
 		createBoostClient({
@@ -193,19 +243,22 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 
 	/** Latest assistant text, reported to Boost when the agent settles. */
 	let lastAssistantText = "";
-	/** Each notice is worth saying once per process, not once per session. */
-	let missingNoticeShown = false;
+	/** Not in the §10.4 registry: WP9 removes this warning altogether. */
 	let observeNoticeShown = false;
-	let termsNoticeShown = false;
+	/** The breaker opening last seen, so each opening is noticed once. */
+	let seenOpenUntil: number | undefined;
 	/**
 	 * Converted documents, shared by every session of this process: a file is
 	 * keyed by path, mtime and size, so a stale entry can never be served.
 	 */
 	const documentCache = createDocumentCache();
-	/** Characters Boost removed from this session's tool output. */
-	let savedChars = 0;
 	/** Only a session's first turn may wait for the readiness probe. */
 	let firstTurn = true;
+
+	// Badges (spec §10.3): registered from the factory, because pi collects
+	// renderers at load; on 0.86.1, which has no registerToolRenderer, nothing
+	// is. The `badges` setting is read on every render, so it needs no restart.
+	registerBadges(pi, () => settings.effective().badges);
 
 	// After an install the command calls refresh(); readiness must forget the
 	// "missing" verdict too, or Boost would stay idle until the 60 s re-check.
@@ -232,15 +285,98 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	};
 
+	/**
+	 * Whether Boost's stdin filter will filter shell output at all (spec §8.4),
+	 * decided from settings, config.toml and the environment without spawning.
+	 */
+	const shellOn = () => shellGate(settings.effective().shell, config.read(), env, readiness.version()).on;
+
+	/** Readiness as the UI reports it: `disabled` whenever an off switch is active. */
+	const uiState = (): ReadinessState => (isOff() ? { kind: "disabled" } : readiness.state());
+
+	/**
+	 * The footer for the current state (spec §10.1). Pure reads: the cached
+	 * readiness (never a probe), the breaker, the config as mtime-cached, and
+	 * this session's savings.
+	 */
+	const currentFooter = (): string | undefined => {
+		const state = uiState();
+		const ready = state.kind === "ready";
+		const sum = totals(stats.snapshot());
+		return footerText({
+			footer: settings.effective().footer,
+			off: isOff(),
+			readiness: state,
+			paused: ready && breaker.state().kind === "open",
+			shellOn: ready && shellOn(),
+			removed: Math.max(0, sum.bytesIn - sum.bytesOut),
+			original: sum.bytesIn,
+		});
+	};
+
+	/**
+	 * Repaint the footer and say what changed that the user must hear about:
+	 * a breaker that has just opened (§8.2). Called after every tool result,
+	 * turn and settle, and once the session's probe has settled. Never throws.
+	 */
+	function refreshUi(ctx: ExtensionContext): void {
+		try {
+			footer.paint(ctx, currentFooter());
+			const b = breaker.state();
+			if (b.kind === "open" && b.until !== seenOpenUntil) {
+				seenOpenUntil = b.until;
+				const minutes = Math.max(1, Math.round((b.until - Date.now()) / 60_000));
+				notices.show(ctx, "paused", pausedNotice(b.reason, minutes), "warning");
+			}
+		} catch {
+			/* fail open: the footer is never worth an error */
+		}
+	}
+
+	/**
+	 * Notices that depend on what the probe found (§10.4): a Boost too old to
+	 * use, shell compaction off on a working Boost, filters Boost switched off
+	 * after retrieves. Each once per process.
+	 */
+	function stateNotices(ctx: ExtensionContext): void {
+		if (isOff()) return;
+		const state = readiness.state();
+		if (state.kind === "too-old") {
+			notices.show(ctx, "too-old", tooOldNotice(state.version), "warning");
+			return;
+		}
+		if (state.kind !== "ready") return;
+		// Only when the gate is off by Boost's flag or default: a user who set
+		// `shell: "off"` themselves needs no telling how to turn it on.
+		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
+		if (!gate.on && gate.reason !== "setting-off") notices.show(ctx, "shell-off", SHELL_OFF_NOTICE, "info");
+		const disabled = config.read().disabledFilters;
+		if (disabled.length > 0) {
+			notices.show(ctx, "filters-disabled", filtersDisabledNotice(disabled), "info");
+		}
+	}
+
+	/** Persist this session's savings (§10.5), numbers only, when they changed. */
+	function saveStats(): void {
+		try {
+			if (!stats.changed() || typeof pi.appendEntry !== "function") return;
+			pi.appendEntry(STATS_ENTRY, stats.snapshot());
+			stats.saved();
+		} catch {
+			/* fail open: the next settle tries again */
+		}
+	}
+
 	pi.on("session_start", (_event, ctx) => {
 		lastAssistantText = "";
-		savedChars = 0;
 		firstTurn = true;
 		counters.reset();
+		// Any reason — startup, resume, fork, new, reload: the branch says what
+		// this session has saved so far, and a new one has nothing on it.
 		try {
-			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+			stats.restore(restoreSnapshot(ctx.sessionManager));
 		} catch {
-			/* fail open */
+			stats.restore();
 		}
 		try {
 			pendingWarnings.push(...settings.load());
@@ -253,6 +389,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		} catch {
 			/* fail open: the session runs without Boost until the next check */
 		}
+		refreshUi(ctx);
 	});
 
 	function startSession(ctx: ExtensionContext): void {
@@ -266,12 +403,24 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// Without a binary there is nothing else to say, this session or any later
 		// one, so this returns whether or not the notice has already been shown.
 		if (!readiness.binary()) {
-			if (!missingNoticeShown) {
-				missingNoticeShown = true;
-				notify(ctx, `JFrog Boost is not installed — run /${COMMAND_NAME} to set it up.`, "info");
-			}
+			notices.show(ctx, "missing", MISSING_NOTICE, "info");
 			return;
 		}
+
+		// Paint what the probe settles on, and give the notices that depend on
+		// it. Not awaited; a state already known (the memo) is painted at once.
+		// The context may be stale by then (a new session replaced it): every
+		// use is inside a try.
+		stateNotices(ctx);
+		void readiness
+			.wait(PROBE_UI_WAIT_MS)
+			.then(() => {
+				stateNotices(ctx);
+				refreshUi(ctx);
+			})
+			.catch(() => {
+				/* fail open */
+			});
 
 		// Opting into telemetry costs this session its identity in `boost report`,
 		// because Boost's observe hook has no pi dialect. Say so out loud.
@@ -286,12 +435,15 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		observe(() => meta(ctx), { hook_event_name: "sessionStart" });
 	}
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		try {
 			return await awarenessFor(event);
 		} catch {
 			/* fail open: this turn goes without the awareness section */
 			return;
+		} finally {
+			// The first turn may have waited for the probe; show what it found.
+			refreshUi(ctx);
 		}
 	});
 
@@ -321,15 +473,41 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	}
 
 	/**
+	 * Where one tool result's outcome is counted: the session counters behind
+	 * `/boost status`, and — for a result one of Boost's surfaces could
+	 * change — its stats bucket behind `/boost stats` and the footer.
+	 */
+	interface Tally {
+		skip(reason: string): void;
+		error(kind: string, detail?: string): void;
+		/** Boost processed `before` characters and the model got `after` (§10.1 percentage). */
+		processed(before: number, after: number, applied?: "compacted" | "converted"): void;
+	}
+
+	const tallyFor = (bucket: BucketName | undefined): Tally => ({
+		skip(reason) {
+			counters.skip(reason);
+			if (bucket) stats.skip(bucket, reason);
+		},
+		error(kind, detail) {
+			counters.error(kind, detail);
+			if (bucket) stats.failed(bucket);
+		},
+		processed(before, after, applied) {
+			if (bucket) stats.processed(bucket, before, after, applied);
+		},
+	});
+
+	/**
 	 * Count why a call to Boost produced nothing usable. Returns whether it
 	 * counted anything, so a caller with its own reason for the same outcome
 	 * (the document route's `busy` or `failed`) does not count it twice.
 	 */
-	const noteCall = (call: BoostCall): boolean => {
-		if (call.skipped) counters.skip(call.skipped);
-		else if (call.timedOut) counters.error("timeout");
-		else if (call.spawnError) counters.error("spawn");
-		else if (call.killedBy) counters.error("killed", call.killedBy);
+	const noteCall = (tally: Tally, call: BoostCall): boolean => {
+		if (call.skipped) tally.skip(call.skipped);
+		else if (call.timedOut) tally.error("timeout");
+		else if (call.spawnError) tally.error("spawn");
+		else if (call.killedBy) tally.error("killed", call.killedBy);
 		else return false;
 		return true;
 	};
@@ -339,27 +517,31 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * being used. A non-zero exit is a skip of its own (`exit`, as on the
 	 * document route), not an error: it is Boost declining deterministically,
 	 * and the breaker does not count it either (§8.2). Uncounted, it would be
-	 * the one outcome `/boost stats` could not show.
+	 * the one outcome `/boost stats` could not show. Boost did see the text,
+	 * so it counts toward the footer's percentage as kept whole.
 	 */
-	const noteUnused = (call: BoostCall | undefined): void => {
+	const noteUnused = (tally: Tally, call: BoostCall | undefined, chars: number): void => {
 		if (!call || call.skipped || call.timedOut || call.spawnError || call.killedBy || call.aborted) return;
-		counters.skip(call.code === 0 ? "unchanged" : "exit");
+		tally.skip(call.code === 0 ? "unchanged" : "exit");
+		tally.processed(chars, chars);
 	};
-
-	/**
-	 * Whether Boost's stdin filter will filter shell output at all (spec §8.4),
-	 * decided from settings, config.toml and the environment without spawning.
-	 */
-	const shellOn = () => shellGate(settings.effective().shell, config.read(), env, readiness.version()).on;
 
 	// There is no `tool_call` handler (invariant 3): a throw there blocks the
 	// call outright, and nothing before a tool runs is Boost's business.
 
 	pi.on("tool_result", async (event, ctx) => {
+		let tally = tallyFor(undefined);
+		try {
+			const bucket = bucketFor(event.toolName, event.input ?? {}, settings.effective().extraTools);
+			if (bucket) stats.seen(bucket);
+			tally = tallyFor(bucket);
+		} catch {
+			/* counted in the session counters only */
+		}
 		// A nested call's output goes back to the calling script, not to the
 		// model: it is never sent to Boost, observed or counted as a saving.
 		if (parentToolCallId(event)) {
-			counters.skip("nested");
+			tally.skip("nested");
 			return;
 		}
 		// Built inside the try: `ctx.sessionManager` and `ctx.cwd` throw on a
@@ -396,7 +578,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				settings: settings.effective(),
 			});
 			if (decision.kind === "skip") {
-				counters.skip(decision.reason);
+				tally.skip(decision.reason);
 				return;
 			}
 			if (decision.kind === "document") {
@@ -421,9 +603,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				// A refusal by the client (busy, paused, …) or a timeout is counted
 				// once, by the call; the outcome's reason only when the call said
 				// nothing (an exit, an invalid answer, an abort, no call at all).
-				const counted = outcome.call ? noteCall(outcome.call) : false;
+				const counted = outcome.call ? noteCall(tally, outcome.call) : false;
 				if (outcome.kind === "skip") {
-					if (!counted) counters.skip(outcome.reason);
+					if (!counted) tally.skip(outcome.reason);
+					// Boost ran and exited non-zero, or answered with something
+					// unusable: it saw the file, and the model keeps pi's result.
+					if (!counted && outcome.call && outcome.call.code !== null) {
+						tally.processed(text.length, text.length);
+					}
 					if (outcome.reason === "terms") termsNotice(ctx);
 					// Boost exited non-zero and the terms are gone since the config
 					// was read just above (the user revoked them mid-read): the user
@@ -432,7 +619,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					return;
 				}
 				if (isOff()) return;
-				if (outcome.kind === "page") recordSavings(ctx, text.length - outcome.text.length);
+				// A page, or the advisory a legacy Office file becomes: either way
+				// the model reads Boost's answer instead of pi's raw bytes.
+				tally.processed(text.length, outcome.text.length, "converted");
 				return asResult(documentPatch(event, outcome));
 			}
 			const signal = ctx.signal;
@@ -452,16 +641,16 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				// Counted once: the client's refusal or error if it had one, else the
 				// route's own reason (pi's truncated text stands, payload too large),
 				// else the call's result.
-				const counted = outcome.call ? noteCall(outcome.call) : false;
+				const counted = outcome.call ? noteCall(tally, outcome.call) : false;
 				const compaction = outcome.compaction;
 				if (!compaction) {
 					if (counted) return;
-					if (outcome.skipped) counters.skip(outcome.skipped);
-					else noteUnused(outcome.call);
+					if (outcome.skipped) tally.skip(outcome.skipped);
+					else noteUnused(tally, outcome.call, text.length);
 					return;
 				}
 				if (isOff()) return;
-				recordSavings(ctx, compaction.before - compaction.after);
+				tally.processed(compaction.before, compaction.after, "compacted");
 				return asResult(compactedPatch(event, compaction, "mcp"));
 			}
 			let outcome: Awaited<ReturnType<typeof compactShellOutput>>;
@@ -477,7 +666,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				);
 				// Why the whole run was not used, when the tail route ran instead;
 				// the tail's own call is counted below like any shell call.
-				if (full.fullSkipped) counters.skip(`full-${full.fullSkipped}`);
+				if (full.fullSkipped) tally.skip(`full-${full.fullSkipped}`);
 				outcome = full;
 			} else if (decision.kind === "shell") {
 				outcome = await compactShellOutput(text, (body) =>
@@ -495,20 +684,21 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			} else {
 				return;
 			}
-			const counted = outcome.call ? noteCall(outcome.call) : false;
+			const counted = outcome.call ? noteCall(tally, outcome.call) : false;
 			const compaction = outcome.compaction;
 			if (!compaction) {
-				if (!counted) noteUnused(outcome.call);
+				if (!counted) noteUnused(tally, outcome.call, text.length);
 				return;
 			}
 			// Re-checked: a kill switch flipped while Boost ran wins over its reply.
 			if (isOff()) return;
-			recordSavings(ctx, compaction.before - compaction.after);
+			tally.processed(compaction.before, compaction.after, "compacted");
 			return asResult(compactedPatch(event, compaction));
 		} catch {
 			/* fail open: keep the original result */
 		} finally {
 			reportToolResult(() => meta(ctx, event.toolCallId), event, text);
+			refreshUi(ctx);
 		}
 		return;
 	});
@@ -584,25 +774,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 
 	/** Spec §10.4 `terms`, once per process. */
 	function termsNotice(ctx: ExtensionContext): void {
-		if (termsNoticeShown || !ctx.hasUI) return;
-		termsNoticeShown = true;
-		notify(ctx, TERMS_NOTICE, "info");
-	}
-
-	/**
-	 * Keep a running total in pi's footer, so it is visible that Boost is doing
-	 * something without leaving the session. An estimate — `boost report -t`
-	 * has the measured numbers.
-	 */
-	function recordSavings(ctx: ExtensionContext, chars: number): void {
-		if (chars <= 0) return;
-		savedChars += chars;
-		try {
-			if (ctx.hasUI)
-				ctx.ui.setStatus(STATUS_KEY, `boost ~${formatTokens(savedChars / CHARS_PER_TOKEN)} saved`);
-		} catch {
-			/* fail open: a status line is never worth an error */
-		}
+		notices.show(ctx, "terms", TERMS_NOTICE, "info");
 	}
 
 	/**
@@ -660,6 +832,13 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	});
 
+	// The agent is done with this prompt, follow-ups included: the moment to
+	// persist what it saved (§10.5), once per settle and only when it changed.
+	pi.on("agent_settled", (_event, ctx) => {
+		saveStats();
+		refreshUi(ctx);
+	});
+
 	pi.on("session_before_compact", (event, ctx) => {
 		observe(() => meta(ctx), {
 			hook_event_name: "preCompact",
@@ -680,6 +859,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			/* fail open: what was not uploaded goes with the next session's sync */
 		}
 		sync.dispose();
+		saveStats();
 		// A filter still running for an abandoned turn has nobody to answer.
 		try {
 			client.killAll();
@@ -687,6 +867,40 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			/* fail open */
 		}
 	});
+
+	return {
+		footerText: currentFooter,
+		statusReport() {
+			const effective = settings.effective();
+			const cfg = config.read();
+			const binary = readiness.binary();
+			let onPathNow: boolean | undefined;
+			try {
+				onPathNow = binary ? onPath(binary, env) : undefined;
+			} catch {
+				onPathNow = undefined;
+			}
+			return statusReport({
+				readiness: uiState(),
+				off: settings.off(),
+				breaker: breaker.state(),
+				binary,
+				onPath: onPathNow,
+				settings: effective,
+				settingsPath: settings.path(),
+				home: homedir(),
+				gate: shellGate(effective.shell, cfg, env, readiness.version()),
+				mcpFlag: resolveFlag(cfg, MCP_FILTERING_FLAG, env),
+				config: cfg,
+				flags: flagsFreshness(cfg, env, Date.now()),
+				stats: stats.snapshot(),
+				skips: counters.skips(),
+				errors: counters.errors(),
+				lastError: counters.lastError(),
+				now: Date.now(),
+			});
+		},
+	};
 }
 
 export default function boostExtension(pi: ExtensionAPI): void {
