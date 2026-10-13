@@ -15,8 +15,12 @@
  *                                         like any read (documents.ts)
  *                       boost hook claude mcp__* results through Boost's MCP
  *                                         filters (mcp.ts)
- *   before_agent_start  (none)            teaches the model `boost retrieve`
- *   agent_end/shutdown  boost sync        uploads what Boost measured
+ *   before_agent_start  (none)            names the active surfaces and how
+ *                                         to recover output (awareness.ts)
+ *   agent_settled,      boost sync        uploads what Boost measured, 8 s
+ *   session_shutdown                      after the agent settles (sync.ts)
+ *   tool_execution_*,   boost hook        opt-in lifecycle telemetry
+ *   session_start, …    observe claude    (observe.ts)
  *
  * What the user sees (status.ts, stats.ts, render.ts): a plain-text footer
  * naming the state and the running savings, one-time notices, a badge under
@@ -49,7 +53,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
+import { AWARENESS_SECTION, awarenessView, buildAwareness, withAwareness } from "./awareness.ts";
 import { binaryStamp, onPath } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
 import {
@@ -63,18 +67,12 @@ import { type CommandHost, completions, createBoostCommand } from "./commands.ts
 import {
 	asResult,
 	hasStructured,
+	loadout,
 	parentToolCallId,
 	structuredContentOf,
 	type ToolResultPatch,
 } from "./compat.ts";
-import {
-	type ContentBlock,
-	isPlainObject,
-	mergeDetails,
-	textOf,
-	truncateForObserve,
-	withText,
-} from "./content.ts";
+import { type ContentBlock, isPlainObject, mergeDetails, textOf, withText } from "./content.ts";
 import { createDocumentCache, type DocumentOutcome, readDocument } from "./documents.ts";
 import {
 	type Breaker,
@@ -87,6 +85,7 @@ import {
 } from "./health.ts";
 import { createInstaller, type InstallDeps } from "./install.ts";
 import { compactMcpResult, isMcpTool } from "./mcp.ts";
+import { createObserver } from "./observe.ts";
 import { registerBadges } from "./render.ts";
 import { htmlAllowed, route } from "./router.ts";
 import { createSettingsStore, type SettingsStore } from "./settings.ts";
@@ -260,28 +259,26 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			stamp: binaryStamp,
 			probe: () => client.version(),
 		});
-	const observeEnabled = () => !isOff() && settings.effective().observe;
 	/**
 	 * Lifecycle telemetry goes only where the user opted in (`observe`,
-	 * `PI_BOOST_OBSERVE`). The hook metadata is taken lazily, inside the try:
-	 * building it reads `ctx.sessionManager` and `ctx.cwd`, which pi 1.2 turns
-	 * into getters that throw on a stale context, and such a throw must not
-	 * reach pi's handler-error path any more than a client's.
+	 * `PI_BOOST_OBSERVE`), and never while any off switch is active. The
+	 * observer takes the hook metadata lazily, inside its own try: building
+	 * it reads `ctx.sessionManager` and `ctx.cwd`, which pi 1.2 turns into
+	 * getters that throw on a stale context, and such a throw must not reach
+	 * pi's handler-error path any more than a client's.
 	 */
-	const observe = (hookMeta: () => HookMeta, fields: Record<string, unknown>) => {
-		try {
-			if (observeEnabled()) client.observeDetached(hookMeta(), fields);
-		} catch {
-			/* fail open: telemetry is never worth an error in a pi handler */
-		}
-	};
-	const sync = createSyncScheduler(client, deps.syncDelayMs);
+	const observer = createObserver({
+		enabled: () => !isOff() && settings.effective().observe,
+		send: (hookMeta, fields) => client.observeDetached(hookMeta, fields),
+	});
+	// Filtering is measured locally; `boost sync` is what gets those numbers
+	// to JFrog. It uploads, so it honours the opt-out (and every off switch).
+	const sync = createSyncScheduler({
+		client,
+		enabled: () => !isOff() && settings.effective().sync,
+		...(deps.syncDelayMs !== undefined ? { delayMs: deps.syncDelayMs } : {}),
+	});
 	const firstTurnWaitMs = deps.firstTurnWaitMs ?? FIRST_TURN_WAIT_MS;
-
-	/** Latest assistant text, reported to Boost when the agent settles. */
-	let lastAssistantText = "";
-	/** Not in the §10.4 registry: WP9 removes this warning altogether. */
-	let observeNoticeShown = false;
 	/** The breaker opening last seen, so each opening is noticed once. */
 	let seenOpenUntil: number | undefined;
 	/**
@@ -397,8 +394,10 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		lastAssistantText = "";
+		observer.reset();
 		firstTurn = true;
+		// Whether `boost` is on PATH is looked at again once per session.
+		awarenessEpoch++;
 		counters.reset();
 		// Any reason — startup, resume, fork, new, reload: the branch says what
 		// this session has saved so far, and a new one has nothing on it.
@@ -451,17 +450,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				/* fail open */
 			});
 
-		// Opting into telemetry costs this session its identity in `boost report`,
-		// because Boost's observe hook has no pi dialect. Say so out loud.
-		if (observeEnabled() && !observeNoticeShown) {
-			observeNoticeShown = true;
-			notify(
-				ctx,
-				"PI_BOOST_OBSERVE=1: this session will be recorded as claude_code in `boost report`, because Boost has no pi agent type.",
-				"warning",
-			);
-		}
-		observe(() => meta(ctx), { hook_event_name: "sessionStart" });
+		// Detached, opt-in. No warning about attribution any more: observe
+		// keeps the span's `pi` (Probe 1, observe.ts).
+		observer.sessionStart(() => meta(ctx));
 	}
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -476,29 +467,99 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	});
 
+	/**
+	 * Bumped when whether `boost` is on PATH may have changed: a new session,
+	 * an install, `/boost status → retry`. The PATH lookup is the one input
+	 * to the awareness text not read from state the extension already holds,
+	 * so it is cached until one of those.
+	 */
+	let awarenessEpoch = 0;
+	let onPathMemo: { key: string; value: boolean } | undefined;
+	const binaryOnPath = (binary: string): boolean => {
+		const key = `${awarenessEpoch}\0${binary}`;
+		if (onPathMemo?.key !== key) {
+			let value = false;
+			try {
+				value = onPath(binary, env);
+			} catch {
+				/* the full path is always correct */
+			}
+			onPathMemo = { key, value };
+		}
+		return onPathMemo.value;
+	};
+	/** The last text built, keyed by the view it was built from. */
+	let awarenessMemo: { key: string; text: string | undefined } | undefined;
+
+	/**
+	 * The awareness text for this turn (spec §12), or undefined for none.
+	 *
+	 * Its inputs are exactly §12's triggers: readiness (to or from ready, and
+	 * the version), the off switches (`/boost on|off` included), the
+	 * settings, Boost's config (mtime-cached, so it changes when the file
+	 * does), the binary and whether it is on PATH (an install), and the
+	 * loadout. The breaker, a busy semaphore and the savings are not among
+	 * them, so a breaker that opens mid-session leaves the section — and the
+	 * provider's prompt cache — byte-identical.
+	 */
+	function currentAwareness(event: unknown): string | undefined {
+		const state = uiState();
+		const ready = state.kind === "ready";
+		const effective = settings.effective();
+		const binary = ready ? (readiness.binary() ?? client.binary()) : undefined;
+		const cfg = ready ? config.read() : undefined;
+		const view = awarenessView({
+			ready,
+			awareness: effective.awareness,
+			shellOn: ready && shellOn(),
+			settings: effective,
+			boostVersion: readiness.version(),
+			mcpFlag: cfg ? resolveFlag(cfg, MCP_FILTERING_FLAG, env).value : "unknown",
+			termsAccepted: cfg?.termsAccepted ?? false,
+			loadout: loadout(event),
+			binary,
+			onPath: binary ? binaryOnPath(binary) : true,
+			platform: process.platform,
+		});
+		const key = JSON.stringify(view ?? null);
+		if (awarenessMemo?.key !== key) awarenessMemo = { key, text: buildAwareness(view) };
+		return awarenessMemo.text;
+	}
+
+	/**
+	 * Both `messageType`s (pi 1.2: a user prompt, or a custom message that
+	 * triggers a turn) are handled alike: the system prompt is the same
+	 * whatever started the turn, and a section that came and went with the
+	 * message type would only churn the prompt cache.
+	 */
 	async function awarenessFor(event: {
 		systemPrompt: string;
 		systemPromptOptions?: { sections?: Record<string, string> };
 	}): Promise<{ systemPrompt: string } | undefined> {
-		if (isOff()) return;
-		let state = readiness.check();
 		// Only the first turn waits, and at most a second: the probe started at
 		// session_start has normally settled by the time the user has typed a
 		// prompt. Later turns take whatever state there is.
-		if (firstTurn) {
-			firstTurn = false;
-			if (state.kind === "probing") state = await readiness.wait(firstTurnWaitMs);
+		if (!isOff()) {
+			const state = readiness.check();
+			if (firstTurn) {
+				firstTurn = false;
+				if (state.kind === "probing") await readiness.wait(firstTurnWaitMs);
+			}
 		}
-		if (state.kind !== "ready" || isOff() || !settings.effective().awareness) return;
+		const text = currentAwareness(event);
 		// A named section is diffed against what the model already has, so an
-		// unchanged block keeps the provider's prompt cache. Replacing the whole
-		// prompt is the fallback for pi releases without structured sections.
+		// unchanged block keeps the provider's prompt cache. An empty string is
+		// how the section is withdrawn: pi renders nothing for it (pi 1.2.0
+		// `buildSystemPromptSections` skips empty sections). Nothing else is
+		// returned (spec §4).
 		const sections = event.systemPromptOptions?.sections;
 		if (sections) {
-			sections[AWARENESS_SECTION] = AWARENESS_BODY;
+			sections[AWARENESS_SECTION] = text ?? "";
 			return;
 		}
-		return { systemPrompt: withAwareness(event.systemPrompt) };
+		// The fallback for a pi without structured sections.
+		if (text === undefined) return;
+		return { systemPrompt: withAwareness(event.systemPrompt, text) };
 	}
 
 	/**
@@ -739,7 +800,6 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		} catch {
 			/* fail open: keep the original result */
 		} finally {
-			reportToolResult(() => meta(ctx, event.toolCallId), event, text);
 			refreshUi(ctx);
 		}
 		return;
@@ -819,84 +879,47 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		notices.show(ctx, "terms", TERMS_NOTICE, "info");
 	}
 
-	/**
-	 * Lifecycle telemetry, only when the user opted in. See `observeEnabled`.
-	 * Runs from tool_result's `finally`, outside its catch, so it guards itself:
-	 * nothing here may turn a kept result into a handler error.
-	 */
-	function reportToolResult(
-		hookMeta: () => HookMeta,
-		event: { toolCallId: string; toolName: string; input: Record<string, unknown>; isError: boolean },
-		text: string,
-	): void {
-		try {
-			if (!observeEnabled()) return;
-			// No duration: the `tool_call` start map is gone with the handler.
-			// WP9 moves this to `tool_execution_end`, which carries `durationMs`.
-			const common = { tool_name: event.toolName, tool_input: event.input };
-			observe(
-				hookMeta,
-				event.isError
-					? {
-							...common,
-							hook_event_name: "PostToolUseFailure",
-							error_message: truncateForObserve(text) || "tool error",
-						}
-					: { ...common, hook_event_name: "PostToolUse", tool_output: truncateForObserve(text) },
-			);
-		} catch {
-			/* fail open: telemetry is never worth an error in a pi handler */
-		}
-	}
-
-	pi.on("message_end", (event) => {
-		try {
-			if (event.message.role !== "assistant") return;
-			const text = textOf(event.message.content as ContentBlock[]).trim();
-			if (text) lastAssistantText = truncateForObserve(text);
-		} catch {
-			/* fail open: only telemetry reads this */
-		}
+	// Observe only (opt-in): the run itself, bracketed. Nested calls are
+	// skipped inside the observer. Neither handler returns anything.
+	pi.on("tool_execution_start", (event, ctx) => {
+		observer.toolStart(event, (id) => meta(ctx, id));
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
-		if (lastAssistantText) {
-			const text = lastAssistantText;
-			lastAssistantText = "";
-			observe(() => meta(ctx), { hook_event_name: "afterAgentResponse", text });
-		}
-		// Filtering is measured locally; `boost sync` is what gets those numbers
-		// into `boost report`. It uploads to JFrog, so it honours the opt-out.
+	pi.on("tool_execution_end", (event, ctx) => {
+		observer.toolEnd(event, (id) => meta(ctx, id));
+	});
+
+	pi.on("message_end", (event) => {
+		observer.message(event);
+	});
+
+	// The agent is done with this prompt, follow-ups included (unlike
+	// `agent_end`, which fires once per agent loop): the moment to report the
+	// reply, persist what was saved (§10.5) and schedule the upload.
+	pi.on("agent_settled", (event, ctx) => {
+		observer.settled(event, ctx, () => meta(ctx));
+		saveStats();
 		try {
-			if (!isOff() && settings.effective().sync) sync.schedule(meta(ctx));
+			sync.schedule(meta(ctx));
 		} catch {
 			/* fail open: the next settle schedules it again */
 		}
-	});
-
-	// The agent is done with this prompt, follow-ups included: the moment to
-	// persist what it saved (§10.5), once per settle and only when it changed.
-	pi.on("agent_settled", (_event, ctx) => {
-		saveStats();
 		refreshUi(ctx);
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {
-		observe(() => meta(ctx), {
-			hook_event_name: "preCompact",
-			trigger: event.reason === "manual" ? "manual" : "auto",
-		});
+		observer.preCompact(event, () => meta(ctx));
 	});
 
 	pi.on("session_compact", (_event, ctx) => {
-		observe(() => meta(ctx), { hook_event_name: "postCompact" });
+		observer.postCompact(() => meta(ctx));
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		// No `stop` observe: it records nothing measurable and reattributes the
-		// session to claude_code. `boost sync` leaves attribution alone.
+		// No `stop` observe: it records nothing measurable. The sync opt-out
+		// and the off switches are checked inside the scheduler.
 		try {
-			if (!isOff() && settings.effective().sync) sync.flush(meta(ctx));
+			sync.flush(meta(ctx));
 		} catch {
 			/* fail open: what was not uploaded goes with the next session's sync */
 		}
@@ -921,6 +944,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 */
 	const recheck = async (): Promise<ReadinessState> => {
 		client.refresh();
+		// A new or moved binary may be on PATH now, or no longer.
+		awarenessEpoch++;
 		breaker.reset();
 		readiness.retry();
 		await readiness.wait(PROBE_UI_WAIT_MS);

@@ -45,6 +45,8 @@ import {
 	type PiLine,
 	plainTheme,
 	textOfBlocks,
+	toolExecutionEndEvent,
+	toolExecutionStartEvent,
 	toolResultEvent,
 } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
@@ -655,64 +657,211 @@ test("the awareness block is a named prompt section when pi supports them", asyn
 		systemPromptOptions: { sections },
 	});
 	assert.equal(patched, undefined, "no whole-prompt replacement, so the prompt cache survives");
-	assert.match(sections["jfrog-boost"] ?? "", /boost retrieve <id>/);
+	assert.match(sections["jfrog-boost"] ?? "", /retrieve <id> --query/);
+	assert.match(sections["jfrog-boost"] ?? "", /: `bash` output\./, "shell is the one active surface here");
 	assert.doesNotMatch(sections["jfrog-boost"] ?? "", /<jfrog-boost>/, "pi adds the tags itself");
 });
 
 test("the system prompt gains the Boost instructions when pi has no sections", async () => {
 	const { fire } = harness();
 	const patched = (await fire("before_agent_start", { systemPrompt: "base" })) as { systemPrompt: string };
-	assert.ok(patched.systemPrompt.startsWith("base"));
-	assert.ok(patched.systemPrompt.includes("boost retrieve <id>"));
+	assert.ok(patched.systemPrompt.startsWith("base\n\n<jfrog-boost>\n"));
+	assert.ok(patched.systemPrompt.includes("retrieve <id> --query"));
 });
 
 test("nothing is added to the system prompt when Boost is not usable", async () => {
 	const { fire } = harness({ readiness: fixedReadiness({ kind: "not-responding" }) });
 	assert.equal(await fire("before_agent_start", { systemPrompt: "base" }), undefined);
+	const sections: Record<string, string> = { "jfrog-boost": "stale text from an earlier turn" };
+	await fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: { sections } });
+	assert.equal(sections["jfrog-boost"], "", "the section is withdrawn, not left stale");
 });
 
-test("a missing Boost is reported once, with the command that fixes it", async () => {
-	const { fire, notices } = harness({
-		readiness: { ...fixedReadiness({ kind: "missing" }), binary: () => undefined },
-	});
-	await fire("session_start", { reason: "startup" });
-	await fire("session_start", { reason: "new" });
-	assert.deepEqual(notices, [MISSING_NOTICE]);
+test("no section when no surface is active: shell gate off, no MCP tool, no terms", async () => {
+	const { fire } = harness({ config: fixedConfig(CLI_OFF) });
+	const sections: Record<string, string> = {};
+	assert.equal(
+		await fire("before_agent_start", {
+			systemPrompt: "base",
+			systemPromptOptions: { sections, selectedTools: ["read", "bash", "edit", "write"] },
+		}),
+		undefined,
+	);
+	assert.equal(sections["jfrog-boost"], "");
+	assert.equal(await fire("before_agent_start", { systemPrompt: "base" }), undefined, "nor on the fallback");
 });
 
-test("tool telemetry is reported when opted in", async () => {
+test("the section follows the loadout: a hidden bash, a visible MCP tool", async () => {
+	const { fire } = harness();
+	const turn = async (selectedTools: string[], hiddenTools: string[] = []) => {
+		const sections: Record<string, string> = {};
+		await fire("before_agent_start", {
+			systemPrompt: "base",
+			systemPromptOptions: { sections, selectedTools, hiddenTools },
+		});
+		return sections["jfrog-boost"];
+	};
+	assert.equal(await turn(["read", "bash"], ["bash"]), "", "no visible shell, no other surface");
+	assert.match(
+		(await turn(["read", "bash", "mcp__slack__slack_get_users"])) ?? "",
+		/: `bash` output and MCP tool results \(`mcp__\*`\)\./,
+	);
+});
+
+test("both messageTypes get the same section", async () => {
+	const texts: string[] = [];
+	for (const messageType of ["user", "custom"] as const) {
+		const { fire } = harness();
+		const sections: Record<string, string> = {};
+		await fire("before_agent_start", beforeAgentStartEvent("1.2", { sections, messageType }));
+		texts.push(sections["jfrog-boost"] ?? "");
+	}
+	assert.ok(texts[0]);
+	assert.equal(texts[1], texts[0]);
+});
+
+test("off PATH the model is given the quoted full path; on PATH plain `boost`", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-path-"));
+	try {
+		const exe = join(dir, process.platform === "win32" ? "boost.exe" : "boost");
+		writeFileSync(exe, "", { mode: 0o755 });
+		const sectionFor = async (env: NodeJS.ProcessEnv) => {
+			const { fire } = harness({ env, readiness: fixedReadiness(undefined, exe) });
+			const sections: Record<string, string> = {};
+			await fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: { sections } });
+			return sections["jfrog-boost"] ?? "";
+		};
+		const off = await sectionFor({ PATH: "" });
+		const quoted = process.platform === "win32" ? `"${exe}"` : `'${exe}'`;
+		assert.ok(off.includes(`\`${quoted} retrieve <id> --query`), off);
+		assert.match(off, /`boost` is not on PATH/);
+		const on = await sectionFor({ PATH: dir });
+		assert.ok(on.includes("`boost retrieve <id> --query"), on);
+		assert.doesNotMatch(on, /not on PATH/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("the section is byte-identical across turns when the breaker opens, or Boost is busy", async () => {
+	let state: BreakerState = { kind: "closed" };
+	const breaker: Breaker = { allow: () => true, record: () => {}, reset: () => {}, state: () => state };
+	const { stub } = uiExtension({ breaker });
+	await start(stub);
+	const turn = async () => {
+		const sections: Record<string, string> = {};
+		await stub.fire("before_agent_start", beforeAgentStartEvent("1.2", { sections }));
+		return sections["jfrog-boost"];
+	};
+	const first = await turn();
+	assert.ok(first);
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.equal(await turn(), first, "a saving changes nothing");
+	state = { kind: "open", until: Date.now() + 5 * 60_000, reason: "timeout" };
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.equal(await turn(), first, "nor does the breaker opening");
+	state = { kind: "half-open" } as BreakerState;
+	assert.equal(await turn(), first, "or half-opening");
+});
+
+test("the section changes with /boost off and on, and with the settings", async () => {
+	const { stub, settings } = uiExtension();
+	await start(stub);
+	const turn = async () => {
+		const sections: Record<string, string> = {};
+		await stub.fire("before_agent_start", beforeAgentStartEvent("1.2", { sections }));
+		return sections["jfrog-boost"];
+	};
+	const on = await turn();
+	assert.ok(on);
+	await stub.command("boost", "off");
+	assert.equal(await turn(), "");
+	await stub.command("boost", "on");
+	assert.equal(await turn(), on);
+	settings.save({ awareness: false });
+	assert.equal(await turn(), "");
+});
+
+test("tool telemetry is reported from the run itself, when opted in", async () => {
+	const { fire, calls } = harness();
+	await fire(
+		"tool_execution_start",
+		toolExecutionStartEvent("1.2", { toolName: "ls", toolCallId: "c9", args: { path: "." } }),
+	);
+	await fire(
+		"tool_execution_end",
+		toolExecutionEndEvent("1.2", {
+			toolName: "ls",
+			toolCallId: "c9",
+			durationMs: 7,
+			result: { content: [{ type: "text", text: "raw output" }] },
+		}),
+	);
+	const [pre] = observed(calls, "PreToolUse");
+	const [post] = observed(calls, "PostToolUse");
+	assert.equal(pre?.fields.tool_name, "ls");
+	assert.deepEqual(pre?.fields.tool_input, { path: "." });
+	assert.equal(pre?.meta.tool_use_id, "c9");
+	assert.equal(post?.fields.tool_output, "raw output");
+	assert.equal(post?.fields.duration_ms, 7);
+	assert.equal(post?.meta.tool_use_id, "c9");
+	assert.ok(calls.indexOf(pre as Recorded) < calls.indexOf(post as Recorded), "PreToolUse comes first");
+});
+
+test("a tool result is not observed from tool_result any more", async () => {
 	const { fire, calls } = harness();
 	await fire("tool_result", result("ls"));
-	const [post] = observed(calls, "PostToolUse");
-	assert.equal(post?.fields.tool_name, "ls");
-	assert.equal(post?.fields.tool_output, "raw output");
+	assert.equal(calls.filter((c) => c.kind === "observe").length, 0);
 });
 
 test("a failed tool is reported as a failure, not a result", async () => {
 	const { fire, calls } = harness();
-	await fire("tool_result", result("grep", { isError: true }));
+	await fire(
+		"tool_execution_end",
+		toolExecutionEndEvent("0.86", {
+			toolName: "grep",
+			isError: true,
+			result: { content: [{ type: "text", text: "raw output" }] },
+		}),
+	);
 	assert.equal(observed(calls, "PostToolUseFailure")[0]?.fields.error_message, "raw output");
 	assert.equal(observed(calls, "PostToolUse").length, 0);
 });
 
-test("filtering still happens when telemetry is opted out", async () => {
+test("with telemetry off, not one observe: tools, replies, compaction, session start", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted", observeEnabled: false });
+	await fire("session_start", { reason: "startup" });
+	await fire("tool_execution_start", toolExecutionStartEvent("1.2", { toolName: "bash" }));
 	const patched = await fire("tool_result", bashResult("npm test"));
+	await fire("tool_execution_end", toolExecutionEndEvent("1.2", { toolName: "bash" }));
+	await fire("message_end", { message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
+	await fire("agent_settled", agentSettledEvent("1.2"));
+	await fire("session_before_compact", { reason: "manual" });
+	await fire("session_compact", {});
 	assert.deepEqual((patched as { content: unknown }).content, [{ type: "text", text: "compacted" }]);
 	assert.equal(calls.filter((c) => c.kind === "observe").length, 0);
 });
 
-test("the assistant's reply is reported when the agent settles", async () => {
+test("the assistant's reply is reported when the agent settles, not when a loop ends", async () => {
 	const { fire, calls } = harness();
 	await fire("message_end", { message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
 	await fire("agent_end", {});
+	assert.equal(observed(calls, "afterAgentResponse").length, 0);
+	await fire("agent_settled", agentSettledEvent("0.86"));
 	assert.equal(observed(calls, "afterAgentResponse")[0]?.fields.text, "done");
+});
+
+test("an aborted run's reply is not reported", async () => {
+	const { fire, calls } = harness();
+	await fire("message_end", { message: { role: "assistant", content: [{ type: "text", text: "half" }] } });
+	await fire("agent_settled", agentSettledEvent("1.2", { aborted: true }));
+	assert.equal(observed(calls, "afterAgentResponse").length, 0);
 });
 
 test("user and tool messages are not reported as assistant replies", async () => {
 	const { fire, calls } = harness();
 	await fire("message_end", { message: { role: "user", content: [{ type: "text", text: "hi" }] } });
-	await fire("agent_end", {});
+	await fire("agent_settled", agentSettledEvent("1.2"));
 	assert.equal(observed(calls, "afterAgentResponse").length, 0);
 });
 
@@ -726,33 +875,44 @@ test("compaction is reported on both sides", async () => {
 	assert.equal(observed(calls, "postCompact").length, 1);
 });
 
-test("shutdown flushes the pending upload instead of waiting out the debounce", async () => {
+test("sync is scheduled when the agent settles, not when an agent loop ends", async () => {
 	const { fire, calls } = harness();
 	await fire("agent_end", {});
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(calls.filter((c) => c.kind === "sync").length, 0);
+	await fire("agent_settled", agentSettledEvent("1.2"));
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(calls.filter((c) => c.kind === "sync").length, 1);
+});
+
+test("shutdown flushes the pending upload instead of waiting out the debounce", async () => {
+	const { fire, calls } = harness();
+	await fire("agent_settled", agentSettledEvent("1.2"));
 	assert.equal(calls.filter((c) => c.kind === "sync").length, 0, "upload is debounced");
 	await fire("session_shutdown", { reason: "quit" });
 	assert.equal(calls.filter((c) => c.kind === "sync").length, 1);
 });
 
-test("shutdown sends no observe: a `stop` event would reattribute the session", async () => {
+test("shutdown sends no observe: `stop` records nothing measurable", async () => {
 	const { fire, calls } = harness();
 	await fire("session_shutdown", { reason: "quit" });
 	assert.equal(observed(calls, "stop").length, 0);
 });
 
-test("opting into telemetry warns that the session loses its pi attribution", async () => {
-	const { fire, notices } = harness();
-	await fire("session_start", { reason: "startup" });
-	await fire("session_start", { reason: "new" });
-	assert.equal(notices.length, 1, "said once, not every session");
-	assert.match(notices[0] ?? "", /PI_BOOST_OBSERVE=1/);
-	assert.match(notices[0] ?? "", /claude_code/);
-});
-
-test("no such warning when telemetry is left off", async () => {
-	const { fire, notices } = harness({ observeEnabled: false });
+test("opting into telemetry shows no attribution warning: observe keeps pi (Probe 1)", async () => {
+	const { fire, notices, calls } = harness();
 	await fire("session_start", { reason: "startup" });
 	assert.deepEqual(notices, []);
+	assert.equal(observed(calls, "sessionStart").length, 1);
+});
+
+test("a missing Boost is reported once, with the command that fixes it", async () => {
+	const { fire, notices } = harness({
+		readiness: { ...fixedReadiness({ kind: "missing" }), binary: () => undefined },
+	});
+	await fire("session_start", { reason: "startup" });
+	await fire("session_start", { reason: "new" });
+	assert.deepEqual(notices, [MISSING_NOTICE]);
 });
 
 test("every payload carries the session id and working directory", async () => {
@@ -785,7 +945,10 @@ async function everySurface(h: ReturnType<typeof harness>) {
 	const prompt = await h.fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: {} });
 	const shell = await h.fire("tool_result", bash());
 	const doc = await h.fire("tool_result", result("read", { isError: true, input: { path: "/docs/q3.pdf" } }));
-	await h.fire("agent_end", {});
+	await h.fire("tool_execution_start", toolExecutionStartEvent("1.2", { toolName: "bash" }));
+	await h.fire("tool_execution_end", toolExecutionEndEvent("1.2", { toolName: "bash" }));
+	await h.fire("message_end", { message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
+	await h.fire("agent_settled", agentSettledEvent("1.2"));
 	await h.fire("session_shutdown", { reason: "quit" });
 	return { prompt, shell, doc };
 }
@@ -908,14 +1071,19 @@ test("a first turn that waited past the probe gets the awareness section", async
 	await h.fire("session_start", { reason: "startup" });
 	const sections: Record<string, string> = {};
 	await h.fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: { sections } });
-	assert.match(sections["jfrog-boost"] ?? "", /boost retrieve <id>/);
+	assert.match(sections["jfrog-boost"] ?? "", /retrieve <id> --query/);
 });
 
-test("sync honours its opt-out", async () => {
-	const h = harness({ env: { PI_BOOST_SYNC: "0" } });
-	await h.fire("agent_end", {});
-	await h.fire("session_shutdown", { reason: "quit" });
-	assert.equal(h.calls.filter((c) => c.kind === "sync").length, 0);
+test("sync honours its opt-out: PI_BOOST_SYNC=0 or sync: false", async () => {
+	for (const options of [{ env: { PI_BOOST_SYNC: "0" } }, { file: { sync: false } }]) {
+		const h = harness(options);
+		await h.fire("session_start", { reason: "startup" });
+		await h.fire("agent_settled", agentSettledEvent("1.2"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		await h.fire("agent_settled", agentSettledEvent("1.2"));
+		await h.fire("session_shutdown", { reason: "quit" });
+		assert.equal(h.calls.filter((c) => c.kind === "sync").length, 0, JSON.stringify(options));
+	}
 });
 
 test("an invalid settings key is reported once, as a warning naming the key", async () => {
@@ -970,7 +1138,7 @@ test("with DISABLE_BOOST=1 not a single Boost process starts, probe included", a
 	await fire("session_start", { reason: "startup" });
 	await fire("before_agent_start", { systemPrompt: "base" });
 	await fire("tool_result", { ...bash(), content: [{ type: "text", text: "x".repeat(4096) }] });
-	await fire("agent_end", {});
+	await fire("agent_settled", {});
 	await fire("session_shutdown", { reason: "quit" });
 	await new Promise((resolve) => setTimeout(resolve, 200));
 	assert.equal(existsSync(log), false, "the stand-in never ran");
@@ -1131,7 +1299,9 @@ test("a throwing client never throws to pi", async () => {
 			{ message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
 			ctx,
 		);
-		await stub.fire("agent_end", {}, ctx);
+		await stub.fire("tool_execution_start", toolExecutionStartEvent(line, { toolName: "bash" }), ctx);
+		await stub.fire("tool_execution_end", toolExecutionEndEvent(line, { toolName: "bash" }), ctx);
+		await stub.fire("agent_settled", agentSettledEvent(line), ctx);
 		await stub.fire("session_before_compact", { reason: "manual" }, ctx);
 		await stub.fire("session_compact", {}, ctx);
 		await stub.fire("session_shutdown", { reason: "quit" }, ctx);
@@ -1160,7 +1330,9 @@ test("a stale context, whose getters throw, never throws to pi", async () => {
 			{ message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
 			ctx,
 		);
-		await stub.fire("agent_end", {}, ctx);
+		await stub.fire("tool_execution_start", toolExecutionStartEvent(line, { toolName: "bash" }), ctx);
+		await stub.fire("tool_execution_end", toolExecutionEndEvent(line, { toolName: "bash" }), ctx);
+		await stub.fire("agent_settled", agentSettledEvent(line), ctx);
 		await stub.fire("session_before_compact", { reason: "manual" }, ctx);
 		await stub.fire("session_compact", {}, ctx);
 		await stub.fire("session_shutdown", { reason: "quit" }, ctx);

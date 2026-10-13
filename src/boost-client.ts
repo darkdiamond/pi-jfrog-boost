@@ -19,11 +19,29 @@
  * agreement and installs hooks into other agents). Only the model, through
  * its own shell, or the user may run them (invariant 4).
  *
- * Attribution: the stdin filter and `boost read` take the agent identity from
- * `BOOST_HOOK_META`, so their spans record `pi`; `boost hook claude` (MCP) and
- * `boost hook observe claude` record `claude_code`, because Boost has no pi
- * dialect. AGENT_TYPE and OBSERVE_DIALECT stay single constants so adopting
- * a future pi agent type is a one-line change.
+ * Attribution, as measured on Boost v0.15.4 (spec §14, Probe 1):
+ *
+ *   surface                          span session.agent_type  Boost session list (conversations.tool)
+ *   -------------------------------  -----------------------  ---------------------------------------
+ *   stdin filter, `boost read`       pi                       claude_code (Boost does not recognise pi)
+ *   `boost hook claude` (MCP)        claude_code              claude_code; mcp_tool_calls.agent_type =
+ *                                                             claude_code, no conversation id
+ *   `boost hook observe claude`      pi (never rewrites       claude_code; creates and closes
+ *   (opt-in)                         earlier spans)           agent_tool_calls rows
+ *   `boost sync`                     unchanged                unchanged; uploads, then prunes local
+ *                                                             rows (≥ 0.13.29)
+ *
+ * The span's agent type comes only from `BOOST_HOOK_META.agent_type`
+ * (`BOOST_AGENT_TYPE` and the stdin `agent_type` have no visible effect), so
+ * every surface that honours it records `pi`. `conversations.tool` maps the
+ * agents Boost knows and falls back to `claude_code` for anything else, which
+ * is why every pi session is listed as claude_code whatever the surface —
+ * observe included; it does not cause the label. `hook claude` ignores
+ * `BOOST_HOOK_META` for MCP and stamps `claude_code` itself; it is used
+ * because it is the only surface that runs Boost's MCP filters. `hook
+ * opencode` is never used: it would split one pi session across two agents.
+ * AGENT_TYPE and HOOK_DIALECT stay single constants, so adopting a future
+ * `pi` agent type in Boost is a one-line change.
  *
  * Everything here fails open: every method resolves, never rejects, and a
  * result the caller cannot use means "keep the original".
