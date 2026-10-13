@@ -1215,3 +1215,62 @@ test("shell: on forces CLI filtering for pi's own Boost call only", async () => 
 	assert.equal(on.spawns.length, 1);
 	assert.equal(on.spawns[0]?.env.BOOST_FEATURE_FLAGS_FORCE_ENABLED, "boost-cli-filtering");
 });
+
+// ---------------------------------------------------------------------------
+// The full-output re-filter (spec §6.3), wired
+
+const fullRoot = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-full-"));
+after(() => rmSync(fullRoot, { recursive: true, force: true }));
+
+test("a bash result pi truncated is re-filtered from its full-output file", async () => {
+	const path = join(fullRoot, "pi-bash-00000000000000aa.log");
+	const run = ["not ok 1 - early failure", NOISY, NOISY].join("\n");
+	writeFileSync(path, run);
+	const tail = `${NOISY}\n\n[Showing lines 201-401 of 401. Full output: ${path}]\n\nCommand exited with code 1`;
+	const sent: { text: string; maxInputBytes?: number }[] = [];
+	const counters = createCounters();
+	const { fire } = harness({
+		counters,
+		overrides: {
+			filter: async (_meta, text, options) => {
+				sent.push({ text, ...(options?.maxInputBytes ? { maxInputBytes: options.maxInputBytes } : {}) });
+				return call("not ok 1 - early failure\n# pass 400");
+			},
+		},
+	});
+	const patched = (await fire(
+		"tool_result",
+		bashResult("npm test", tail, { isError: true, details: { truncation: {}, fullOutputPath: path } }),
+	)) as { content: { text: string }[]; details: { jfrogBoost: Record<string, unknown> }; isError?: boolean };
+	assert.deepEqual(
+		sent,
+		[{ text: run, maxInputBytes: 2 * 1024 * 1024 }],
+		"the whole run, under the 2 MiB ceiling",
+	);
+	assert.equal(
+		patched.content[0]?.text,
+		`not ok 1 - early failure\n# pass 400\n\n[Boost compacted the full 401-line output. Full output: ${path}]\n\nCommand exited with code 1`,
+	);
+	assert.equal("isError" in patched, false, "isError is left as the tool set it");
+	assert.equal(patched.details.jfrogBoost.full, true);
+	assert.deepEqual(counters.skips(), {});
+});
+
+test("a truncated result whose file is gone is compacted from pi's tail instead", async () => {
+	const path = join(fullRoot, "pi-bash-00000000000000bb.log");
+	const tail = `${NOISY}\n\n[Showing lines 201-401 of 401. Full output: ${path}]`;
+	const counters = createCounters();
+	const { fire, calls } = harness({ filterResult: "compacted", counters });
+	const patched = (await fire(
+		"tool_result",
+		bashResult("npm test", tail, { details: { fullOutputPath: path } }),
+	)) as {
+		content: { text: string }[];
+	};
+	assert.deepEqual(
+		filterCalls(calls).map((c) => c.text),
+		[NOISY],
+	);
+	assert.equal(patched.content[0]?.text, `compacted\n\n[Showing lines 201-401 of 401. Full output: ${path}]`);
+	assert.equal(counters.skips()["full-unreadable"], 1);
+});

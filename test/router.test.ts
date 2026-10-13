@@ -23,6 +23,7 @@ function input(over: Partial<RouteInput> = {}): RouteInput {
 		shellOn: true,
 		settings: {
 			minBytes: 2048,
+			fullOutput: true,
 			readLogs: false,
 			documents: true,
 			notebooks: true,
@@ -37,6 +38,7 @@ function input(over: Partial<RouteInput> = {}): RouteInput {
 const reason = (r: Route) => (r.kind === "skip" ? r.reason : r.kind);
 const settings = (over: Partial<RouteInput["settings"]>) => ({
 	minBytes: 2048,
+	fullOutput: true,
 	readLogs: false,
 	documents: true,
 	notebooks: true,
@@ -359,4 +361,55 @@ test("shell rows: a coloured HTML document is still an HTML document", () => {
 		assert.equal(reason(route(input({ text: coloured, input: { command } }))), "html", command);
 	}
 	assert.equal(reason(route(input({ text: coloured, input: { command: "curl https://x" } }))), "shell");
+});
+
+// ---------------------------------------------------------------------------
+// The full-output route (spec §6.3)
+
+const FULL = "/tmp/pi-bash-0123456789abcdef.log";
+const truncatedText = (path = FULL) =>
+	`${big()}\n\n[Showing lines 7001-9000 of 9000. Full output: ${path}]\n\nCommand exited with code 1`;
+
+test("a result pi truncated, naming its full-output file, takes the full-output route", () => {
+	assert.deepEqual(route(input({ text: truncatedText(), fullOutputPath: FULL })), { kind: "shell-full" });
+	assert.equal(
+		reason(route(input({ text: truncatedText(), fullOutputPath: FULL, isError: true }))),
+		"shell-full",
+	);
+	assert.equal(
+		reason(route(input({ toolName: "powershell", text: truncatedText(), fullOutputPath: FULL }))),
+		"shell-full",
+	);
+});
+
+test("without the notice, the path, a match between them or fullOutput, the tail route stands", () => {
+	assert.equal(
+		reason(route(input({ text: truncatedText() }))),
+		"shell",
+		"no path in structuredContent/details",
+	);
+	assert.equal(reason(route(input({ fullOutputPath: FULL }))), "shell", "no notice: pi did not truncate");
+	assert.equal(
+		reason(route(input({ text: truncatedText("/tmp/other.log"), fullOutputPath: FULL }))),
+		"shell",
+	);
+	assert.equal(
+		reason(
+			route(
+				input({ text: truncatedText(), fullOutputPath: FULL, settings: settings({ fullOutput: false }) }),
+			),
+		),
+		"shell",
+	);
+});
+
+test("the full-output route only follows a result the shell route would take", () => {
+	const at = (over: Partial<RouteInput>) =>
+		reason(route(input({ text: truncatedText(), fullOutputPath: FULL, ...over })));
+	assert.equal(at({ shellOn: false }), "shell-off");
+	assert.equal(at({ input: { command: "DISABLE_BOOST=1 npm test" } }), "bypass");
+	assert.equal(at({ text: `${HTML}\n\n[Showing lines 1-2 of 9. Full output: ${FULL}]` }), "html");
+	assert.equal(at({ text: `x\n\n[Showing lines 2-2 of 2. Full output: ${FULL}]` }), "small");
+	assert.equal(at({ paused: true }), "paused");
+	assert.equal(at({ toolName: "read" }), "exact");
 });

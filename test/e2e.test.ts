@@ -701,6 +701,53 @@ test("an MCP result pi truncated is re-filtered from pi's full-output file", { s
 	assert.ok(Buffer.byteLength(outcome.text) < truncated.length);
 });
 
+// Spec §16.3 case 13.
+test("a long run pi truncated is re-filtered whole, so its early failures reach the model", {
+	skip,
+}, async (t) => {
+	// ~9000 lines of TAP whose three failures come first: pi keeps the last
+	// 2000 lines (or 50 KiB), which are all passes, and saves the whole run
+	// under os.tmpdir() — the hermetic HOME's tmp here.
+	writeFileSync(
+		join(dir, "long.test.mjs"),
+		[
+			`import { test } from "node:test";`,
+			`import assert from "node:assert/strict";`,
+			`for (let i = 0; i < ${FAILING}; i++) test(\`early \${i} fails\`, () => assert.equal(i, 42));`,
+			`for (let i = 0; i < 1490; i++) test(\`case \${i} passes\`, () => {});`,
+		].join("\n"),
+	);
+	const long = await run("bash", { command: "node --test --test-reporter=tap long.test.mjs" });
+	const notice =
+		/\n\n\[Showing lines \d+-(\d+) of (\d+)[^\n]*\. Full output: ([^\n]+)\]\n\nCommand exited with code 1$/.exec(
+			long.original,
+		);
+	assert.ok(notice, `pi truncated the run: ${long.original.slice(-200)}`);
+	const [, , total, path] = notice;
+	assert.ok(Number(total) >= 8000, `${total} lines`);
+	assert.doesNotMatch(long.original, /^not ok \d+ - early 0 fails$/m, "pi's tail dropped the early failures");
+
+	assert.ok(long.changed, "the truncated run was left as pi's tail");
+	assert.equal(long.isError, true);
+	for (let i = 0; i < FAILING; i++) {
+		assert.match(long.text, new RegExp(`not ok \\d+ - early ${i} fails`), `early failure ${i} surfaced`);
+	}
+	assert.ok(
+		long.text.endsWith(
+			`\n\n[Boost compacted the full ${total}-line output. Full output: ${path}]\n\nCommand exited with code 1`,
+		),
+		long.text.slice(-300),
+	);
+	const body = long.text.slice(0, long.text.indexOf("\n\n[Boost compacted the full"));
+	assert.ok(body.split("\n").length <= 2000 && Buffer.byteLength(body) <= 50 * 1024, "within pi's page");
+	if (line === "1.2") assert.deepEqual(long.structuredContent, long.originalStructuredContent);
+	const details = long.details as { jfrogBoost?: { kind?: string; full?: boolean } } | undefined;
+	assert.deepEqual([details?.jfrogBoost?.kind, details?.jfrogBoost?.full], ["compacted", true]);
+	t.diagnostic(
+		`pi's tail ${Buffer.byteLength(long.original)} B → ${Buffer.byteLength(long.text)} B from ${total} lines`,
+	);
+});
+
 const onlyOn12 = skip || (line !== "1.2" ? "pi 1.x only: 0.86 has no nested calls" : false);
 
 test("a nested tool call is left exactly as pi returned it", { skip: onlyOn12 }, async () => {

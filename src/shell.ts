@@ -15,9 +15,26 @@
  * strips terminal escapes from what Boost reads, and only accepts a reply
  * that is a meaningful reduction. A reply that is not leaves the tool's
  * original bytes — escapes and all — untouched (invariant 1).
+ *
+ * When pi truncated the output, the full-output re-filter (§6.3) sends the
+ * whole run pi saved to its temp file instead of the tail pi kept, so the
+ * early failures pi's tail cut off reach the model — without changing what
+ * was executed.
  */
+import { realpathSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, sep } from "node:path";
 import type { BoostCall } from "./boost-client.ts";
-import { isMeaningfulReduction, parseMarker, splitNotices, stripAnsi } from "./content.ts";
+import {
+	isMeaningfulReduction,
+	isPlainObject,
+	looksLikeHtmlDocument,
+	parseMarker,
+	splitNotices,
+	stripAnsi,
+} from "./content.ts";
+import { PI_MAX_BYTES, PI_MAX_LINES } from "./documents.ts";
 
 // ---------------------------------------------------------------------------
 // Command parsing
@@ -280,6 +297,8 @@ export interface Compaction {
 	after: number;
 	/** The id in Boost's trailing marker, when it added one. */
 	retrieveId?: number;
+	/** Built from pi's full-output file rather than the tail pi kept (§6.3). */
+	full?: true;
 }
 
 export interface CompactOutcome {
@@ -321,6 +340,204 @@ export async function compactShellOutput(
 			before: text.length,
 			after: replacement.length,
 			...(marker ? { retrieveId: marker.id } : {}),
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// The full-output re-filter (spec §6.3)
+
+/**
+ * The largest full-output file read (spec §8.5): twice the 1 MiB every other
+ * route sends. A test run long enough for pi to truncate is exactly the
+ * output this route exists for, and a run that printed more than 2 MiB is
+ * left to the tail route rather than costing a 10 s filter call.
+ */
+export const FULL_OUTPUT_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The full-output file a shell result names, from where pi records it:
+ * `structuredContent.full_output_path` (pi 1.x's bash output schema) or
+ * `details.fullOutputPath` (bash and powershell on every supported pi,
+ * 0.86.1 included). Undefined when neither holds a non-empty string.
+ */
+export function fullOutputPathOf(structuredContent: unknown, details: unknown): string | undefined {
+	const sources: [unknown, string][] = [
+		[structuredContent, "full_output_path"],
+		[details, "fullOutputPath"],
+	];
+	for (const [source, key] of sources) {
+		const path = isPlainObject(source) ? source[key] : undefined;
+		if (typeof path === "string" && path) return path;
+	}
+	return undefined;
+}
+
+/**
+ * The notice in `notices` (as {@link splitNotices} returns them) through
+ * which pi told the model it truncated the output and where the rest is:
+ * `[Showing lines 7001-9000 of 9000. Full output: <path>]` and its byte-limit
+ * and partial-line variants. Its index among the "\n\n"-separated notices,
+ * or -1 when there is none naming exactly `path`.
+ *
+ * The path has to be the one the tool recorded. A result whose `details`
+ * point at one file while its text names another (or none: an `extraTools`
+ * tool that merely has a `fullOutputPath` field) is not pi's truncation, and
+ * keeps the tail route.
+ */
+export function fullOutputNoticeIndex(notices: string, path: string): number {
+	return notices
+		.split("\n\n")
+		.findIndex((notice) => notice.startsWith("[") && notice.endsWith(`Full output: ${path}]`));
+}
+
+export interface FullOutputFileDeps {
+	/** Where pi writes its full-output files; defaults to `os.tmpdir()`, read per call. */
+	tmpdir?: () => string;
+	readFile?: (path: string) => Promise<string>;
+	realpath?: (path: string) => string;
+	stat?: (path: string) => { isFile(): boolean; size: number; uid?: number };
+	/** The current user's id, or undefined where there is none (Windows); defaults to `process.getuid`. */
+	uid?: () => number | undefined;
+}
+
+/**
+ * The text of a full-output file, or undefined when it must not be read.
+ * The path comes from the result's `details` or `structuredContent`, which
+ * the tool fills — and an `extraTools` tool is anyone's code — while what is
+ * read goes to Boost (whose DB keeps it and whose sync uploads it) and
+ * replaces the result. So it is read only when, after resolving links, it is:
+ *
+ *   - an absolute path inside the temp directory pi writes to (pi's
+ *     `createOutputFilePath` joins `os.tmpdir()`); never anywhere else;
+ *   - a regular file owned by this user (pi creates it 0600), where the
+ *     platform has user ids;
+ *   - no larger than {@link FULL_OUTPUT_MAX_BYTES};
+ *   - text: a NUL means binary on stdout, which Boost does not filter.
+ *
+ * Never throws: a file that vanished, a dangling link or an unreadable
+ * temp directory is simply not used.
+ */
+export async function readFullOutputFile(
+	path: string,
+	deps: FullOutputFileDeps = {},
+): Promise<string | undefined> {
+	const realpath = deps.realpath ?? realpathSync;
+	const stat = deps.stat ?? statSync;
+	const read = deps.readFile ?? ((p: string) => readFile(p, "utf8"));
+	try {
+		if (!isAbsolute(path)) return undefined;
+		const root = realpath((deps.tmpdir ?? tmpdir)());
+		const real = realpath(path);
+		if (!real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) return undefined;
+		const info = stat(real);
+		if (!info.isFile() || info.size > FULL_OUTPUT_MAX_BYTES) return undefined;
+		const me = (deps.uid ?? (() => process.getuid?.()))();
+		if (me !== undefined && info.uid !== undefined && info.uid !== me) return undefined;
+		const text = await read(real);
+		// Checked on what was read too: the file may have grown since the stat.
+		if (Buffer.byteLength(text) > FULL_OUTPUT_MAX_BYTES || text.includes("\0")) return undefined;
+		return text;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Lines in `text` as pi counts a run's output: a final newline ends the last line, it does not start one. */
+function lineCount(text: string): number {
+	if (!text) return 0;
+	const lines = text.split("\n").length;
+	return text.endsWith("\n") ? lines - 1 : lines;
+}
+
+/** Whether `text` fits the page pi's own truncation leaves the model: 2000 lines and 50 KiB. */
+function fitsPiPage(text: string): boolean {
+	return lineCount(text) <= PI_MAX_LINES && Buffer.byteLength(text) <= PI_MAX_BYTES;
+}
+
+export interface FullOutcome extends CompactOutcome {
+	/**
+	 * Why the full output was not used and the tail route ran instead:
+	 * `unreadable` when the file failed the checks of
+	 * {@link readFullOutputFile} (or the result names no such file), `html`
+	 * when the run is a whole HTML page the router would have kept exact,
+	 * `unfit` when Boost answered but its version of the whole run was no
+	 * meaningful reduction or would not fit pi's page.
+	 */
+	fullSkipped?: "unreadable" | "html" | "unfit";
+	/** The call that filtered the full output, when its reply went unused and the tail was filtered after it. */
+	fullCall?: BoostCall;
+}
+
+export interface FullOutputRequest {
+	/** The result's text: pi's tail and its notices. */
+	text: string;
+	/** The full-output file the result names ({@link fullOutputPathOf}). */
+	path: string;
+	/**
+	 * Whether a whole HTML page may go to Boost: the router's `html` rule
+	 * judges pi's tail, which is the end of a page, not its `<!doctype>`.
+	 */
+	htmlAllowed: boolean;
+}
+
+/**
+ * The full-output re-filter (spec §6.3): pi truncated a shell result to its
+ * last 2000 lines or 50 KiB and saved the whole run to a temp file. A test
+ * run's failures are usually at the top or in the middle, so the tail the
+ * model got is mostly passing tests; Boost given the whole run keeps the
+ * failures and drops the passes.
+ *
+ * 1. The file is read under the guards of {@link readFullOutputFile},
+ *    stripped of terminal escapes, and filtered.
+ * 2. The reply is used only when it is a meaningful reduction of the whole
+ *    run and fits pi's own page, so the model never gets more than pi would
+ *    have given it. pi's `Full output:` notice is then rewritten to say what
+ *    happened — `[Boost compacted the full 9000-line output. Full output: <path>]`
+ *    — and pi's other notices (the exit status) stay as they were.
+ * 3. Anything else falls back to the tail route (§6.2) in the same call:
+ *    an unusable file, an HTML page, or a reply that is too long or saves
+ *    too little. When the call itself failed — refused (busy, paused),
+ *    timed out, killed, exited non-zero — the original result stands
+ *    instead: a second call would meet the same Boost, and invariant 2
+ *    says a slow Boost is not waited on twice.
+ *
+ * Never throws for the file's or Boost's sake.
+ */
+export async function compactFullOutput(
+	request: FullOutputRequest,
+	filter: (body: string) => Promise<BoostCall>,
+	deps: FullOutputFileDeps = {},
+): Promise<FullOutcome> {
+	const { text, path } = request;
+	const tail = async (fullSkipped: NonNullable<FullOutcome["fullSkipped"]>, fullCall?: BoostCall) => ({
+		...(await compactShellOutput(text, filter)),
+		fullSkipped,
+		...(fullCall ? { fullCall } : {}),
+	});
+	const { notices } = splitNotices(text);
+	const parts = notices.split("\n\n");
+	const at = fullOutputNoticeIndex(notices, path);
+	if (at < 0) return tail("unreadable");
+	const full = await readFullOutputFile(path, deps);
+	const stripped = full === undefined ? "" : stripAnsi(full);
+	if (!stripped.trim()) return tail("unreadable");
+	if (!request.htmlAllowed && looksLikeHtmlDocument(stripped)) return tail("html");
+	const call = await filter(stripped);
+	if (call.code !== 0 || call.skipped || call.timedOut || call.aborted) return { call };
+	const reply = call.stdout.trimEnd();
+	if (!isMeaningfulReduction(stripped, reply) || !fitsPiPage(reply)) return tail("unfit", call);
+	parts[at] = `[Boost compacted the full ${lineCount(stripped)}-line output. Full output: ${path}]`;
+	const replacement = `${reply}${parts.join("\n\n")}`;
+	const marker = parseMarker(reply);
+	return {
+		call,
+		compaction: {
+			text: replacement,
+			before: text.length,
+			after: replacement.length,
+			...(marker ? { retrieveId: marker.id } : {}),
+			full: true,
 		},
 	};
 }

@@ -37,15 +37,20 @@
  *                                  compact on v0.15.4 and cost ~240 ms each;
  *                                  edit and write are what the model edits from
  *
- * The full-output route (WP6) is declared in {@link Route} but not produced
- * yet: truncated shell results go down the plain shell route until it lands.
+ * A shell result pi truncated goes down the full-output route (`shell-full`,
+ * spec §6.3) instead of the plain shell route when `fullOutput` is on and the
+ * result names the file pi saved the whole run to — in its notice and in
+ * `structuredContent`/`details` alike. Only results the shell route would
+ * take qualify, so the full-output route can always fall back to it; the
+ * checks on the file itself (under the temp directory, ≤ 2 MiB, a regular
+ * file) need the filesystem and are made by shell.ts, not here.
  */
 
 import type { BoostVersion } from "./boost-binary.ts";
 import { looksLikeHtmlDocument, splitNotices } from "./content.ts";
 import { documentMode, PI_OFFSET_ERROR } from "./documents.ts";
 import { isMcpTool, type McpSkipReason, mcpSkip } from "./mcp.ts";
-import { bypassesBoost, isWebFetch } from "./shell.ts";
+import { bypassesBoost, fullOutputNoticeIndex, isWebFetch } from "./shell.ts";
 import { extensionOf, isShell, LOG_EXTENSIONS, NEVER_EXTRA } from "./tools.ts";
 
 /** The largest body any route sends to Boost (was 4 MiB in 0.3.0; spec §8.5). */
@@ -80,6 +85,8 @@ export type Route =
 /** The settings the router reads. */
 export interface RouteSettings {
 	minBytes: number;
+	/** Re-filter pi's full-output file when it truncated a shell result (§6.3). */
+	fullOutput: boolean;
 	readLogs: boolean;
 	documents: boolean;
 	notebooks: boolean;
@@ -105,6 +112,11 @@ export interface RouteInput {
 	paused: boolean;
 	/** The shell gate (spec §8.4) resolves on. */
 	shellOn: boolean;
+	/**
+	 * The full-output file the result names in `structuredContent` or
+	 * `details` (shell.ts `fullOutputPathOf`), when it names one.
+	 */
+	fullOutputPath?: string | undefined;
 	/** The running Boost's version, when known (the MCP route needs ≥ 0.15.3). */
 	boostVersion?: BoostVersion | undefined;
 	/**
@@ -164,18 +176,31 @@ function routeShell(r: RouteInput): Route {
 	// pi throws on abort and reports what was printed so far. Half a run is
 	// not worth summarising, and the model is about to be interrupted anyway.
 	if (r.text.trimEnd().endsWith("Command aborted")) return skip("aborted");
-	const { body } = splitNotices(r.text);
-	// Boost turns a whole HTML page into article text, whatever produced it.
-	// Wanted for a fetched page; not for `cat index.html`, which the model is
-	// about to edit. An extraTools tool without a command (a fetch tool) was
-	// opted in by the user for exactly this, so its pages go through too.
-	const fetched = isWebFetch(command) || (!isShell(r.toolName) && typeof command !== "string");
-	if (looksLikeHtmlDocument(body) && !fetched) return skip("html");
+	const { body, notices } = splitNotices(r.text);
+	if (looksLikeHtmlDocument(body) && !htmlAllowed(r.toolName, command)) return skip("html");
 	// Binary on stdout (`cat image.png`): Boost filters text.
 	if (body.includes("\0")) return skip("binary");
 	// Shell failures are compacted too — a failing test run is the noisiest
 	// output there is — and keep `isError`.
-	return sizeSkip(body, r.settings.minBytes) ?? { kind: "shell" };
+	const tail = sizeSkip(body, r.settings.minBytes) ?? { kind: "shell" };
+	// pi kept only the tail and saved the whole run (spec §6.3). Decided after
+	// the tail's own checks, so the full-output route's fallback — the plain
+	// shell route on the same text — is always one this table allows.
+	const truncated = r.fullOutputPath && fullOutputNoticeIndex(notices, r.fullOutputPath) >= 0;
+	if (tail.kind === "shell" && r.settings.fullOutput && truncated) return { kind: "shell-full" };
+	return tail;
+}
+
+/**
+ * Whether a whole HTML page in this tool's output may go to Boost, which
+ * turns it into article text whatever produced it. Wanted for a fetched page;
+ * not for `cat index.html`, which the model is about to edit. An extraTools
+ * tool without a command (a fetch tool) was opted in by the user for exactly
+ * this, so its pages go through too. Exported for the full-output route,
+ * which sniffs the whole run rather than pi's tail.
+ */
+export function htmlAllowed(toolName: string, command: unknown): boolean {
+	return isWebFetch(command) || (!isShell(toolName) && typeof command !== "string");
 }
 
 function routeRead(r: RouteInput): Route {

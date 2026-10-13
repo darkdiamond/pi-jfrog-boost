@@ -70,9 +70,15 @@ import {
 } from "./health.ts";
 import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
 import { compactMcpResult, isMcpTool } from "./mcp.ts";
-import { route } from "./router.ts";
+import { htmlAllowed, route } from "./router.ts";
 import { createSettingsStore, type SettingsStore } from "./settings.ts";
-import { type Compaction, compactShellOutput } from "./shell.ts";
+import {
+	type Compaction,
+	compactFullOutput,
+	compactShellOutput,
+	FULL_OUTPUT_MAX_BYTES,
+	fullOutputPathOf,
+} from "./shell.ts";
 import { createSyncScheduler } from "./sync.ts";
 import { equivalentCommand, resolveReadPath } from "./tools.ts";
 
@@ -368,6 +374,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			// Never waits on the probe (invariant 2): until Boost is known to be
 			// ready, results pass through exactly as the tool returned them.
 			const ready = !off && readiness.check().kind === "ready";
+			const fullOutputPath = fullOutputPathOf(structuredContentOf(event), event.details);
 			const decision = route({
 				toolName: event.toolName,
 				input: event.input,
@@ -379,6 +386,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				ready,
 				paused: ready && breaker.state().kind === "open",
 				shellOn: ready && shellOn(),
+				fullOutputPath,
 				boostVersion: readiness.version(),
 				// Read from config.toml only for an MCP result that may be sent.
 				mcpFlag:
@@ -457,7 +465,21 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				return asResult(compactedPatch(event, compaction, "mcp"));
 			}
 			let outcome: Awaited<ReturnType<typeof compactShellOutput>>;
-			if (decision.kind === "shell") {
+			if (decision.kind === "shell-full" && fullOutputPath !== undefined) {
+				const full = await compactFullOutput(
+					{ text, path: fullOutputPath, htmlAllowed: htmlAllowed(event.toolName, event.input.command) },
+					(body) =>
+						client.filter(hookMeta, body, {
+							signal,
+							toolInput: event.input,
+							maxInputBytes: FULL_OUTPUT_MAX_BYTES,
+						}),
+				);
+				// Why the whole run was not used, when the tail route ran instead;
+				// the tail's own call is counted below like any shell call.
+				if (full.fullSkipped) counters.skip(`full-${full.fullSkipped}`);
+				outcome = full;
+			} else if (decision.kind === "shell") {
 				outcome = await compactShellOutput(text, (body) =>
 					client.filter(hookMeta, body, { signal, toolInput: event.input }),
 				);
@@ -471,7 +493,6 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					client.filter(hookMeta, body, { signal, toolInput }),
 				);
 			} else {
-				// shell-full (WP6): not routed yet.
 				return;
 			}
 			const counted = outcome.call ? noteCall(outcome.call) : false;

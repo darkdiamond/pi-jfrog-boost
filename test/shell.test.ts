@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import type { BoostCall } from "../src/boost-client.ts";
 import {
 	bypassesBoost,
+	compactFullOutput,
 	compactShellOutput,
+	FULL_OUTPUT_MAX_BYTES,
+	fullOutputNoticeIndex,
+	fullOutputPathOf,
 	isWebFetch,
 	programName,
 	programOf,
+	readFullOutputFile,
 	splitSegments,
 	words,
 } from "../src/shell.ts";
@@ -292,4 +300,261 @@ test("a reply without a marker has no retrieve id", async () => {
 	assert.equal(outcome.compaction?.text, "3 failures");
 	assert.equal(outcome.compaction?.retrieveId, undefined);
 	assert.equal("retrieveId" in (outcome.compaction ?? {}), false);
+});
+
+// ---------------------------------------------------------------------------
+// The full-output re-filter (spec §6.3)
+
+/** A directory under the temp directory pi writes to, as pi's own files are. */
+const TMP = mkdtempSync(join(tmpdir(), "jfrog-boost-full-"));
+/**
+ * For the containment tests, pi's temp directory is narrowed to one
+ * subdirectory, so a sibling is "outside" it without writing anywhere but
+ * the real temp directory.
+ */
+const PI_TMP = mkdtempSync(join(TMP, "pi-"));
+const OUTSIDE = mkdtempSync(join(TMP, "outside-"));
+const narrowed = { tmpdir: () => PI_TMP };
+after(() => rmSync(TMP, { recursive: true, force: true }));
+
+let fileId = 0;
+function saved(text: string, dir = TMP): string {
+	const path = join(dir, `pi-bash-${(++fileId).toString(16).padStart(16, "0")}.log`);
+	writeFileSync(path, text);
+	return path;
+}
+
+/** A 9000-line TAP run whose failures come first, as pi's tail would hide them. */
+const FAILURES = ["not ok 1 - case 0 fails", "not ok 2 - case 1 fails"];
+const FULL_RUN = [
+	"TAP version 13",
+	...FAILURES,
+	...Array.from({ length: 8996 }, (_, i) => `ok ${i + 3} - case ${i + 2} passes`),
+	"1..8998",
+].join("\n");
+const TAIL = FULL_RUN.split("\n").slice(-2000).join("\n");
+
+/** pi's truncated bash result for a run saved at `path`, with its exit status. */
+const truncated = (path: string, exit = "\n\nCommand exited with code 1") =>
+	`${TAIL}\n\n[Showing lines 7001-9000 of 9000. Full output: ${path}]${exit}`;
+
+/** A filter that records what it was sent and answers by the input. */
+function recorder(answer: (body: string) => BoostCall) {
+	const sent: string[] = [];
+	return {
+		sent,
+		filter: async (body: string) => {
+			sent.push(body);
+			return answer(body);
+		},
+	};
+}
+const SUMMARY = `${FAILURES.join("\n")}\n# pass 8996\n# fail 2\n${MARKER}`;
+
+test("the full-output path is found in structuredContent or details", () => {
+	assert.equal(fullOutputPathOf({ full_output_path: "/tmp/a.log" }, undefined), "/tmp/a.log");
+	assert.equal(fullOutputPathOf(undefined, { fullOutputPath: "/tmp/b.log" }), "/tmp/b.log");
+	// pi 1.x sets both to the same file; structuredContent is the schema'd one.
+	assert.equal(
+		fullOutputPathOf({ full_output_path: "/tmp/a.log" }, { fullOutputPath: "/tmp/b.log" }),
+		"/tmp/a.log",
+	);
+	for (const [structured, details] of [
+		[undefined, undefined],
+		[{ exitCode: 0 }, { truncation: {} }],
+		[{ full_output_path: "" }, { fullOutputPath: 7 }],
+		["text", ["/tmp/a.log"]],
+	]) {
+		assert.equal(fullOutputPathOf(structured, details), undefined, JSON.stringify([structured, details]));
+	}
+});
+
+test("only pi's notice naming exactly that file counts as a truncation", () => {
+	const notices =
+		"\n\n[Showing lines 7001-9000 of 9000. Full output: /tmp/pi-bash-1.log]\n\nCommand exited with code 1";
+	assert.equal(fullOutputNoticeIndex(notices, "/tmp/pi-bash-1.log"), 1);
+	assert.equal(
+		fullOutputNoticeIndex(
+			"\n\n[Showing last 50.0KB of line 1 (line is 1.2MB). Full output: /t/x.log]",
+			"/t/x.log",
+		),
+		1,
+	);
+	assert.equal(fullOutputNoticeIndex(notices, "/tmp/pi-bash-1"), -1, "a prefix of the path is not the path");
+	assert.equal(fullOutputNoticeIndex(notices, "/tmp/other.log"), -1);
+	assert.equal(fullOutputNoticeIndex("\n\nCommand exited with code 1", "/tmp/pi-bash-1.log"), -1);
+});
+
+test("the whole run is filtered and pi's notice is rewritten; the exit status stays", async () => {
+	const path = saved(FULL_RUN);
+	const text = truncated(path);
+	const boost = recorder(() => reply(`${SUMMARY}\n`));
+	const outcome = await compactFullOutput({ text, path, htmlAllowed: false }, boost.filter);
+	assert.deepEqual(boost.sent, [FULL_RUN], "Boost was sent the whole run, once");
+	assert.equal(
+		outcome.compaction?.text,
+		`${SUMMARY}\n\n[Boost compacted the full 9000-line output. Full output: ${path}]\n\nCommand exited with code 1`,
+	);
+	assert.match(
+		outcome.compaction?.text ?? "",
+		/^not ok 1 - case 0 fails$/m,
+		"the failures pi's tail dropped",
+	);
+	assert.equal(outcome.compaction?.full, true);
+	assert.equal(outcome.compaction?.retrieveId, 147);
+	assert.equal(outcome.compaction?.before, text.length);
+	assert.equal(outcome.fullSkipped, undefined);
+});
+
+test("terminal escapes are stripped from the file before Boost sees it", async () => {
+	const path = saved(`\u001b[31m${FULL_RUN}\u001b[0m\n`);
+	const boost = recorder(() => reply(SUMMARY));
+	const outcome = await compactFullOutput({ text: truncated(path), path, htmlAllowed: false }, boost.filter);
+	assert.deepEqual(boost.sent, [`${FULL_RUN}\n`]);
+	assert.match(outcome.compaction?.text ?? "", /full 9000-line output/, "a final newline is no extra line");
+});
+
+test("a reply over pi's page falls back to the tail route in the same call", async () => {
+	const path = saved(FULL_RUN);
+	const text = truncated(path);
+	for (const long of [
+		Array.from({ length: 2001 }, (_, i) => `k${i}`).join("\n"), // over 2000 lines
+		"z".repeat(50 * 1024 + 1), // over 50 KiB
+	]) {
+		const boost = recorder((body) => (body === FULL_RUN ? reply(long) : reply("tail summary\n")));
+		const outcome = await compactFullOutput({ text, path, htmlAllowed: false }, boost.filter);
+		assert.equal(boost.sent.length, 2);
+		assert.equal(boost.sent[1], TAIL, "the tail route sends pi's tail without its notices");
+		assert.equal(outcome.fullSkipped, "unfit");
+		assert.equal(outcome.fullCall?.stdout, long);
+		assert.equal(
+			outcome.compaction?.text,
+			`tail summary\n\n[Showing lines 7001-9000 of 9000. Full output: ${path}]\n\nCommand exited with code 1`,
+			"pi's own notice is kept on the tail",
+		);
+		assert.equal(outcome.compaction?.full, undefined);
+	}
+});
+
+test("a reply that is no meaningful reduction of the whole run falls back to the tail", async () => {
+	const path = saved(FULL_RUN);
+	const boost = recorder((body) => reply(body === FULL_RUN ? FULL_RUN.slice(0, -100) : body));
+	const outcome = await compactFullOutput({ text: truncated(path), path, htmlAllowed: false }, boost.filter);
+	assert.equal(boost.sent.length, 2);
+	assert.equal(outcome.fullSkipped, "unfit");
+	assert.equal(outcome.compaction, undefined, "the tail echo is not applied either");
+});
+
+test("a missing or unusable file falls back to the tail, which Boost sees as usual", async () => {
+	const missing = join(TMP, "pi-bash-gone.log");
+	const dir = mkdtempSync(join(TMP, "dir-"));
+	const empty = saved("\u001b[0m\n");
+	const binary = saved(`${FULL_RUN}\0`);
+	for (const path of [missing, dir, empty, binary, "relative/pi-bash-1.log"]) {
+		const boost = recorder(() => reply("tail summary"));
+		const outcome = await compactFullOutput(
+			{ text: truncated(path), path, htmlAllowed: false },
+			boost.filter,
+		);
+		assert.deepEqual(boost.sent, [TAIL], path);
+		assert.equal(outcome.fullSkipped, "unreadable", path);
+		assert.match(outcome.compaction?.text ?? "", /^tail summary\n\n\[Showing lines/, path);
+	}
+});
+
+test("a path outside the temp directory is never read, even through a link", async () => {
+	const outside = saved(FULL_RUN, OUTSIDE);
+	const link = join(PI_TMP, "pi-bash-link.log");
+	symlinkSync(outside, link);
+	// `<pi tmp>/../outside-…/x.log` is spelled under the temp directory but is not in it.
+	const dotted = `${PI_TMP}/../${outside.slice(TMP.length + 1)}`;
+	for (const path of [outside, link, dotted]) {
+		assert.equal(await readFullOutputFile(path, narrowed), undefined, path);
+		const boost = recorder(() => reply("tail summary"));
+		const outcome = await compactFullOutput(
+			{ text: truncated(path), path, htmlAllowed: false },
+			boost.filter,
+			narrowed,
+		);
+		assert.deepEqual(boost.sent, [TAIL], "only the tail reached Boost");
+		assert.equal(outcome.fullSkipped, "unreadable");
+	}
+	// A file that is in the temp directory is read.
+	assert.equal(await readFullOutputFile(saved(FULL_RUN, PI_TMP), narrowed), FULL_RUN);
+});
+
+test("a file over 2 MiB is not read", async () => {
+	const line = "ok 1 - case passes\n";
+	const fits = saved(line.repeat(Math.floor(FULL_OUTPUT_MAX_BYTES / line.length)));
+	assert.ok(await readFullOutputFile(fits));
+	const over = saved("x".repeat(FULL_OUTPUT_MAX_BYTES + 1));
+	assert.equal(await readFullOutputFile(over), undefined);
+	const boost = recorder(() => reply("tail summary"));
+	const outcome = await compactFullOutput(
+		{ text: truncated(over), path: over, htmlAllowed: false },
+		boost.filter,
+	);
+	assert.deepEqual(boost.sent, [TAIL]);
+	assert.equal(outcome.fullSkipped, "unreadable");
+});
+
+test("a file owned by another user is not read", async () => {
+	const path = saved(FULL_RUN);
+	const stat = () => ({ isFile: () => true, size: 10, uid: 4242 });
+	assert.equal(await readFullOutputFile(path, { stat, uid: () => 501 }), undefined);
+	assert.equal(
+		await readFullOutputFile(path, { stat, uid: () => undefined }),
+		FULL_RUN,
+		"no user ids (Windows)",
+	);
+});
+
+test("a whole HTML page in the full run keeps the tail route unless it was fetched", async () => {
+	const page = `<!doctype html>\n<html><body>\n${"<p>text</p>\n".repeat(9000)}</body></html>`;
+	const path = saved(page);
+	const text = truncated(path, "");
+	const kept = recorder(() => reply("tail summary"));
+	const outcome = await compactFullOutput({ text, path, htmlAllowed: false }, kept.filter);
+	assert.equal(kept.sent.length, 1);
+	assert.notEqual(kept.sent[0], page, "the page itself never went to Boost");
+	assert.equal(outcome.fullSkipped, "html");
+	const fetched = recorder(() => reply("Article text"));
+	const article = await compactFullOutput({ text, path, htmlAllowed: true }, fetched.filter);
+	assert.deepEqual(fetched.sent, [page]);
+	assert.match(
+		article.compaction?.text ?? "",
+		/^Article text\n\n\[Boost compacted the full 9003-line output/,
+	);
+});
+
+test("a failed full call keeps the original instead of calling Boost again", async () => {
+	const path = saved(FULL_RUN);
+	for (const call of [
+		reply("x", 1),
+		{ ...reply(""), code: null, timedOut: true },
+		{ ...reply(""), code: null, aborted: true },
+		{ ...reply(""), code: null, skipped: "paused" as const },
+		{ ...reply("x"), skipped: "busy" as const },
+	]) {
+		const boost = recorder(() => call);
+		const outcome = await compactFullOutput(
+			{ text: truncated(path), path, htmlAllowed: false },
+			boost.filter,
+		);
+		assert.equal(boost.sent.length, 1, JSON.stringify(call));
+		assert.equal(outcome.compaction, undefined);
+		assert.equal(outcome.call, call);
+		assert.equal(outcome.fullSkipped, undefined);
+	}
+});
+
+test("a result that does not name the file in pi's notice keeps the tail route", async () => {
+	const path = saved(FULL_RUN);
+	const boost = recorder(() => reply("tail summary"));
+	const outcome = await compactFullOutput(
+		{ text: `${TAIL}\n\nCommand exited with code 1`, path, htmlAllowed: false },
+		boost.filter,
+	);
+	assert.deepEqual(boost.sent, [TAIL]);
+	assert.equal(outcome.fullSkipped, "unreadable");
 });

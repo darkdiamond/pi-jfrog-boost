@@ -126,6 +126,12 @@ export interface CallOptions {
 	toolInput?: unknown;
 	/** Input size for the breaker's "too slow" budget when it is not the stdin (convert). */
 	inputBytes?: number;
+	/**
+	 * The stdin ceiling for this call, when it is not {@link MAX_INPUT_BYTES}:
+	 * the shell route's full-output re-filter sends pi's whole saved output,
+	 * up to 2 MiB (spec §8.5), where every other route stops at 1 MiB.
+	 */
+	maxInputBytes?: number;
 }
 
 export interface BoostClientDeps {
@@ -369,7 +375,8 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		const exe = resolveOnce();
 		if (!exe) return skippedCall("missing");
 		const bytes = options.inputBytes ?? (input === undefined ? 0 : Buffer.byteLength(input));
-		if (input !== undefined && Buffer.byteLength(input) > MAX_INPUT_BYTES) return skippedCall("large");
+		const ceiling = options.maxInputBytes ?? MAX_INPUT_BYTES;
+		if (input !== undefined && Buffer.byteLength(input) > ceiling) return skippedCall("large");
 		if (breaker && !breaker.allow()) return skippedCall("paused");
 		let result: RunResult;
 		try {

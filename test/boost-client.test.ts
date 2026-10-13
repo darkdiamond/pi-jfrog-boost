@@ -181,6 +181,18 @@ test("input over 1 MiB is passed through without spawning", async () => {
 	assert.deepEqual(invocations(log), []);
 });
 
+test("a call may raise its own stdin ceiling: the full-output re-filter's 2 MiB", async () => {
+	const log = logFile();
+	const client = clientFor({ FAKE_BOOST_LOG: log });
+	const text = "x".repeat(MAX_INPUT_BYTES + 1);
+	const raised = await client.filter(meta, text, { maxInputBytes: 2 * MAX_INPUT_BYTES });
+	assert.equal(raised.skipped, undefined);
+	assert.equal(raised.code, 0);
+	assert.equal(invocations(log).length, 1);
+	const over = await client.filter(meta, `${text}${text}`, { maxInputBytes: 2 * MAX_INPUT_BYTES });
+	assert.equal(over.skipped, "large");
+});
+
 test("a reply over the stdout cap is abandoned as a malfunction", async () => {
 	const client = clientFor({ FAKE_BOOST_MODE: "huge-output", FAKE_BOOST_BYTES: String(3 * 1024 * 1024) });
 	const result = await client.filter(meta, "output");
