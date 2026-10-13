@@ -191,8 +191,8 @@ const bashResult = (command: string, text = NOISY, over: Partial<Record<string, 
 
 const filterCalls = (calls: Recorded[]) => calls.filter((c) => c.kind === "filter");
 
-test("the install command is registered up front, before any session", () => {
-	assert.deepEqual(harness().commands, ["boost-install"]);
+test("the /boost hub and its install alias are registered up front, before any session", () => {
+	assert.deepEqual(harness().commands, ["boost", "boost-install"]);
 });
 
 test("shell output is filtered, described by its own command, and marked in details", async () => {

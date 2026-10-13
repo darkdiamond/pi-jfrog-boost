@@ -383,6 +383,12 @@ export interface SettingsStore {
 	setSession(enabled: boolean | undefined): void;
 	/** Merge `values` into the file and save it atomically (only from `/boost settings`). */
 	save(values: Partial<Settings>): void;
+	/**
+	 * `/boost settings reset`: drop every key this version knows from the file,
+	 * atomically, so defaults apply. Keys it does not know are kept: they may
+	 * belong to a newer version of this extension sharing the file.
+	 */
+	reset(): void;
 }
 
 export interface SettingsStoreDeps {
@@ -421,6 +427,24 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 	const pathOf = () => settingsPath(env, home());
 	let file: FileSettings = { values: {}, invalid: [], unknown: [], raw: {} };
 	let session: boolean | undefined;
+
+	/**
+	 * The file as it is on disk now, without `$schema`, for a save to merge
+	 * into. Re-read so a key edited by hand since load() is not reverted.
+	 */
+	const currentRaw = (path: string): Record<string, unknown> => {
+		const current = loadSettingsFile(path, fs);
+		// A file that exists but cannot be read or parsed (a stray comma, a
+		// permissions change) reads as `{}`. Saving over it would replace the
+		// user's mostly-correct file with just the keys being saved, so refuse
+		// and say why; the user fixes or removes it and saves again.
+		if (current.error !== undefined) {
+			throw new Error(`cannot save: ${path} is unreadable (${current.error}); fix or remove it first`);
+		}
+		const raw: Record<string, unknown> = { ...current.raw };
+		delete raw.$schema;
+		return raw;
+	};
 
 	const effective = (): Settings => {
 		const merged = { ...DEFAULT_SETTINGS, ...file.values, ...envOverrides(env) };
@@ -475,23 +499,20 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 		},
 		save(values) {
 			const path = pathOf();
-			// Re-read first so a key edited by hand since load() is not reverted.
-			const current = loadSettingsFile(path, fs);
-			// A file that exists but cannot be read or parsed (a stray comma, a
-			// permissions change) reads as `{}`. Saving over it would replace the
-			// user's mostly-correct file with just the keys being saved, so refuse
-			// and say why; the user fixes or removes it and saves again.
-			if (current.error !== undefined) {
-				throw new Error(`cannot save: ${path} is unreadable (${current.error}); fix or remove it first`);
-			}
-			const raw: Record<string, unknown> = { ...current.raw };
-			delete raw.$schema;
+			const raw = currentRaw(path);
 			for (const key of SETTINGS_KEYS) {
 				if (!(key in values)) continue;
 				const value = values[key];
 				if (!isValidSetting(key, value)) throw new Error(`invalid value for "${key}"`);
 				raw[key] = value;
 			}
+			saveSettingsFile(path, raw, fs);
+			file = parseSettings(raw);
+		},
+		reset() {
+			const path = pathOf();
+			const raw = currentRaw(path);
+			for (const key of SETTINGS_KEYS) delete raw[key];
 			saveSettingsFile(path, raw, fs);
 			file = parseSettings(raw);
 		},

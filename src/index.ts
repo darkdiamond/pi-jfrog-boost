@@ -23,6 +23,10 @@
  * each changed result (pi ≥ 1.0.1), and numbers-only savings persisted in the
  * session so `/resume` and forks keep them.
  *
+ * The user drives it with `/boost` (commands.ts: status, on/off, settings,
+ * stats, Boost's own report and doctor) and `/boost install` (install.ts,
+ * also registered as `/boost-install`); both only ever act when asked.
+ *
  * Which results are sent is decided by router.ts; reads of text files,
  * `edit`, `write`, `grep`, `find` and `ls` reach the model exactly. Every
  * replacement keeps the tool's `structuredContent` and records itself in
@@ -40,7 +44,11 @@
  */
 
 import { homedir } from "node:os";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
 import { binaryStamp, onPath } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
@@ -51,6 +59,7 @@ import {
 	resolveFlag,
 	shellGate,
 } from "./boost-config.ts";
+import { type CommandHost, completions, createBoostCommand } from "./commands.ts";
 import {
 	asResult,
 	hasStructured,
@@ -76,7 +85,7 @@ import {
 	type Readiness,
 	type ReadinessState,
 } from "./health.ts";
-import { registerInstallCommand } from "./install.ts";
+import { createInstaller, type InstallDeps } from "./install.ts";
 import { compactMcpResult, isMcpTool } from "./mcp.ts";
 import { registerBadges } from "./render.ts";
 import { htmlAllowed, route } from "./router.ts";
@@ -92,6 +101,7 @@ import {
 	type BucketName,
 	bucketFor,
 	createStats,
+	formatStats,
 	restoreSnapshot,
 	STATS_ENTRY,
 	type Stats,
@@ -110,6 +120,7 @@ import {
 	SHELL_OFF_NOTICE,
 	statusReport,
 	TERMS_NOTICE,
+	tokensOf,
 	tooOldNotice,
 } from "./status.ts";
 import { createSyncScheduler } from "./sync.ts";
@@ -157,11 +168,28 @@ export interface BoostExtensionDeps {
 	env?: NodeJS.ProcessEnv;
 	syncDelayMs?: number;
 	firstTurnWaitMs?: number;
+	/** Injected by tests: the install flow's fetch, platform, destination, … */
+	install?: InstallDeps;
+	/**
+	 * Where a session without a UI (print mode) shows `/boost` output.
+	 * Defaults to stdout, or stderr in JSON mode so the event stream stays valid.
+	 */
+	print?: (ctx: ExtensionCommandContext, text: string) => void;
+}
+
+/** `/boost` output in print mode, where `ui.notify` is a no-op. */
+function defaultPrint(ctx: ExtensionCommandContext, text: string): void {
+	try {
+		const stream = (ctx as { mode?: string }).mode === "json" ? process.stderr : process.stdout;
+		stream.write(`${text}\n`);
+	} catch {
+		/* nowhere to say it */
+	}
 }
 
 /**
- * What the factory hands back: the views the `/boost` command (WP8) is built
- * on, and that tests read. pi ignores a factory's return value.
+ * What the factory hands back: the views the `/boost` command is built on,
+ * and that tests read. pi ignores a factory's return value.
  */
 export interface BoostExtension {
 	/** The `/boost status` report (spec §10.2). Spawns nothing. */
@@ -179,6 +207,15 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	// `--no-boost`. Registered from the factory so pi's argument parser knows
 	// it before it parses; read live, because pi fills flag values in after
 	// the factory has run.
+	//
+	// How pi parses it (observed on 0.86.1 and 1.2.0 with a probe extension,
+	// `pi -p`): any `--name` pi does not know takes the next argument as its
+	// value unless that starts with `-` or `@` (cli/args.js), and an
+	// extension's boolean flag is then set to `true` whatever the value was
+	// (agent-session-services.js). So `pi --no-boost "fix it"` turns Boost off
+	// but swallows the prompt, `pi --no-boost=true "fix it"` and `pi
+	// --no-boost --model x "fix it"` work, and even `--no-boost=false` turns
+	// Boost off. The docs give `--no-boost=true` as the safe form.
 	if (typeof pi.registerFlag === "function") {
 		pi.registerFlag(NO_BOOST_FLAG, {
 			type: "boolean",
@@ -260,17 +297,6 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	// is. The `badges` setting is read on every render, so it needs no restart.
 	registerBadges(pi, () => settings.effective().badges);
 
-	// After an install the command calls refresh(); readiness must forget the
-	// "missing" verdict too, or Boost would stay idle until the 60 s re-check.
-	// (The client's methods are closures, so spreading them is safe.)
-	registerInstallCommand(pi, {
-		...client,
-		refresh() {
-			client.refresh();
-			readiness.retry();
-		},
-	});
-
 	const meta = (ctx: ExtensionContext, toolCallId?: string): HookMeta => ({
 		session_id: ctx.sessionManager.getSessionId(),
 		cwd: ctx.cwd,
@@ -299,12 +325,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * readiness (never a probe), the breaker, the config as mtime-cached, and
 	 * this session's savings.
 	 */
-	const currentFooter = (): string | undefined => {
+	const currentFooter = (ignoreSetting = false): string | undefined => {
 		const state = uiState();
 		const ready = state.kind === "ready";
 		const sum = totals(stats.snapshot());
 		return footerText({
-			footer: settings.effective().footer,
+			footer: ignoreSetting || settings.effective().footer,
 			off: isOff(),
 			readiness: state,
 			paused: ready && breaker.state().kind === "open",
@@ -884,8 +910,119 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	});
 
-	return {
-		footerText: currentFooter,
+	const print = deps.print ?? defaultPrint;
+
+	/**
+	 * Forget the probe's verdict and the breaker, re-resolve the binary and
+	 * re-probe it; resolves once the probe settled (or its wait ran out).
+	 * Used by `/boost status → retry` and after an install, so neither needs
+	 * a restart — readiness would otherwise keep "missing" until its 60 s
+	 * re-check, and too-old until the binary's stamp changed.
+	 */
+	const recheck = async (): Promise<ReadinessState> => {
+		client.refresh();
+		breaker.reset();
+		readiness.retry();
+		await readiness.wait(PROBE_UI_WAIT_MS);
+		return uiState();
+	};
+
+	/** Shell compaction is off because of Boost's flag or default, not the user's setting. */
+	const shellOffByBoost = (): boolean => {
+		const state = readiness.state();
+		if (state.kind !== "ready") return false;
+		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
+		return !gate.on && gate.reason !== "setting-off";
+	};
+
+	const install = createInstaller(
+		pi,
+		{
+			binary: () => {
+				client.refresh();
+				return client.binary();
+			},
+			state: uiState,
+			refresh: recheck,
+			onPath: (binary) => onPath(binary, env),
+			shellOffByBoost,
+			termsAccepted: () => config.read().termsAccepted,
+		},
+		{ print, ...deps.install },
+	);
+
+	const host: CommandHost = {
+		settings,
+		headline: () => currentFooter(true) ?? "boost: checking…",
+		state: uiState,
+		binary: () => readiness.binary() ?? client.binary(),
+		statusReport: () => extension.statusReport(),
+		async settle() {
+			await readiness.wait(FIRST_TURN_WAIT_MS);
+		},
+		statsReport: () => formatStats(stats.snapshot(), tokensOf),
+		shellAuto: () => {
+			const state = readiness.state();
+			return state.kind === "ready" ? shellGate("auto", config.read(), env, state.version).on : undefined;
+		},
+		setSession(enabled) {
+			settings.setSession(enabled);
+			if (enabled) {
+				// `/boost on` is also how a user un-pauses Boost (§8.2), and a
+				// session that started off never probed: start one, not awaited.
+				breaker.reset();
+				try {
+					readiness.start();
+				} catch {
+					/* fail open */
+				}
+			}
+			return settings.off();
+		},
+		async retry() {
+			await recheck();
+		},
+		exec: (args, cwd, timeoutMs) => client.exec(args, cwd, timeoutMs),
+		install,
+		refreshUi: (ctx) => refreshUi(ctx),
+		print,
+	};
+	const boostCommand = createBoostCommand(host);
+	pi.registerCommand("boost", {
+		description: "JFrog Boost: status, on/off, settings, savings, install",
+		getArgumentCompletions: completions,
+		handler: async (args, ctx) => {
+			try {
+				await boostCommand(args, ctx);
+			} catch (error) {
+				// A dialog torn down mid-command (a stale context) or a bug: say
+				// so once, never as an unhandled rejection in pi.
+				try {
+					if (ctx.hasUI) ctx.ui.notify(`pi-jfrog-boost: /boost failed: ${(error as Error).message}`, "error");
+				} catch {
+					/* nothing more to do */
+				}
+			}
+		},
+	});
+	pi.registerCommand("boost-install", {
+		description: "Alias for /boost install",
+		handler: async (args, ctx) => {
+			try {
+				await install(args, ctx);
+			} catch (error) {
+				try {
+					if (ctx.hasUI)
+						ctx.ui.notify(`pi-jfrog-boost: install failed: ${(error as Error).message}`, "error");
+				} catch {
+					/* nothing more to do */
+				}
+			}
+		},
+	});
+
+	const extension: BoostExtension = {
+		footerText: () => currentFooter(),
 		statusReport() {
 			const effective = settings.effective();
 			const cfg = config.read();
@@ -917,6 +1054,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			});
 		},
 	};
+	return extension;
 }
 
 export default function boostExtension(pi: ExtensionAPI): void {
