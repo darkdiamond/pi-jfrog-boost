@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { after, test } from "node:test";
 import type { BoostCall } from "../src/boost-client.ts";
 import {
@@ -426,7 +426,6 @@ test("a reply over pi's page falls back to the tail route in the same call", asy
 		assert.equal(boost.sent.length, 2);
 		assert.equal(boost.sent[1], TAIL, "the tail route sends pi's tail without its notices");
 		assert.equal(outcome.fullSkipped, "unfit");
-		assert.equal(outcome.fullCall?.stdout, long);
 		assert.equal(
 			outcome.compaction?.text,
 			`tail summary\n\n[Showing lines 7001-9000 of 9000. Full output: ${path}]\n\nCommand exited with code 1`,
@@ -481,6 +480,27 @@ test("a path outside the temp directory is never read, even through a link", asy
 	}
 	// A file that is in the temp directory is read.
 	assert.equal(await readFullOutputFile(saved(FULL_RUN, PI_TMP), narrowed), FULL_RUN);
+});
+
+test("a relative path is never read, even one that names a file inside the temp directory", async () => {
+	// pi always records an absolute path; a relative one would be resolved
+	// against whatever the process cwd happens to be, which is not the run's.
+	// The file here is real and inside the narrowed temp directory, so only the
+	// absolute-path guard stands between it and Boost.
+	const inside = saved(FULL_RUN, PI_TMP);
+	const fromTmp = {
+		...narrowed,
+		realpath: (p: string) => realpathSync(resolve(PI_TMP, p)),
+	};
+	assert.equal(await readFullOutputFile(inside, fromTmp), FULL_RUN, "the absolute spelling is read");
+	assert.equal(await readFullOutputFile(basename(inside), fromTmp), undefined);
+	// The same through the real cwd, where one relative spelling exists
+	// (not across Windows drives, where `relative` returns an absolute path).
+	const fromCwd = relative(process.cwd(), inside);
+	if (!isAbsolute(fromCwd)) {
+		assert.equal(realpathSync(fromCwd), realpathSync(inside), "the relative spelling does resolve to it");
+		assert.equal(await readFullOutputFile(fromCwd, narrowed), undefined, fromCwd);
+	}
 });
 
 test("a file over 2 MiB is not read", async () => {

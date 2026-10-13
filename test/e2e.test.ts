@@ -717,32 +717,56 @@ test("a long run pi truncated is re-filtered whole, so its early failures reach 
 			`for (let i = 0; i < 1490; i++) test(\`case \${i} passes\`, () => {});`,
 		].join("\n"),
 	);
-	const long = await run("bash", { command: "node --test --test-reporter=tap long.test.mjs" });
+	const command = "node --test --test-reporter=tap long.test.mjs";
+	const long = await run("bash", { command });
 	const notice =
-		/\n\n\[Showing lines \d+-(\d+) of (\d+)[^\n]*\. Full output: ([^\n]+)\]\n\nCommand exited with code 1$/.exec(
+		/\n\n(\[Showing lines \d+-(\d+) of (\d+)[^\n]*\. Full output: ([^\n]+)\])\n\nCommand exited with code 1$/.exec(
 			long.original,
 		);
 	assert.ok(notice, `pi truncated the run: ${long.original.slice(-200)}`);
-	const [, , total, path] = notice;
+	const [, piNotice, , total] = notice;
 	assert.ok(Number(total) >= 8000, `${total} lines`);
 	assert.doesNotMatch(long.original, /^not ok \d+ - early 0 fails$/m, "pi's tail dropped the early failures");
 
-	assert.ok(long.changed, "the truncated run was left as pi's tail");
+	/** The whole run, filtered, with pi's notice rewritten and `status` (pi's exit notice) after it. */
+	const assertRefiltered = (outcome: Outcome, status: string) => {
+		assert.ok(outcome.changed, "the truncated run was left as pi's tail");
+		// Each run has a file of its own.
+		const file = /\. Full output: ([^\n]+)\]/.exec(outcome.original)?.[1];
+		for (let i = 0; i < FAILING; i++) {
+			assert.match(outcome.text, new RegExp(`not ok \\d+ - early ${i} fails`), `early failure ${i} surfaced`);
+		}
+		assert.ok(
+			outcome.text.endsWith(
+				`\n\n[Boost compacted the full ${total}-line output. Full output: ${file}]${status}`,
+			),
+			outcome.text.slice(-300),
+		);
+		const body = outcome.text.slice(0, outcome.text.indexOf("\n\n[Boost compacted the full"));
+		assert.ok(body.split("\n").length <= 2000 && Buffer.byteLength(body) <= 50 * 1024, "within pi's page");
+		const details = outcome.details as { jfrogBoost?: { kind?: string; full?: boolean } } | undefined;
+		assert.deepEqual([details?.jfrogBoost?.kind, details?.jfrogBoost?.full], ["compacted", true]);
+	};
+
 	assert.equal(long.isError, true);
-	for (let i = 0; i < FAILING; i++) {
-		assert.match(long.text, new RegExp(`not ok \\d+ - early ${i} fails`), `early failure ${i} surfaced`);
+	if (line === "1.2") {
+		assertRefiltered(long, "\n\nCommand exited with code 1");
+		assert.deepEqual(long.structuredContent, long.originalStructuredContent);
+	} else {
+		// pi 0.86 throws a failed command, and the error result it builds from
+		// the message carries no `details`, so no `fullOutputPath`: the path is
+		// only in the text, which is not trusted for it (§6.3). The run keeps
+		// the tail route — compacted, but without the early failures. A known
+		// 0.86 limitation, asserted so a change in it is noticed.
+		assert.ok(long.changed, "the tail route still compacted the run");
+		assert.ok(long.text.endsWith(`\n\n${piNotice}\n\nCommand exited with code 1`), long.text.slice(-300));
+		assert.doesNotMatch(long.text, /early 0 fails/);
+		// The same run ending in exit 0 is returned, with its `details`: the
+		// re-filter works end to end on 0.86 too when pi names the file.
+		const passed = await run("bash", { command: `${command}; true` });
+		assert.equal(passed.isError, false);
+		assertRefiltered(passed, "");
 	}
-	assert.ok(
-		long.text.endsWith(
-			`\n\n[Boost compacted the full ${total}-line output. Full output: ${path}]\n\nCommand exited with code 1`,
-		),
-		long.text.slice(-300),
-	);
-	const body = long.text.slice(0, long.text.indexOf("\n\n[Boost compacted the full"));
-	assert.ok(body.split("\n").length <= 2000 && Buffer.byteLength(body) <= 50 * 1024, "within pi's page");
-	if (line === "1.2") assert.deepEqual(long.structuredContent, long.originalStructuredContent);
-	const details = long.details as { jfrogBoost?: { kind?: string; full?: boolean } } | undefined;
-	assert.deepEqual([details?.jfrogBoost?.kind, details?.jfrogBoost?.full], ["compacted", true]);
 	t.diagnostic(
 		`pi's tail ${Buffer.byteLength(long.original)} B → ${Buffer.byteLength(long.text)} B from ${total} lines`,
 	);

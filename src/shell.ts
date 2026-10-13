@@ -465,8 +465,6 @@ export interface FullOutcome extends CompactOutcome {
 	 * meaningful reduction or would not fit pi's page.
 	 */
 	fullSkipped?: "unreadable" | "html" | "unfit";
-	/** The call that filtered the full output, when its reply went unused and the tail was filtered after it. */
-	fullCall?: BoostCall;
 }
 
 export interface FullOutputRequest {
@@ -502,6 +500,22 @@ export interface FullOutputRequest {
  *    instead: a second call would meet the same Boost, and invariant 2
  *    says a slow Boost is not waited on twice.
  *
+ * Cost. The whole run is filtered at about 3 ms per KiB (measured on Boost
+ * v0.15.4: 78 KB in 0.41 s, 848 KB in 2.6 s, 1.68 MB in 4.9 s), so a file
+ * near the 2 MiB ceiling takes ~6 s against the 10 s timeout cap of §8.5.
+ * A slower machine can time out there; that counts as a bad call for the
+ * breaker and keeps pi's tail unfiltered — the fail-open outcome, at the
+ * price of the wait.
+ *
+ * The `unfit` fallback makes a second call in a row: the result waits on
+ * both, and Boost records two filter invocations, so its own DB and report
+ * show two entries (and two savings) for one command. That is accepted
+ * because the second call is cheap — pi's tail is at most 50 KiB, a few
+ * hundred milliseconds — and it is what the model would have got from the
+ * tail route anyway; skipping it would leave the result unfiltered for a
+ * reply that merely did not fit. The extension's own stats record the
+ * command as one `full-unfit` skip plus the tail's own outcome.
+ *
  * Never throws for the file's or Boost's sake.
  */
 export async function compactFullOutput(
@@ -510,10 +524,14 @@ export async function compactFullOutput(
 	deps: FullOutputFileDeps = {},
 ): Promise<FullOutcome> {
 	const { text, path } = request;
-	const tail = async (fullSkipped: NonNullable<FullOutcome["fullSkipped"]>, fullCall?: BoostCall) => ({
+	// On `unfit` the full call is not returned: it ran to completion and
+	// exited 0 (anything else returned above), so it has no refusal or error
+	// to count, and `fullSkipped` already says why its reply went unused —
+	// counting it again as `unchanged` would report one run twice. Its
+	// duration still reached the breaker inside the client.
+	const tail = async (fullSkipped: NonNullable<FullOutcome["fullSkipped"]>) => ({
 		...(await compactShellOutput(text, filter)),
 		fullSkipped,
-		...(fullCall ? { fullCall } : {}),
 	});
 	const { notices } = splitNotices(text);
 	const parts = notices.split("\n\n");
@@ -526,7 +544,7 @@ export async function compactFullOutput(
 	const call = await filter(stripped);
 	if (call.code !== 0 || call.skipped || call.timedOut || call.aborted) return { call };
 	const reply = call.stdout.trimEnd();
-	if (!isMeaningfulReduction(stripped, reply) || !fitsPiPage(reply)) return tail("unfit", call);
+	if (!isMeaningfulReduction(stripped, reply) || !fitsPiPage(reply)) return tail("unfit");
 	parts[at] = `[Boost compacted the full ${lineCount(stripped)}-line output. Full output: ${path}]`;
 	const replacement = `${reply}${parts.join("\n\n")}`;
 	const marker = parseMarker(reply);
