@@ -286,9 +286,9 @@ export function flagIsOn(value: unknown): boolean {
  *
  * Deliberately this small: a full glob or regex grammar would make a privacy
  * control easy to get subtly wrong (`.` or `?` matching more than the user
- * meant) for no gain, since pi's MCP tool names are `[A-Za-z0-9_]` only — it
- * replaces everything else with `_` when it builds them, and so does
- * {@link excludedBy} with the pattern before it gets here. Implemented by
+ * meant) for no gain. {@link excludedBy} folds every character outside
+ * `[A-Za-z0-9_*]` to `_` in both the pattern and the name before they get
+ * here, so `.` in particular is never anything but a literal. Implemented by
  * hand rather than as a RegExp so a user pattern can never be a pathological
  * expression; the greedy backtracking below is linear in practice for names
  * this short.
@@ -314,25 +314,38 @@ export function globMatches(pattern: string, name: string): boolean {
 }
 
 /**
- * A `mcpExclude` pattern spelled the way pi spells tool names. pi builds
- * `mcp__<server>__<tool>` and then turns every character outside
+ * `text` spelled the way pi 1.2.0 spells MCP tool names. Its built-in client
+ * builds `mcp__<server>__<tool>` and then turns every character outside
  * `[A-Za-z0-9_]` into `_` (`createMcpToolName`, pi 1.2.0
  * `dist/extensions/mcp/tools.js`), so a server configured as `my-secrets` or
  * `acme.slack` reaches this extension as `mcp__my_secrets__…` /
- * `mcp__acme_slack__…`. A user naturally writes the server's configured
- * name; compared literally, that pattern could never match, and this privacy
- * control would silently let the server's bodies through to Boost's DB and
- * sync. The pattern gets pi's rewrite (sparing `*`, the one wildcard), which
- * can only make it match the name pi really uses — never a wider set, since
- * pi has already folded those characters together in the names themselves.
+ * `mcp__acme_slack__…`. `*` is spared so it stays the one wildcard.
  */
-export function normalizeExcludePattern(pattern: string): string {
-	return pattern.trim().replace(/[^A-Za-z0-9_*]/g, "_");
+function foldToolNameChars(text: string): string {
+	return text.replace(/[^A-Za-z0-9_*]/g, "_");
 }
 
-/** The first `mcpExclude` pattern `toolName` matches, if any (as the user wrote it). */
+/**
+ * The first `mcpExclude` pattern `toolName` matches, if any (as the user
+ * wrote it, for the explanation line).
+ *
+ * Both sides are folded with {@link foldToolNameChars}, because the names
+ * come from two places that disagree. pi 1.2.0's own client sanitizes them,
+ * so a user who writes the server's configured name (`mcp__my-secrets__*`)
+ * must still match `mcp__my_secrets__get`. But on pi 0.86 every `mcp__*` tool
+ * comes from a third-party extension, and nothing makes those sanitize: a
+ * Claude-Code-style `mcp__my-secrets__get` keeps its hyphen, and the same
+ * pattern must match that too. Folding only the pattern (as an earlier
+ * version did) broke the second case; folding only the name would break the
+ * first. Folding both covers each, and this is a privacy control, so the one
+ * cost — `mcp__my_secrets__*` also catches a distinct server literally named
+ * `my-secrets` — errs towards keeping bodies out of Boost's DB and sync, never
+ * towards letting them through. `*` is never folded into, so a pattern still
+ * cannot match a wider shape than its wildcards allow.
+ */
 export function excludedBy(toolName: string, patterns: readonly string[]): string | undefined {
-	return patterns.find((pattern) => globMatches(normalizeExcludePattern(pattern), toolName));
+	const name = foldToolNameChars(toolName);
+	return patterns.find((pattern) => globMatches(foldToolNameChars(pattern.trim()), name));
 }
 
 // ---------------------------------------------------------------------------

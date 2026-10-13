@@ -92,13 +92,22 @@ test("mcpExclude globs: `*` is any run, everything else literal, the whole name 
 	assert.equal(globMatches("a*b*c", "a_c_b"), false);
 	assert.equal(excludedBy("mcp__slack__x", ["mcp__github__*", " mcp__slack__* "]), " mcp__slack__* ");
 	assert.equal(excludedBy("mcp__slack__x", []), undefined);
-	// pi turns everything outside [A-Za-z0-9_] in a tool name into "_"; a
-	// pattern written with the server's configured name is read the same way,
-	// and reported as the user wrote it.
+	// pi 1.2.0 turns everything outside [A-Za-z0-9_] in a tool name into "_";
+	// a pattern written with the server's configured name is read the same
+	// way, and reported as the user wrote it.
 	assert.equal(excludedBy("mcp__my_secrets__get", ["mcp__my-secrets__*"]), "mcp__my-secrets__*");
 	assert.equal(excludedBy("mcp__acme_slack__post", ["mcp__acme.slack__*"]), "mcp__acme.slack__*");
 	assert.equal(excludedBy("mcp__acme_slack__post", ["mcp__acme slack__*"]), "mcp__acme slack__*");
 	assert.equal(excludedBy("mcp__my_secrets__get", ["mcp__my-secret__*"]), undefined);
+	// Extension-registered tools (all of them on pi 0.86) need not sanitize:
+	// a name that keeps its "-" or "." must still match a pattern spelled the
+	// same way, or the exact name, or the sanitized spelling.
+	assert.equal(excludedBy("mcp__my-secrets__get", ["mcp__my-secrets__*"]), "mcp__my-secrets__*");
+	assert.equal(excludedBy("mcp__a.b__get", ["mcp__a.b__*"]), "mcp__a.b__*");
+	assert.equal(excludedBy("mcp__my-secrets__get", ["mcp__my-secrets__get"]), "mcp__my-secrets__get");
+	assert.equal(excludedBy("mcp__my-secrets__get", ["mcp__my_secrets__*"]), "mcp__my_secrets__*");
+	assert.equal(excludedBy("mcp__my-secrets__get", ["mcp__my-secret__*"]), undefined);
+	assert.equal(excludedBy("mcp__my-secrets__get", ["mcp__other__*"]), undefined);
 	// Normalising never widens a pattern past `*`.
 	assert.equal(excludedBy("mcp__slack__x", ["mcp__slack__?"]), undefined);
 	assert.equal(excludedBy("mcp__slack__x", ["mcp__.*"]), undefined);

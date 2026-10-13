@@ -51,7 +51,7 @@
 			"default": true
 		},
 		"mcpExclude": {
-			"description": "Glob patterns of MCP tool names never sent to Boost, e.g. \"mcp__secrets__*\". `*` is the only wildcard; as in pi's tool names, any character other than letters, digits and _ counts as _, so \"mcp__my-server__*\" matches pi's mcp__my_server__ tools.",
+			"description": "Glob patterns of MCP tool names never sent to Boost, e.g. \"mcp__secrets__*\". `*` is the only wildcard; any character other than letters, digits and _ counts as _ in both the pattern and the tool name, so \"mcp__my-server__*\" matches both mcp__my-server__ tools and pi's sanitized mcp__my_server__ tools.",
 			"type": "array",
 			"items": { "type": "string", "minLength": 1 },
 			"default": []
