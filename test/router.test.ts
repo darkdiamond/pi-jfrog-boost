@@ -21,7 +21,8 @@ function input(over: Partial<RouteInput> = {}): RouteInput {
 		ready: true,
 		paused: false,
 		shellOn: true,
-		settings: { minBytes: 2048, readLogs: false, extraTools: [] },
+		termsAccepted: true,
+		settings: { minBytes: 2048, readLogs: false, documents: true, notebooks: true, extraTools: [] },
 		...over,
 	};
 }
@@ -30,6 +31,8 @@ const reason = (r: Route) => (r.kind === "skip" ? r.reason : r.kind);
 const settings = (over: Partial<RouteInput["settings"]>) => ({
 	minBytes: 2048,
 	readLogs: false,
+	documents: true,
+	notebooks: true,
 	extraTools: [] as string[],
 	...over,
 });
@@ -169,10 +172,84 @@ test("read: text files are exact — source, JSON, Markdown, HTML, CSV, SVG", ()
 	assert.equal(reason(route(read({ input: { path: "index.html" }, text: HTML }))), "exact");
 });
 
-test("read: documents are exact until their route lands (WP4)", () => {
-	for (const path of ["q3.pdf", "a.docx", "b.xls", "n.ipynb"]) {
-		assert.equal(reason(route(read({ input: { path }, text: "%PDF\u0000\u0001" }))), "exact", path);
+test("read: PDF, Office and OpenDocument files take the document route", () => {
+	for (const path of ["q3.pdf", "a.docx", "b.XLSX", "c.pptx", "d.odt", "e.ods", "f.odp"]) {
+		assert.deepEqual(route(read({ input: { path }, text: "%PDF\u0000\u0001" })), { kind: "document" }, path);
 	}
+	// Whatever pi's text looks like: its "line too long" notice for a stored
+	// zip, or a page of plain XML past the zip header. The file's magic number
+	// decides (documents.ts), not pi's rendering of it.
+	const longLine = "[Line 1 is 120.2KB, exceeds 50.0KB limit. Use bash: sed -n '1p' a.docx | head -c 51200]";
+	assert.equal(reason(route(read({ input: { path: "a.docx" }, text: longLine }))), "document");
+	assert.equal(
+		reason(route(read({ input: { path: "a.docx", offset: 3 }, text: "<w:p>x</w:p>" }))),
+		"document",
+	);
+	// Partial reads too: a converted document is paged like any read.
+	assert.equal(reason(route(read({ input: { path: "q3.pdf", offset: 2001, limit: 50 } }))), "document");
+});
+
+test("read: legacy Office files take the document route (for Boost's advisory)", () => {
+	for (const path of ["a.doc", "b.xls", "c.PPT"]) {
+		assert.equal(
+			reason(route(read({ input: { path }, text: "\u00d0\u00cf\u0011\u00e0\u0000" }))),
+			"document",
+		);
+	}
+});
+
+test("read: documents need the setting and the Preview Agreement", () => {
+	const off = settings({ documents: false });
+	assert.equal(reason(route(read({ input: { path: "q3.pdf" }, settings: off }))), "exact");
+	assert.equal(reason(route(read({ input: { path: "n.ipynb" }, settings: off }))), "exact");
+	assert.equal(reason(route(read({ input: { path: "q3.pdf" }, termsAccepted: false }))), "terms");
+	assert.equal(reason(route(read({ input: { path: "a.doc" }, termsAccepted: false }))), "terms");
+});
+
+test("read: notebooks are converted only on a whole read with `notebooks` on", () => {
+	assert.equal(reason(route(read({ input: { path: "n.ipynb" } }))), "document");
+	assert.equal(reason(route(read({ input: { path: "n.ipynb", offset: 1 } }))), "exact");
+	assert.equal(reason(route(read({ input: { path: "n.ipynb", limit: 10 } }))), "exact");
+	assert.equal(
+		reason(route(read({ input: { path: "n.ipynb" }, settings: settings({ notebooks: false }) }))),
+		"exact",
+	);
+});
+
+test("read: CSV, RTF and HTML are never converted", () => {
+	for (const path of ["t.csv", "a.rtf", "index.html", "page.htm"]) {
+		assert.equal(reason(route(read({ input: { path }, text: "\u0000binary" }))), "exact", path);
+	}
+});
+
+test("read: a refused document read never reaches Boost, except an offset past the raw bytes", () => {
+	for (const text of ["ENOENT: no such file or directory, access '/a/q3.pdf'", "EACCES: permission denied"]) {
+		assert.equal(reason(route(read({ isError: true, input: { path: "q3.pdf" }, text }))), "error", text);
+	}
+	const pastEnd = "Offset 1249 is beyond end of file (4 lines total)";
+	assert.equal(
+		reason(route(read({ isError: true, input: { path: "a.docx", offset: 1249 }, text: pastEnd }))),
+		"document",
+	);
+	assert.equal(
+		reason(route(read({ isError: true, input: { path: "a.doc", offset: 9 }, text: pastEnd }))),
+		"document",
+	);
+	// Not without an offset (pi cannot say it then), not for notebooks (only
+	// whole reads convert), and not for any other file.
+	assert.equal(reason(route(read({ isError: true, input: { path: "a.docx" }, text: pastEnd }))), "error");
+	assert.equal(
+		reason(route(read({ isError: true, input: { path: "n.ipynb", offset: 9 }, text: pastEnd }))),
+		"error",
+	);
+	assert.equal(
+		reason(route(read({ isError: true, input: { path: "a.txt", offset: 9 }, text: pastEnd }))),
+		"error",
+	);
+	assert.equal(
+		reason(route(read({ isError: true, input: { path: "a.docx", offset: 9 }, text: `${pastEnd} and more` }))),
+		"error",
+	);
 });
 
 test("read: logs are opt-in", () => {

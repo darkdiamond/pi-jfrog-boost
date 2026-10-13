@@ -35,7 +35,9 @@ export const SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
 
 /**
  * Binary documents pi's `read` returns as raw bytes decoded as UTF-8, which
- * Boost can convert to text (spec §5; converted from WP4 on).
+ * Boost converts to text (spec §5, documents.ts). Not `.csv` (Boost returns
+ * a lossy 40-line preview with no retrieve), nor `.rtf`, `.html` and `.htm`,
+ * which pi already reads as text — and the model edits from that text.
  */
 export const BINARY_DOCS: ReadonlySet<string> = new Set([
 	".pdf",
@@ -47,7 +49,11 @@ export const BINARY_DOCS: ReadonlySet<string> = new Set([
 	".odp",
 ]);
 
-/** Legacy binary Office files: neither pi nor Boost can read them; Boost explains why (WP4). */
+/**
+ * Legacy binary Office files: neither pi nor Boost can read them. Boost
+ * answers with a one-line `[boost] …` advisory, which documents.ts turns into
+ * an error result instead of letting the model puzzle over raw bytes.
+ */
 export const LEGACY_OFFICE: ReadonlySet<string> = new Set([".doc", ".xls", ".ppt"]);
 
 /** Log files that `readLogs` (opt-in) sends through the stdin filter when read whole. */

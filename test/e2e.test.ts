@@ -46,8 +46,9 @@ import {
 import { createBoostClient } from "../src/boost-client.ts";
 import { createConfigReader } from "../src/boost-config.ts";
 import { createBreaker } from "../src/health.ts";
-import { createBoostExtension } from "../src/index.ts";
+import { createBoostExtension, TERMS_NOTICE } from "../src/index.ts";
 import { createSettingsStore } from "../src/settings.ts";
+import { writeLongDocx } from "./helpers/docx.ts";
 import {
 	applyToolResultHandlers,
 	type Block,
@@ -59,7 +60,7 @@ import {
 	textOfBlocks,
 	toolResultEvent,
 } from "./helpers/harness.ts";
-import { createHermetic, type Hermetic } from "./helpers/hermetic.ts";
+import { createHermetic, type Hermetic, type HomeVariant } from "./helpers/hermetic.ts";
 import { assertAllowedSpawn } from "./helpers/spawn-spy.ts";
 
 const DOCX = join(import.meta.dirname, "fixtures", "sample.docx");
@@ -206,12 +207,13 @@ async function startExtension(map: Map<string, Handler[]>, deps: Parameters<type
 
 /**
  * A second extension whose Boost children see a variant HOME (spec §16.3
- * case 6), with `extra` in its environment. pi's own tools keep running in
- * the default hermetic HOME; only what the extension reads and spawns moves.
- * Every call to the client's filter is counted, so "zero spawns" is checked
- * where the spawn would happen.
+ * cases 6 and 9), with `extra` in its environment. pi's own tools keep
+ * running in the default hermetic HOME; only what the extension reads and
+ * spawns moves. Every filter and convert call is counted, so "zero spawns"
+ * is checked where the spawn would happen, and notices are collected from a
+ * context with a UI.
  */
-async function variantExtension(variant: "user-false", extra: NodeJS.ProcessEnv) {
+async function variantExtension(variant: HomeVariant, extra: NodeJS.ProcessEnv) {
 	const home = h().variantHome(variant);
 	const env: NodeJS.ProcessEnv = { ...h().envFor(home), ...extra };
 	const config = createConfigReader({ home: () => home });
@@ -225,16 +227,29 @@ async function variantExtension(variant: "user-false", extra: NodeJS.ProcessEnv)
 		breaker,
 	});
 	let filters = 0;
+	let converts = 0;
 	const client = {
 		...real,
 		filter: (...args: Parameters<typeof real.filter>) => {
 			filters++;
 			return real.filter(...args);
 		},
+		convert: (...args: Parameters<typeof real.convert>) => {
+			converts++;
+			return real.convert(...args);
+		},
 	};
+	const notices: string[] = [];
 	const map = new Map<string, Handler[]>();
 	await startExtension(map, { client, env, settings, config, breaker });
-	return { handlers: map, filters: () => filters };
+	return {
+		handlers: map,
+		client: real,
+		filters: () => filters,
+		converts: () => converts,
+		notices,
+		ctx: () => ctx(notices),
+	};
 }
 
 after(() => {
@@ -242,13 +257,16 @@ after(() => {
 	hermetic?.dispose();
 });
 
-/** Hoisted (a declaration, not a const) because `before()` above uses it. */
-function ctx(): ExtensionContext {
+/**
+ * Hoisted (a declaration, not a const) because `before()` above uses it.
+ * With `notices`, the context has a UI and collects what it is told.
+ */
+function ctx(notices?: string[]): ExtensionContext {
 	return {
 		cwd: dir,
-		hasUI: false,
+		hasUI: notices !== undefined,
 		sessionManager: { getSessionId: () => "pi-jfrog-boost-e2e", getBranch: () => [], getEntries: () => [] },
-		ui: { notify: () => {}, setStatus: () => {} },
+		ui: { notify: (message: string) => notices?.push(message), setStatus: () => {} },
 	} as unknown as ExtensionContext;
 }
 
@@ -261,7 +279,11 @@ function ctx(): ExtensionContext {
 async function run(
 	tool: "read" | "bash",
 	input: Record<string, unknown>,
-	options: { parentToolCallId?: string; handlers?: Map<string, Handler[]> } = {},
+	options: {
+		parentToolCallId?: string;
+		handlers?: Map<string, Handler[]>;
+		ctx?: () => ExtensionContext;
+	} = {},
 ): Promise<Outcome> {
 	const definition = { read: createReadTool, bash: createBashTool }[tool](dir);
 	const toolCallId = `e2e-${++callId}`;
@@ -285,7 +307,12 @@ async function run(
 		parentToolCallId: options.parentToolCallId,
 	});
 	const map = options.handlers ?? handlers;
-	const patch = await applyToolResultHandlers(line, map.get("tool_result") ?? [], event, ctx());
+	const patch = await applyToolResultHandlers(
+		line,
+		map.get("tool_result") ?? [],
+		event,
+		(options.ctx ?? ctx)(),
+	);
 	return {
 		text: textOfBlocks(patch?.content ?? output.content),
 		isError: patch?.isError ?? isError,
@@ -353,15 +380,105 @@ test("pi's continuation notice survives, whatever Boost does to the body", { ski
 	assert.match(partial.text, /\[2900 more lines in file\. Use offset=101 to continue\.\]$/);
 });
 
-test("an Office file pi returns as raw bytes reaches the model as text", {
-	skip: termsSkip,
-	todo: "WP4 (spec §16.3 case 8): the document route; WP3 leaves documents exact",
-}, async () => {
+test("an Office file pi returns as raw bytes reaches the model as text", { skip: termsSkip }, async () => {
 	const doc = await run("read", { path: DOCX });
 	assert.equal(doc.isError, false);
 	assert.ok(doc.changed, "pi's raw zip bytes were passed through");
+	assert.match(
+		doc.text,
+		/^\[Converted from sample\.docx by JFrog Boost\. Line numbers refer to this text, not the file\.\]\n/,
+	);
 	assert.match(doc.text, /Hello from the sample docx/);
 	assert.doesNotMatch(doc.text, /\0/);
+	if (line === "1.2")
+		assert.equal(typeof doc.structuredContent, "string", "read's structured output stays a string");
+	const details = doc.details as { jfrogBoost?: { kind?: string; ext?: string } } | undefined;
+	assert.deepEqual([details?.jfrogBoost?.kind, details?.jfrogBoost?.ext], ["converted", ".docx"]);
+});
+
+// Spec §16.3 case 8.
+test("a long document is paged like pi's read, and offset continues from the cache", {
+	skip: termsSkip,
+}, async () => {
+	writeLongDocx(join(dir, "long.docx"), 3000, 40);
+	const ext = await variantExtension("default", {});
+	const read = (input: Record<string, unknown>) => run("read", input, { handlers: ext.handlers });
+
+	const first = await read({ path: "long.docx" });
+	assert.ok(first.changed, "the long docx was not converted");
+	assert.equal(first.isError, false);
+	const [header, ...rest] = first.text.split("\n");
+	assert.match(header ?? "", /^\[Converted from long\.docx by JFrog Boost\./);
+	const notice =
+		/\n\n\[Showing lines 1-(\d+) of (\d+) \(50\.0KB limit\)\. Use offset=(\d+) to continue\.\]$/.exec(
+			first.text,
+		);
+	assert.ok(notice, `pi's byte-limit notice ends the page: ${first.text.slice(-120)}`);
+	const page = rest.join("\n").replace(/\n\n\[Showing[^\n]*\]$/, "");
+	assert.ok(page.split("\n").length <= 2000, "at most 2000 lines");
+	assert.ok(Buffer.byteLength(page) <= 50 * 1024, "at most 50 KiB");
+	assert.match(page, /^Paragraph 1 /);
+	const next = Number(notice[3]);
+	assert.equal(next, Number(notice[1]) + 1);
+
+	// pi counts the raw zip's few lines, so it refuses this offset; the
+	// converted text answers it.
+	const second = await read({ path: "long.docx", offset: next });
+	assert.ok(second.changed);
+	assert.equal(second.isError, false, second.text.slice(0, 200));
+	assert.match(second.text, new RegExp(`\\]\\nParagraph ${next} `));
+	await read({ path: "long.docx", offset: next, limit: 10 });
+	await read({ path: "long.docx" });
+	assert.equal(ext.converts(), 1, "every read after the first came from the cache: one boost read in all");
+});
+
+// Spec §16.3 case 9; also run with BOOST_E2E_TERMS_FROM pointing at a config without terms.
+test("without the Preview Agreement a document fails open, and the user is told once", { skip }, async () => {
+	const ext = await variantExtension("no-terms", {});
+	for (let i = 0; i < 2; i++) {
+		const doc = await run("read", { path: DOCX }, { handlers: ext.handlers, ctx: ext.ctx });
+		assert.equal(doc.changed, false);
+		assert.equal(doc.text, doc.original);
+	}
+	assert.equal(ext.converts(), 0, "no boost read without the agreement");
+	assert.deepEqual(
+		ext.notices.filter((n) => n === TERMS_NOTICE),
+		[TERMS_NOTICE],
+	);
+	// NP3: Boost itself refuses `read` without the agreement.
+	const direct = await ext.client.convert({ session_id: "e2e", cwd: dir }, DOCX);
+	assert.equal(direct.code, 1, `boost read without terms: ${direct.stdout}`);
+});
+
+// Spec §16.3 case 10.
+test("a large notebook read whole is converted; offset=1 returns its raw JSON", {
+	skip: termsSkip,
+}, async () => {
+	const notebook = {
+		cells: Array.from({ length: 60 }, (_, i) => ({
+			cell_type: "code",
+			execution_count: i,
+			metadata: {},
+			source: [`print(${i})\n`, "x = 1\n"],
+			outputs: [{ output_type: "stream", name: "stdout", text: [`${"a".repeat(200)}\n`] }],
+		})),
+		metadata: {},
+		nbformat: 4,
+		nbformat_minor: 5,
+	};
+	writeFileSync(join(dir, "nb.ipynb"), JSON.stringify(notebook, null, 1));
+	const whole = await run("read", { path: "nb.ipynb" });
+	assert.ok(whole.changed, "the notebook was not converted");
+	assert.match(
+		whole.text,
+		/^\[Converted from nb\.ipynb by JFrog Boost\.[^\n]* read it again with offset=1\.\]\n/,
+	);
+	assert.match(whole.text, /print\(0\)/);
+	assert.doesNotMatch(whole.text, /"cell_type"/);
+	const raw = await run("read", { path: "nb.ipynb", offset: 1 });
+	assert.equal(raw.changed, false);
+	assert.equal(raw.text, raw.original);
+	assert.match(raw.text, /"cell_type": "code"/);
 });
 
 test("a small source read is left exactly as pi returned it", { skip }, async () => {

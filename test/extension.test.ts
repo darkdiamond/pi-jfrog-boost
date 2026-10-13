@@ -4,7 +4,7 @@
  * and — most importantly — that a failing Boost never reaches pi.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -12,8 +12,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { type BoostClient, createBoostClient, type HookMeta, type HookPayload } from "../src/boost-client.ts";
 import type { ConfigReader } from "../src/boost-config.ts";
 import { createBreaker, createReadiness, type Readiness } from "../src/health.ts";
-import { createBoostExtension, NO_BOOST_FLAG } from "../src/index.ts";
+import { createBoostExtension, NO_BOOST_FLAG, TERMS_NOTICE } from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
+import { docx } from "./helpers/docx.ts";
 import { createPiStub, type PiLine, textOfBlocks, toolResultEvent } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
 
@@ -236,18 +237,103 @@ test("a filter that throws leaves the original result untouched", async () => {
 	assert.equal(await fire("tool_result", bashResult("npm test")), undefined);
 });
 
-test("a PDF or Office read passes through until the document route lands (WP4)", async () => {
-	const { fire, calls } = harness({ readResult: "# Quarterly report", filterResult: "compacted" });
-	for (const over of [
-		{ isError: true, input: { path: "/docs/q3.pdf" } },
-		{ input: { path: "/docs/q3.docx" }, content: [{ type: "text", text: "PK\u0003\u0004\u0000garbage" }] },
-	]) {
-		assert.equal(await fire("tool_result", result("read", over)), undefined);
-	}
-	assert.deepEqual(
-		calls.filter((c) => c.kind === "read" || c.kind === "filter"),
-		[],
+// ---------------------------------------------------------------------------
+// Documents (spec §7.1)
+
+const docRoot = mkdtempSync(join(tmpdir(), "pi-boost-ext-docs-"));
+after(() => rmSync(docRoot, { recursive: true, force: true }));
+const TERMS = `accept_terms = "yes"\n${CLI_ON}`;
+const DOCX_PATH = join(docRoot, "q3.docx");
+writeFileSync(DOCX_PATH, docx(["Quarterly report"]));
+const OLE_PATH = join(docRoot, "old.doc");
+writeFileSync(OLE_PATH, Buffer.concat([Buffer.from("d0cf11e0a1b11ae1", "hex"), Buffer.alloc(64)]));
+const RAW = "PK\u0003\u0004\u0000\u0000garbage";
+const readCalls = (calls: Recorded[]) => calls.filter((c) => c.kind === "read");
+const docResult = (path: string, over: Partial<Record<string, unknown>> = {}) =>
+	result("read", { input: { path }, content: [{ type: "text", text: RAW }], ...over });
+
+test("a PDF or Office read reaches the model as converted text, marked in details", async () => {
+	const { fire, calls } = harness({
+		readResult: "# Quarterly report\nRevenue up.",
+		config: fixedConfig(TERMS),
+	});
+	const patched = await fire(
+		"tool_result",
+		docResult(DOCX_PATH, { structuredContent: RAW, details: { x: 1 } }),
 	);
+	assert.deepEqual(patched, {
+		content: [
+			{
+				type: "text",
+				text: "[Converted from q3.docx by JFrog Boost. Line numbers refer to this text, not the file.]\n# Quarterly report\nRevenue up.",
+			},
+		],
+		isError: false,
+		structuredContent: "# Quarterly report\nRevenue up.",
+		details: { x: 1, jfrogBoost: { kind: "converted", ext: ".docx", lines: [1, 2, 2] } },
+	});
+	assert.deepEqual(readCalls(calls)[0]?.fields, { path: DOCX_PATH });
+	// pi 0.86 has no structuredContent, and none is invented.
+	const plain = (await fire("tool_result", docResult(DOCX_PATH))) as Record<string, unknown>;
+	assert.equal("structuredContent" in plain, false);
+	assert.equal(readCalls(calls).length, 1, "the second read came from the cache");
+});
+
+test("a refused read never reaches Boost", async () => {
+	const { fire, calls } = harness({ readResult: "# Quarterly report", config: fixedConfig(TERMS) });
+	for (const text of ["ENOENT: no such file", "Offset 9 is beyond end of file (3 lines total)"]) {
+		assert.equal(
+			await fire("tool_result", docResult(DOCX_PATH, { isError: true, content: [{ type: "text", text }] })),
+			undefined,
+		);
+	}
+	assert.deepEqual(readCalls(calls), []);
+});
+
+test("an offset past pi's raw bytes is answered from the converted text", async () => {
+	const text = Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n");
+	const { fire } = harness({ readResult: text, config: fixedConfig(TERMS) });
+	const patched = (await fire(
+		"tool_result",
+		docResult(DOCX_PATH, {
+			isError: true,
+			input: { path: DOCX_PATH, offset: 2001 },
+			content: [{ type: "text", text: "Offset 2001 is beyond end of file (3 lines total)" }],
+		}),
+	)) as { content: { text: string }[]; isError: boolean };
+	assert.equal(patched.isError, false);
+	assert.match(patched.content[0]?.text ?? "", /^\[Converted from q3\.docx[^\n]*\]\nline 2001\n/);
+});
+
+test("without the Preview Agreement documents are left alone, and the user is told once", async () => {
+	const { fire, calls, notices } = harness({ readResult: "# Quarterly report", config: fixedConfig(CLI_ON) });
+	for (let i = 0; i < 3; i++) assert.equal(await fire("tool_result", docResult(DOCX_PATH)), undefined);
+	assert.deepEqual(readCalls(calls), []);
+	assert.deepEqual(
+		notices.filter((n) => n === TERMS_NOTICE),
+		[TERMS_NOTICE],
+	);
+});
+
+test("a legacy Office file becomes an error only when Boost answered", async () => {
+	const advisory = "[boost] Legacy Office (.doc): save as docx/xlsx/pptx, then Read or boost read.";
+	const answered = harness({ readResult: advisory, config: fixedConfig(TERMS) });
+	const patched = (await answered.fire("tool_result", docResult(OLE_PATH))) as {
+		content: { text: string }[];
+		isError: boolean;
+	};
+	assert.equal(patched.isError, true);
+	assert.match(patched.content[0]?.text ?? "", /^pi-jfrog-boost: old\.doc is a legacy binary Office file/);
+	const missing = harness({
+		config: fixedConfig(TERMS),
+		overrides: { convert: async () => ({ ...call(""), code: null, skipped: "missing" }) },
+	});
+	assert.equal(await missing.fire("tool_result", docResult(OLE_PATH)), undefined);
+});
+
+test("a document Boost cannot convert keeps pi's result", async () => {
+	const { fire } = harness({ config: fixedConfig(TERMS) }); // convert exits 1
+	assert.equal(await fire("tool_result", docResult(DOCX_PATH)), undefined);
 });
 
 test("a failed shell command is still compacted, and stays an error", async () => {

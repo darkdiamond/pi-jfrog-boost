@@ -10,6 +10,9 @@
  *   tool_result         stdin filter      bash/powershell (and extraTools)
  *                                         output compacted; opt-in whole
  *                                         reads of *.log / *.out
+ *                       boost read        PDF/Office/ODF reads and large
+ *                                         notebooks converted to text, paged
+ *                                         like any read (documents.ts)
  *   before_agent_start  (none)            teaches the model `boost retrieve`
  *   agent_end/shutdown  boost sync        uploads what Boost measured
  *
@@ -41,6 +44,7 @@ import {
 	type ToolResultPatch,
 } from "./compat.ts";
 import { type ContentBlock, mergeDetails, textOf, truncateForObserve, withText } from "./content.ts";
+import { createDocumentCache, type DocumentOutcome, readDocument } from "./documents.ts";
 import {
 	type Breaker,
 	type Counters,
@@ -69,6 +73,9 @@ export const NO_BOOST_FLAG = "no-boost";
  * costs the first turn at most this, and later turns nothing.
  */
 export const FIRST_TURN_WAIT_MS = 1_000;
+/** Spec §10.4 `terms`: why documents are left alone, and how the user can change that. */
+export const TERMS_NOTICE =
+	"Boost converts PDF/Office files once its Preview Agreement is accepted. In a terminal: boost init --dry-run, then boost init (it also offers hooks for other agents).";
 
 function formatTokens(tokens: number): string {
 	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -165,6 +172,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	/** Each notice is worth saying once per process, not once per session. */
 	let missingNoticeShown = false;
 	let observeNoticeShown = false;
+	let termsNoticeShown = false;
+	/**
+	 * Converted documents, shared by every session of this process: a file is
+	 * keyed by path, mtime and size, so a stale entry can never be served.
+	 */
+	const documentCache = createDocumentCache();
 	/** Characters Boost removed from this session's tool output. */
 	let savedChars = 0;
 	/** Only a session's first turn may wait for the readiness probe. */
@@ -330,11 +343,38 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				ready,
 				paused: ready && breaker.state().kind === "open",
 				shellOn: ready && shellOn(),
+				termsAccepted: ready && config.read().termsAccepted,
 				settings: settings.effective(),
 			});
 			if (decision.kind === "skip") {
 				counters.skip(decision.reason);
+				if (decision.reason === "terms") termsNotice(ctx);
 				return;
+			}
+			if (decision.kind === "document") {
+				const outcome = await readDocument(
+					{ path: event.input.path, offset: event.input.offset, limit: event.input.limit, cwd: ctx.cwd },
+					{
+						cache: documentCache,
+						convert: (abs, size) =>
+							client.convert(hookMeta, abs, {
+								signal: ctx.signal,
+								toolInput: { path: event.input.path, file_path: abs },
+								inputBytes: size,
+							}),
+					},
+				);
+				if (outcome.call) noteCall(outcome.call);
+				if (outcome.kind === "skip") {
+					counters.skip(outcome.reason);
+					// Accepted since the config was read, or Boost disagrees: either
+					// way the user is the one who can fix it, once told.
+					if (outcome.reason === "exit" && !config.read().termsAccepted) termsNotice(ctx);
+					return;
+				}
+				if (isOff()) return;
+				if (outcome.kind === "page") recordSavings(ctx, text.length - outcome.text.length);
+				return asResult(documentPatch(event, outcome));
 			}
 			const signal = ctx.signal;
 			let outcome: Awaited<ReturnType<typeof compactShellOutput>>;
@@ -352,7 +392,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					client.filter(hookMeta, body, { signal, toolInput }),
 				);
 			} else {
-				// document (WP4), mcp (WP5), shell-full (WP6): not routed yet.
+				// mcp (WP5), shell-full (WP6): not routed yet.
 				return;
 			}
 			if (outcome.call) noteCall(outcome.call);
@@ -394,6 +434,43 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		});
 		if (details) patch.details = details;
 		return patch;
+	}
+
+	/**
+	 * The patch for a converted document, or for the error a legacy Office file
+	 * or an offset past the converted text becomes (spec §7.1).
+	 *
+	 * `isError` is always set: a page clears the error pi raised for an offset
+	 * past the raw bytes, and an error is one. `structuredContent` is pi's
+	 * `read` output schema, a string, so it becomes what pi's `read` would
+	 * return for the converted text — the page and its notice, without the
+	 * header, which is this extension's note to the model — or the error
+	 * message. Only when the tool had one: on 0.86 there is none to replace.
+	 */
+	function documentPatch(
+		event: { content: ContentBlock[]; details?: unknown },
+		outcome: Exclude<DocumentOutcome, { kind: "skip" }>,
+	): ToolResultPatch {
+		const isPage = outcome.kind === "page";
+		const patch: ToolResultPatch = {
+			content: withText(event.content, outcome.text),
+			isError: !isPage,
+		};
+		if (hasStructured(event)) patch.structuredContent = isPage ? outcome.page : outcome.text;
+		const details = mergeDetails(event.details, {
+			kind: "converted",
+			ext: outcome.ext,
+			...(isPage ? { lines: outcome.lines } : { error: true }),
+		});
+		if (details) patch.details = details;
+		return patch;
+	}
+
+	/** Spec §10.4 `terms`, once per process. */
+	function termsNotice(ctx: ExtensionContext): void {
+		if (termsNoticeShown || !ctx.hasUI) return;
+		termsNoticeShown = true;
+		notify(ctx, TERMS_NOTICE, "info");
 	}
 
 	/**
