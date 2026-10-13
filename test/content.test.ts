@@ -2,9 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	type ContentBlock,
+	isMeaningfulReduction,
 	looksBinary,
+	looksLikeHtmlDocument,
+	mergeDetails,
 	OBSERVE_TEXT_LIMIT,
+	parseMarker,
 	splitNotices,
+	stripAnsi,
 	textOf,
 	truncateForObserve,
 	withText,
@@ -69,22 +74,66 @@ test("pi's trailing notices are split off, in order", () => {
 	});
 });
 
-test("every pi notice shape is recognised", () => {
-	for (const notice of [
-		"[Showing lines 1-2000 of 5000 (50.0KB limit). Use offset=2001 to continue.]",
-		"[12 more lines in file. Use offset=41 to continue.]",
-		"[100 matches limit reached. Use limit=200 for more, or refine pattern]",
-		"[500 entries limit reached. Use limit=1000 for more]",
-		"Command timed out after 30 seconds",
-		"Command aborted",
-		"Command terminated without an exit code",
-	]) {
-		assert.equal(splitNotices(`body\n\n${notice}`).body, "body", notice);
+/**
+ * Every notice pi 1.2.0 appends, copied verbatim from
+ * `dist/core/tools/{bash,read,grep,find,ls}.js` with sample values filled in.
+ */
+const PI_NOTICES = [
+	// bash.js (powershell.js shares it)
+	"[Showing last 50.0KB of line 9000 (line is 1.2MB). Full output: /tmp/pi-bash-abc.log]",
+	"[Showing lines 7001-9000 of 9000. Full output: /tmp/pi-bash-abc.log]",
+	"[Showing lines 8001-9000 of 9000 (50.0KB limit). Full output: /tmp/pi-bash-abc.log]",
+	"Command aborted",
+	"Command timed out after 30 seconds",
+	"Command terminated without an exit code",
+	"Command exited with code 3",
+	"Command exited with code -1",
+	// read.js
+	"[Showing lines 1-2000 of 5000. Use offset=2001 to continue.]",
+	"[Showing lines 1-1200 of 5000 (50.0KB limit). Use offset=1201 to continue.]",
+	"[12 more lines in file. Use offset=41 to continue.]",
+	// grep.js
+	"[100 matches limit reached. Use limit=200 for more, or refine pattern]",
+	"[50.0KB limit reached]",
+	"[100 matches limit reached. Use limit=200 for more, or refine pattern. 50.0KB limit reached. Some lines truncated to 500 chars. Use read tool to see full lines]",
+	// find.js
+	"[1000 results limit reached. Use limit=2000 for more, or refine pattern]",
+	"[1000 results limit reached]",
+	// ls.js
+	"[500 entries limit reached. Use limit=1000 for more]",
+	"[500 entries limit reached. Use limit=1000 for more. 50.0KB limit reached]",
+];
+
+test("every notice pi 1.2.0 appends is recognised", () => {
+	for (const notice of PI_NOTICES) {
+		assert.deepEqual(splitNotices(`body\n\n${notice}`), { body: "body", notices: `\n\n${notice}` }, notice);
 	}
 });
 
-test("brackets inside the body are not mistaken for notices", () => {
-	const text = "[INFO] build\n\n[WARN] deprecated\nmore output";
+test("bracketed output that is not a pi notice stays in the body", () => {
+	for (const tail of [
+		"[1, 2, 3]",
+		'["a", "b"]',
+		"[INFO] build finished",
+		"[ERROR] 3 tests failed",
+		"[Boost compressed ~90%. Get the full original output simply with: boost retrieve 1]",
+		"[Showing nothing]x",
+		"Command exited with code",
+		"Command not found",
+	]) {
+		const text = `output\n\n${tail}`;
+		assert.deepEqual(splitNotices(text), { body: text, notices: "" }, tail);
+	}
+});
+
+test("a JSON array printed last is not a notice", () => {
+	const json = JSON.stringify([1, 2, 3], null, 2);
+	assert.deepEqual(splitNotices(`result:\n\n${json}`).notices, "");
+	assert.deepEqual(splitNotices(`result:\n\n[1, 2, 3]`).notices, "");
+});
+
+test("a notice must follow a blank line, as pi writes it", () => {
+	const text = "out\n[12 more lines in file. Use offset=41 to continue.]";
 	assert.deepEqual(splitNotices(text), { body: text, notices: "" });
 });
 
@@ -93,4 +142,82 @@ test("raw document bytes look binary; text does not", () => {
 	assert.equal(looksBinary("����ab"), true);
 	assert.equal(looksBinary("name,total\nalice,3\n"), false);
 	assert.equal(looksBinary(""), false);
+});
+
+test("terminal escapes are stripped: CSI, OSC and 8-bit C1", () => {
+	assert.equal(stripAnsi("\u001b[31mred\u001b[0m"), "red");
+	assert.equal(stripAnsi("\u001b[1;32;48;5;236m✔\u001b[39m ok"), "✔ ok");
+	assert.equal(stripAnsi("a\u001b[2K\u001b[1Gb"), "ab");
+	assert.equal(stripAnsi("\u001b]8;;https://x\u0007link\u001b]8;;\u0007"), "link");
+	assert.equal(stripAnsi("\u001b]0;title\u001b\\text"), "text");
+	assert.equal(stripAnsi("\u009b1mbold\u009b0m"), "bold");
+	assert.equal(stripAnsi("\u009d0;title\u009ctext"), "text");
+	assert.equal(stripAnsi("\u001b(Bplain\u001b=x"), "plainx");
+	assert.equal(stripAnsi("no escapes [31m here"), "no escapes [31m here");
+});
+
+test("an HTML document is recognised exactly as Boost recognises one", () => {
+	for (const text of [
+		"<!doctype html><html></html>",
+		"<!DOCTYPE HTML PUBLIC>",
+		"<html lang=en>",
+		"<html>",
+		"\uFEFF<!doctype html>",
+		"  \n\t<!doctype html>",
+		"<!-- generated -->\n<!-- twice -->\n<!doctype html>",
+		"<HTML>\n<body>",
+	]) {
+		assert.equal(looksLikeHtmlDocument(text), true, text);
+	}
+	for (const text of [
+		"<div>fragment</div>",
+		"<htmlx>",
+		"<?xml version='1.0'?><html>",
+		"text\n<!doctype html>",
+		"<!-- unterminated <!doctype html>",
+		`${" ".repeat(5000)}<!doctype html>`,
+		"",
+	]) {
+		assert.equal(looksLikeHtmlDocument(text), false, text);
+	}
+});
+
+const MARKER = "[Boost compressed ~84%. Get the full original output simply with: boost retrieve 147]";
+
+test("the retrieve marker is read only from the last line", () => {
+	assert.deepEqual(parseMarker(`summary\n${MARKER}`), { percent: 84, id: 147 });
+	assert.deepEqual(parseMarker(`summary\n${MARKER}\n`), { percent: 84, id: 147 });
+	assert.deepEqual(parseMarker(MARKER), { percent: 84, id: 147 });
+	assert.equal(parseMarker(`${MARKER}\nmore output`), undefined, "a quoted marker is not one");
+	assert.equal(parseMarker(`prefix ${MARKER}`), undefined, "not at the start of its line");
+	assert.equal(parseMarker("[Boost compressed ~84%.]"), undefined);
+	assert.equal(parseMarker(""), undefined);
+});
+
+test("a reduction must change more than whitespace and save max(256 B, 5%)", () => {
+	const body = "x".repeat(10_000);
+	assert.equal(isMeaningfulReduction(body, `${body}\n\n`), false);
+	assert.equal(isMeaningfulReduction(`${body}\n`, body), false);
+	assert.equal(isMeaningfulReduction(body, ""), false, "an empty reply is a malfunction, not a saving");
+	assert.equal(isMeaningfulReduction(body, " \n "), false);
+	assert.equal(isMeaningfulReduction(body, "x".repeat(9_501)), false, "499 B is under 5%");
+	assert.equal(isMeaningfulReduction(body, "x".repeat(9_500)), true);
+	assert.equal(isMeaningfulReduction("x".repeat(1000), "x".repeat(745)), false, "255 B is under 256 B");
+	assert.equal(isMeaningfulReduction("x".repeat(1000), "x".repeat(744)), true);
+	assert.equal(isMeaningfulReduction("é".repeat(1000), "é".repeat(800)), true, "measured in bytes");
+});
+
+test("details gain jfrogBoost only when they are a plain object or absent", () => {
+	const boost = { kind: "compacted" as const, before: 10, after: 2 };
+	assert.deepEqual(mergeDetails(undefined, boost), { jfrogBoost: boost });
+	const own = { truncation: { truncated: true }, fullOutputPath: "/tmp/x" };
+	assert.deepEqual(mergeDetails(own, boost), { ...own, jfrogBoost: boost });
+	assert.deepEqual(own, { truncation: { truncated: true }, fullOutputPath: "/tmp/x" }, "not mutated");
+	assert.deepEqual(mergeDetails(Object.create(null), boost), { jfrogBoost: boost });
+	class Custom {
+		value = 1;
+	}
+	for (const details of [null, [1, 2], "text", 3, new Custom(), new Map()]) {
+		assert.equal(mergeDetails(details, boost), undefined, String(details));
+	}
 });

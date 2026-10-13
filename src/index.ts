@@ -7,12 +7,16 @@
  *
  *   pi event            Boost call        effect
  *   ------------------  ----------------  ----------------------------------
- *   tool_result         stdin filter      bash/powershell/read/grep/find/ls
- *                                         output compacted
- *   tool_result (read)  boost read        text pulled out of PDFs and Office
- *                                         files pi decodes as raw bytes
+ *   tool_result         stdin filter      bash/powershell (and extraTools)
+ *                                         output compacted; opt-in whole
+ *                                         reads of *.log / *.out
  *   before_agent_start  (none)            teaches the model `boost retrieve`
  *   agent_end/shutdown  boost sync        uploads what Boost measured
+ *
+ * Which results are sent is decided by router.ts; reads of text files,
+ * `edit`, `write`, `grep`, `find` and `ls` reach the model exactly. Every
+ * replacement keeps the tool's `structuredContent` and records itself in
+ * `details.jfrogBoost`; nested calls are never touched (invariant 5).
  *
  * Everything is fail-open: with Boost missing, too old, slow, or silent, every
  * tool result passes through untouched. Readiness is probed in the background
@@ -28,15 +32,15 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
 import { binaryStamp } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
-import { type ConfigReader, createConfigReader } from "./boost-config.ts";
+import { type ConfigReader, createConfigReader, shellGate } from "./boost-config.ts";
 import {
-	type ContentBlock,
-	looksBinary,
-	splitNotices,
-	textOf,
-	truncateForObserve,
-	withText,
-} from "./content.ts";
+	asResult,
+	hasStructured,
+	parentToolCallId,
+	structuredContentOf,
+	type ToolResultPatch,
+} from "./compat.ts";
+import { type ContentBlock, mergeDetails, textOf, truncateForObserve, withText } from "./content.ts";
 import {
 	type Breaker,
 	type Counters,
@@ -46,9 +50,11 @@ import {
 	type Readiness,
 } from "./health.ts";
 import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
+import { route } from "./router.ts";
 import { createSettingsStore, type SettingsStore } from "./settings.ts";
+import { type Compaction, compactShellOutput } from "./shell.ts";
 import { createSyncScheduler } from "./sync.ts";
-import { bypassesBoost, equivalentCommand, isDocument, isFiltered, isShell } from "./tools.ts";
+import { equivalentCommand, resolveReadPath } from "./tools.ts";
 
 /** Footer slot for the running savings estimate. */
 const STATUS_KEY = "jfrog-boost";
@@ -139,11 +145,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	const observeEnabled = () => !isOff() && settings.effective().observe;
 	/** Lifecycle telemetry goes only where the user opted in (`observe`, `PI_BOOST_OBSERVE`). */
 	const observe = (hookMeta: HookMeta, fields: Record<string, unknown>) => {
-		if (observeEnabled()) client.observeDetached(hookMeta, fields);
+		try {
+			if (observeEnabled()) client.observeDetached(hookMeta, fields);
+		} catch {
+			/* fail open: telemetry is never worth an error in a pi handler */
+		}
 	};
 	const sync = createSyncScheduler(client, deps.syncDelayMs);
 	const firstTurnWaitMs = deps.firstTurnWaitMs ?? FIRST_TURN_WAIT_MS;
-	const startedAt = new Map<string, number>();
 
 	/** Latest assistant text, reported to Boost when the agent settles. */
 	let lastAssistantText = "";
@@ -248,17 +257,6 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		return { systemPrompt: withAwareness(event.systemPrompt) };
 	});
 
-	// Nothing to do before a tool runs — Boost sees the output afterwards — but
-	// the start time is needed to report how long the tool took. A throw here is
-	// not caught by pi and would block the call outright, hence the guard.
-	pi.on("tool_call", (event) => {
-		try {
-			if (observeEnabled()) startedAt.set(event.toolCallId, Date.now());
-		} catch {
-			/* fail open: never block a tool call over a Boost problem */
-		}
-	});
-
 	/** Count why a call to Boost produced nothing usable. */
 	const noteCall = (call: BoostCall) => {
 		if (call.skipped) counters.skip(call.skipped);
@@ -267,59 +265,77 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		else if (call.killedBy) counters.error("killed", call.killedBy);
 	};
 
+	/**
+	 * Whether Boost's stdin filter will filter shell output at all (spec §8.4),
+	 * decided from settings, config.toml and the environment without spawning.
+	 */
+	const shellOn = () => shellGate(settings.effective().shell, config.read(), env, readiness.version()).on;
+
+	// There is no `tool_call` handler (invariant 3): a throw there blocks the
+	// call outright, and nothing before a tool runs is Boost's business.
+
 	pi.on("tool_result", async (event, ctx) => {
+		// A nested call's output goes back to the calling script, not to the
+		// model: it is never sent to Boost, observed or counted as a saving.
+		if (parentToolCallId(event)) {
+			counters.skip("nested");
+			return;
+		}
 		const hookMeta = meta(ctx, event.toolCallId);
 		const text = textOf(event.content);
 		try {
-			if (isOff()) {
-				counters.skip("off");
-				return;
-			}
+			// Gathered lazily, in the router's order: when off, readiness is not
+			// even checked; until ready, config.toml is not read.
+			const off = isOff();
 			// Never waits on the probe (invariant 2): until Boost is known to be
 			// ready, results pass through exactly as the tool returned them.
-			if (readiness.check().kind !== "ready") {
-				counters.skip("not-ready");
+			const ready = !off && readiness.check().kind === "ready";
+			const decision = route({
+				toolName: event.toolName,
+				input: event.input,
+				text,
+				isError: event.isError,
+				// Handled above, before observe could see the call either.
+				nested: false,
+				off,
+				ready,
+				paused: ready && breaker.state().kind === "open",
+				shellOn: ready && shellOn(),
+				settings: settings.effective(),
+			});
+			if (decision.kind === "skip") {
+				counters.skip(decision.reason);
 				return;
 			}
 			const signal = ctx.signal;
-
-			// pi's `read` special-cases only images: a PDF or Office file comes
-			// back as its raw bytes decoded as UTF-8, or as an error. Boost can
-			// extract the text, which is worth far more to the model than either.
-			if (event.toolName === "read" && isDocument(event.input.path) && (event.isError || looksBinary(text))) {
-				const call = await client.convert(hookMeta, event.input.path, { signal });
-				noteCall(call);
-				if (call.code !== 0 || !call.stdout.trim() || isOff()) return;
-				return {
-					isError: false,
-					content: withText(
-						event.content,
-						`Boost extracted this document; line numbers are not source lines.\n\n${call.stdout}`,
-					),
-				};
+			let outcome: Awaited<ReturnType<typeof compactShellOutput>>;
+			if (decision.kind === "shell") {
+				outcome = await compactShellOutput(text, (body) =>
+					client.filter(hookMeta, body, { signal, toolInput: event.input }),
+				);
+			} else if (decision.kind === "log") {
+				const path = String(event.input.path);
+				const abs = resolveReadPath(path, ctx.cwd);
+				// Described to Boost the way its own integrations describe a file
+				// read: `cat <abs>`, with the absolute path as `file_path`.
+				const toolInput = { path, file_path: abs, command: equivalentCommand("read", event.input, abs) };
+				outcome = await compactShellOutput(text, (body) =>
+					client.filter(hookMeta, body, { signal, toolInput }),
+				);
+			} else {
+				// document (WP4), mcp (WP5), shell-full (WP6): not routed yet.
+				return;
 			}
-
-			// A failing test run or build is the noisiest output there is, so
-			// shell failures are compacted too; they stay marked as errors. Other
-			// tools fail with a one-line message that is not worth a round trip.
-			if (event.isError && !isShell(event.toolName)) return;
-			if (!isFiltered(event.toolName) || !text) return;
-			if (isShell(event.toolName) && bypassesBoost(event.input.command)) return;
-
-			const { body, notices } = splitNotices(text);
-			if (!body.trim() || body.includes("\0")) return;
-			const command = equivalentCommand(event.toolName, event.input);
-			const call = await client.filter(hookMeta, body, {
-				signal,
-				toolInput: command ? { ...event.input, command } : event.input,
-			});
-			noteCall(call);
-			const filtered = call.code === 0 ? call.stdout : "";
+			if (outcome.call) noteCall(outcome.call);
+			const compaction = outcome.compaction;
+			if (!compaction) {
+				if (outcome.call && !outcome.call.skipped && outcome.call.code === 0) counters.skip("unchanged");
+				return;
+			}
 			// Re-checked: a kill switch flipped while Boost ran wins over its reply.
-			if (!filtered.trim() || filtered === body || isOff()) return;
-			const replacement = notices ? `${filtered.trimEnd()}${notices}` : filtered;
-			recordSavings(ctx, text.length - replacement.length);
-			return { content: withText(event.content, replacement) };
+			if (isOff()) return;
+			recordSavings(ctx, compaction.before - compaction.after);
+			return asResult(compactedPatch(event, compaction));
 		} catch {
 			/* fail open: keep the original result */
 		} finally {
@@ -327,6 +343,29 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 		return;
 	});
+
+	/**
+	 * The patch for a compacted result. `isError` is left out, so a failing
+	 * command stays a failure. `structuredContent` is passed through as it
+	 * was: pi 1.x drops it when a handler replaces `content` without
+	 * returning it, and it is the tool's own record of what ran (exit code,
+	 * full output path), which compaction does not change.
+	 */
+	function compactedPatch(
+		event: { content: ContentBlock[]; details?: unknown },
+		compaction: Compaction,
+	): ToolResultPatch {
+		const patch: ToolResultPatch = { content: withText(event.content, compaction.text) };
+		if (hasStructured(event)) patch.structuredContent = structuredContentOf(event);
+		const details = mergeDetails(event.details, {
+			kind: "compacted",
+			before: compaction.before,
+			after: compaction.after,
+			...(compaction.retrieveId !== undefined ? { retrieveId: compaction.retrieveId } : {}),
+		});
+		if (details) patch.details = details;
+		return patch;
+	}
 
 	/**
 	 * Keep a running total in pi's footer, so it is visible that Boost is doing
@@ -351,10 +390,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		text: string,
 	): void {
 		if (!observeEnabled()) return;
-		const started = startedAt.get(event.toolCallId);
-		startedAt.delete(event.toolCallId);
-		const duration = started === undefined ? undefined : Math.max(0, Date.now() - started);
-		const common = { tool_name: event.toolName, tool_input: event.input, duration_ms: duration };
+		// No duration: the `tool_call` start map is gone with the handler.
+		// WP9 moves this to `tool_execution_end`, which carries `durationMs`.
+		const common = { tool_name: event.toolName, tool_input: event.input };
 		observe(
 			hookMeta,
 			event.isError
@@ -404,9 +442,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// session to claude_code. `boost sync` leaves attribution alone.
 		if (!isOff() && settings.effective().sync) sync.flush(hookMeta);
 		sync.dispose();
-		startedAt.clear();
 		// A filter still running for an abandoned turn has nobody to answer.
-		client.killAll();
+		try {
+			client.killAll();
+		} catch {
+			/* fail open */
+		}
 	});
 }
 

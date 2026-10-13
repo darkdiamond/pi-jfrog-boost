@@ -4,16 +4,29 @@
  * and — most importantly — that a failing Boost never reaches pi.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type BoostClient, createBoostClient, type HookMeta, type HookPayload } from "../src/boost-client.ts";
-import { createReadiness, type Readiness } from "../src/health.ts";
+import type { ConfigReader } from "../src/boost-config.ts";
+import { createBreaker, createReadiness, type Readiness } from "../src/health.ts";
 import { createBoostExtension, NO_BOOST_FLAG } from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
+import { createPiStub, type PiLine, textOfBlocks, toolResultEvent } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
+
+/**
+ * Boost's config with CLI filtering on, so the shell gate (spec §8.4) lets
+ * shell output through. A default v0.15 install has it off, and then nothing
+ * is sent at all — see the gate tests below.
+ */
+const CLI_ON = `[feature_flags."boost-cli-filtering"]\nuser = true\n`;
+const CLI_OFF = `[feature_flags."boost-cli-filtering"]\nuser = false\n`;
+
+/** Test-runner output long enough to be worth a Boost call (over the 2 KiB minBytes). */
+const NOISY = Array.from({ length: 200 }, (_, i) => `ok ${i} - case ${i} passes`).join("\n");
 
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
 
@@ -38,6 +51,7 @@ interface HarnessOptions {
 	flag?: boolean | string;
 	readiness?: Readiness;
 	settings?: SettingsStore;
+	config?: ConfigReader;
 }
 
 function harness({
@@ -50,6 +64,7 @@ function harness({
 	flag,
 	readiness = fixedReadiness(),
 	settings,
+	config = fixedConfig(CLI_ON),
 }: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const commands: string[] = [];
@@ -104,7 +119,7 @@ function harness({
 				...(file ? { file } : {}),
 				flag: () => flag,
 			}),
-		config: fixedConfig(),
+		config,
 		readiness,
 		syncDelayMs: 5,
 		firstTurnWaitMs: 50,
@@ -118,7 +133,7 @@ function harness({
 		return results.at(-1);
 	};
 
-	return { fire, calls, commands, flags, notices, statuses, readiness };
+	return { fire, calls, commands, flags, notices, statuses, readiness, handlers };
 }
 
 const observed = (calls: Recorded[], name: string) =>
@@ -133,32 +148,81 @@ const result = (toolName: string, over: Partial<Record<string, unknown>> = {}) =
 	...over,
 });
 
+/** A bash result with `text` (default: noisy test output). */
+const bashResult = (command: string, text = NOISY, over: Partial<Record<string, unknown>> = {}) =>
+	result("bash", { input: { command }, content: [{ type: "text", text }], ...over });
+
+const filterCalls = (calls: Recorded[]) => calls.filter((c) => c.kind === "filter");
+
 test("the install command is registered up front, before any session", () => {
 	assert.deepEqual(harness().commands, ["boost-install"]);
 });
 
-test("shell output is filtered and described by its own command", async () => {
+test("shell output is filtered, described by its own command, and marked in details", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
-	const patched = await fire("tool_result", result("bash", { input: { command: "npm test" } }));
-	assert.deepEqual(patched, { content: [{ type: "text", text: "compacted" }] });
-	assert.equal(calls.find((c) => c.kind === "filter")?.fields.command, "npm test");
+	const patched = await fire("tool_result", bashResult("npm test"));
+	assert.deepEqual(patched, {
+		content: [{ type: "text", text: "compacted" }],
+		details: { jfrogBoost: { kind: "compacted", before: NOISY.length, after: "compacted".length } },
+	});
+	assert.equal(filterCalls(calls)[0]?.fields.command, "npm test");
 });
 
-test("in-process tool output is filtered as the command it stands in for", async () => {
+test("read, grep, find and ls never reach the filter by default", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
-	await fire("tool_result", result("grep", { input: { pattern: "TODO", path: "src" } }));
-	assert.equal(calls.find((c) => c.kind === "filter")?.fields.command, "grep -rn TODO src");
+	for (const [tool, input] of [
+		["read", { path: "src/index.ts" }],
+		["read", { path: "/var/log/app.log" }],
+		["read", { path: "data.csv" }],
+		["grep", { pattern: "TODO", path: "src" }],
+		["find", { pattern: "*.ts", path: "." }],
+		["ls", { path: "." }],
+	] as const) {
+		const patched = await fire(
+			"tool_result",
+			result(tool, { input, content: [{ type: "text", text: NOISY }] }),
+		);
+		assert.equal(patched, undefined, tool);
+	}
+	assert.equal(filterCalls(calls).length, 0);
 });
 
 test("tools pi already summarises are not sent to Boost", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
-	assert.equal(await fire("tool_result", result("edit")), undefined);
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+	for (const tool of ["edit", "write"]) {
+		const patched = await fire("tool_result", result(tool, { content: [{ type: "text", text: NOISY }] }));
+		assert.equal(patched, undefined, tool);
+	}
+	assert.equal(filterCalls(calls).length, 0);
 });
 
 test("output Boost leaves alone keeps the original result", async () => {
 	const { fire } = harness();
-	assert.equal(await fire("tool_result", result("ls")), undefined);
+	assert.equal(await fire("tool_result", bashResult("npm test")), undefined);
+});
+
+test("output under minBytes is not sent at all", async () => {
+	const { fire, calls } = harness({ filterResult: "x" });
+	assert.equal(await fire("tool_result", bashResult("ls", "a\nb\nc")), undefined);
+	assert.equal(filterCalls(calls).length, 0);
+});
+
+test("minBytes comes from the settings file", async () => {
+	const { fire, calls } = harness({ filterResult: "x", file: { minBytes: 0 } });
+	await fire("session_start", { reason: "startup" });
+	assert.ok(await fire("tool_result", bashResult("ls", "a".repeat(600))));
+	assert.equal(filterCalls(calls).length, 1);
+});
+
+test("whitespace-only and sub-threshold replies are not applied", async () => {
+	for (const reply of [`${NOISY}\n\n`, NOISY.slice(0, -100), "  \n"]) {
+		const { fire } = harness({ filterResult: reply });
+		assert.equal(
+			await fire("tool_result", bashResult("npm test")),
+			undefined,
+			JSON.stringify(reply.slice(-10)),
+		);
+	}
 });
 
 test("a filter that throws leaves the original result untouched", async () => {
@@ -169,123 +233,155 @@ test("a filter that throws leaves the original result untouched", async () => {
 			},
 		},
 	});
-	assert.equal(await fire("tool_result", result("ls")), undefined);
+	assert.equal(await fire("tool_result", bashResult("npm test")), undefined);
 });
 
-test("a document pi cannot read is retried through Boost and stops being an error", async () => {
-	const { fire, calls } = harness({ readResult: "# Quarterly report" });
-	const patched = (await fire(
-		"tool_result",
-		result("read", {
-			isError: true,
-			input: { path: "/docs/q3.pdf" },
-			content: [{ type: "text", text: "binary file" }],
-		}),
-	)) as { isError: boolean; content: { text: string }[] };
-	assert.equal(patched.isError, false);
-	assert.match(patched.content[0]?.text ?? "", /Boost extracted this document/);
-	assert.match(patched.content[0]?.text ?? "", /# Quarterly report/);
-	assert.equal(calls.find((c) => c.kind === "read")?.fields.path, "/docs/q3.pdf");
-});
-
-test("a source file that failed to read is not retried as a document", async () => {
-	const { fire, calls } = harness({ readResult: "text" });
-	assert.equal(
-		await fire("tool_result", result("read", { isError: true, input: { path: "/src/index.ts" } })),
-		undefined,
+test("a PDF or Office read passes through until the document route lands (WP4)", async () => {
+	const { fire, calls } = harness({ readResult: "# Quarterly report", filterResult: "compacted" });
+	for (const over of [
+		{ isError: true, input: { path: "/docs/q3.pdf" } },
+		{ input: { path: "/docs/q3.docx" }, content: [{ type: "text", text: "PK\u0003\u0004\u0000garbage" }] },
+	]) {
+		assert.equal(await fire("tool_result", result("read", over)), undefined);
+	}
+	assert.deepEqual(
+		calls.filter((c) => c.kind === "read" || c.kind === "filter"),
+		[],
 	);
-	assert.equal(calls.filter((c) => c.kind === "read").length, 0);
-});
-
-test("a document Boost also cannot extract stays an error", async () => {
-	const { fire } = harness();
-	assert.equal(
-		await fire("tool_result", result("read", { isError: true, input: { path: "/docs/q3.pdf" } })),
-		undefined,
-	);
-});
-
-test("a binary document pi decoded as garbage is replaced by Boost's extraction", async () => {
-	const { fire, calls } = harness({ readResult: "# Quarterly report" });
-	const patched = (await fire(
-		"tool_result",
-		result("read", {
-			input: { path: "/docs/q3.docx" },
-			content: [{ type: "text", text: "PK\u0003\u0004\u0000\u0000garbage" }],
-		}),
-	)) as { isError: boolean; content: { text: string }[] };
-	assert.equal(patched.isError, false);
-	assert.match(patched.content[0]?.text ?? "", /# Quarterly report/);
-	assert.equal(calls.find((c) => c.kind === "read")?.fields.path, "/docs/q3.docx");
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 0, "garbage is never filtered");
-});
-
-test("a text document pi read fine is filtered, not converted", async () => {
-	const { fire, calls } = harness({ readResult: "converted", filterResult: "compacted" });
-	await fire(
-		"tool_result",
-		result("read", { input: { path: "data.csv" }, content: [{ type: "text", text: "a,b\n1,2" }] }),
-	);
-	assert.equal(calls.filter((c) => c.kind === "read").length, 0);
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 1);
 });
 
 test("a failed shell command is still compacted, and stays an error", async () => {
 	const { fire, calls } = harness({ filterResult: "3 failures" });
-	const patched = await fire(
+	const patched = (await fire(
 		"tool_result",
-		result("bash", {
-			isError: true,
-			input: { command: "npm test" },
-			content: [{ type: "text", text: "…lots of test output…\n\nCommand exited with code 1" }],
-		}),
-	);
-	assert.deepEqual(patched, {
-		content: [{ type: "text", text: "3 failures\n\nCommand exited with code 1" }],
-	});
-	assert.equal(calls.find((c) => c.kind === "filter")?.text, "…lots of test output…");
+		bashResult("npm test", `${NOISY}\n\nCommand exited with code 1`, { isError: true }),
+	)) as { content: unknown; isError?: boolean };
+	assert.deepEqual(patched.content, [{ type: "text", text: "3 failures\n\nCommand exited with code 1" }]);
+	assert.equal("isError" in patched, false, "isError is left as the tool set it");
+	assert.equal(filterCalls(calls)[0]?.text, NOISY);
 });
 
 test("other failed tools are not fed to the filter", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
 	await fire("tool_result", result("grep", { isError: true, input: { pattern: "(" } }));
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+	assert.equal(filterCalls(calls).length, 0);
 });
 
-test("pi's continuation notices survive compaction verbatim", async () => {
+test("pi's truncation notice survives compaction verbatim", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted\n" });
-	const notice = "\n\n[Showing lines 1-2000 of 9000. Use offset=2001 to continue.]";
-	const patched = await fire(
-		"tool_result",
-		result("read", { input: { path: "big.log" }, content: [{ type: "text", text: `log lines${notice}` }] }),
+	const notice = "\n\n[Showing lines 7001-9000 of 9000. Full output: /tmp/pi-bash-1.log]";
+	const patched = await fire("tool_result", bashResult("npm test", `${NOISY}${notice}`));
+	assert.deepEqual((patched as { content: unknown }).content, [{ type: "text", text: `compacted${notice}` }]);
+	assert.equal(filterCalls(calls)[0]?.text, NOISY);
+});
+
+test("terminal escapes are stripped for Boost, and kept when its reply is not used", async () => {
+	const coloured = `\u001b[32m${NOISY}\u001b[0m`;
+	const echo = harness({ overrides: { filter: async (_meta, text) => call(text) } });
+	assert.equal(await echo.fire("tool_result", bashResult("npm test", coloured)), undefined);
+	const { fire, calls } = harness({ filterResult: "3 failures" });
+	await fire("tool_result", bashResult("npm test", coloured));
+	assert.equal(filterCalls(calls)[0]?.text, NOISY);
+});
+
+test("DISABLE_BOOST=1 or BOOST_DISABLED=1 on a command returns its output exactly", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted" });
+	for (const command of [
+		"DISABLE_BOOST=1 diff -u a b",
+		"cd x && DISABLE_BOOST=1 cat y",
+		"BOOST_DISABLED=1 npm test",
+		"export DISABLE_BOOST=1; npm test",
+	]) {
+		assert.equal(await fire("tool_result", bashResult(command)), undefined, command);
+	}
+	assert.equal(filterCalls(calls).length, 0);
+});
+
+test("boost's own commands are not compacted a second time, however boost is named", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted" });
+	for (const command of [
+		"boost retrieve 147",
+		"boost retrieve 147 --lines 1-40",
+		"boost read a.pdf",
+		"~/.local/bin/boost retrieve 3",
+		'"$HOME/.local/bin/boost" retrieve 3',
+	]) {
+		assert.equal(await fire("tool_result", bashResult(command)), undefined, command);
+	}
+	assert.equal(filterCalls(calls).length, 0);
+});
+
+const PAGE = `<!doctype html>\n<html><body>${"<p>Some article text.</p>".repeat(200)}</body></html>`;
+
+test("an HTML document from bash reaches the filter only for curl/wget-class commands", async () => {
+	const { fire, calls } = harness({ filterResult: "Some article text." });
+	for (const command of ["cat index.html", "sed -n 1,400p page.html", "node render.js"]) {
+		assert.equal(await fire("tool_result", bashResult(command, PAGE)), undefined, command);
+	}
+	assert.equal(filterCalls(calls).length, 0, "no file the model may edit is turned into prose");
+	for (const command of ["curl -s https://example.com", "wget -qO- https://example.com"]) {
+		assert.ok(await fire("tool_result", bashResult(command, PAGE)), command);
+	}
+	assert.equal(filterCalls(calls).length, 2);
+});
+
+test("an aborted command is left alone", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted" });
+	assert.equal(
+		await fire("tool_result", bashResult("npm test", `${NOISY}\n\nCommand aborted`, { isError: true })),
+		undefined,
 	);
-	assert.deepEqual(patched, { content: [{ type: "text", text: `compacted${notice}` }] });
-	assert.equal(calls.find((c) => c.kind === "filter")?.text, "log lines");
+	assert.equal(filterCalls(calls).length, 0);
 });
 
-test("DISABLE_BOOST=1 on a command returns its output exactly", async () => {
-	const { fire, calls } = harness({ filterResult: "compacted" });
-	for (const command of ["DISABLE_BOOST=1 diff -u a b", "cd x && DISABLE_BOOST=1 cat y"]) {
-		assert.equal(await fire("tool_result", result("bash", { input: { command } })), undefined, command);
+test("extraTools are routed like bash; read and edit cannot be", async () => {
+	const { fire, calls } = harness({
+		filterResult: "compacted",
+		file: { extraTools: ["fetch", "read", "edit"] },
+	});
+	await fire("session_start", { reason: "startup" });
+	assert.ok(
+		await fire(
+			"tool_result",
+			result("fetch", { input: { url: "x" }, content: [{ type: "text", text: NOISY }] }),
+		),
+	);
+	for (const tool of ["read", "edit"]) {
+		const over = { input: { path: "a.ts" }, content: [{ type: "text", text: NOISY }] };
+		assert.equal(await fire("tool_result", result(tool, over)), undefined, tool);
 	}
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+	assert.equal(filterCalls(calls).length, 1);
 });
 
-test("boost's own commands are not compacted a second time", async () => {
-	const { fire, calls } = harness({ filterResult: "compacted" });
-	for (const command of ["boost retrieve 147", "boost retrieve 147 --lines 1-40", "boost read a.pdf"]) {
-		assert.equal(await fire("tool_result", result("bash", { input: { command } })), undefined, command);
-	}
-	assert.equal(calls.filter((c) => c.kind === "filter").length, 0);
+test("with readLogs on, a whole log read is filtered as `cat <abs>`", async () => {
+	const { fire, calls } = harness({ filterResult: "compacted", file: { readLogs: true } });
+	await fire("session_start", { reason: "startup" });
+	const log = (input: Record<string, unknown>) =>
+		result("read", { input, content: [{ type: "text", text: NOISY }] });
+	assert.ok(await fire("tool_result", log({ path: "logs/app.log" })));
+	const abs = join("/work", "logs", "app.log");
+	assert.deepEqual(filterCalls(calls)[0]?.fields, {
+		path: "logs/app.log",
+		file_path: abs,
+		command: `cat ${abs}`,
+	});
+	assert.equal(
+		await fire("tool_result", log({ path: "logs/app.log", offset: 5 })),
+		undefined,
+		"not a whole read",
+	);
+	assert.equal(filterCalls(calls).length, 1);
+});
+
+test("there is no tool_call handler: nothing can block a tool from running", () => {
+	const { handlers } = harness();
+	assert.equal(handlers.has("tool_call"), false);
 });
 
 test("the footer shows a running estimate of what Boost saved", async () => {
 	const { fire, statuses } = harness({ filterResult: "short" });
 	await fire("session_start", { reason: "startup" });
-	await fire(
-		"tool_result",
-		result("bash", { input: { command: "npm test" }, content: [{ type: "text", text: "x".repeat(8005) }] }),
-	);
+	await fire("tool_result", bashResult("npm test", "x".repeat(8005)));
 	assert.equal(statuses.at(-1), "boost ~2.0k saved");
 	await fire("session_start", { reason: "new" });
 	assert.equal(statuses.at(-1), undefined, "a new session starts from zero");
@@ -325,13 +421,12 @@ test("a missing Boost is reported once, with the command that fixes it", async (
 	assert.match(notices[0] ?? "", /\/boost-install/);
 });
 
-test("tool telemetry is reported with a duration when opted in", async () => {
+test("tool telemetry is reported when opted in", async () => {
 	const { fire, calls } = harness();
-	await fire("tool_call", { toolName: "ls", toolCallId: "c1", input: {} });
 	await fire("tool_result", result("ls"));
 	const [post] = observed(calls, "PostToolUse");
 	assert.equal(post?.fields.tool_name, "ls");
-	assert.equal(typeof post?.fields.duration_ms, "number");
+	assert.equal(post?.fields.tool_output, "raw output");
 });
 
 test("a failed tool is reported as a failure, not a result", async () => {
@@ -343,8 +438,8 @@ test("a failed tool is reported as a failure, not a result", async () => {
 
 test("filtering still happens when telemetry is opted out", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted", observeEnabled: false });
-	const patched = await fire("tool_result", result("bash", { input: { command: "npm test" } }));
-	assert.deepEqual(patched, { content: [{ type: "text", text: "compacted" }] });
+	const patched = await fire("tool_result", bashResult("npm test"));
+	assert.deepEqual((patched as { content: unknown }).content, [{ type: "text", text: "compacted" }]);
 	assert.equal(calls.filter((c) => c.kind === "observe").length, 0);
 });
 
@@ -403,8 +498,8 @@ test("no such warning when telemetry is left off", async () => {
 
 test("every payload carries the session id and working directory", async () => {
 	const { fire, calls } = harness({ filterResult: "compacted" });
-	await fire("tool_result", result("ls"));
-	assert.ok(calls.length > 0);
+	await fire("tool_result", bashResult("npm test"));
+	assert.ok(filterCalls(calls).length > 0);
 	for (const call of calls) {
 		assert.equal(call.meta.session_id, "sess-1");
 		assert.equal(call.meta.cwd, "/work");
@@ -423,7 +518,7 @@ test("--no-boost is registered as a boolean flag that defaults to off", () => {
 	});
 });
 
-const bash = () => result("bash", { input: { command: "npm test" } });
+const bash = () => bashResult("npm test");
 
 /** Drive one session through every surface; return what reached Boost. */
 async function everySurface(h: ReturnType<typeof harness>) {
@@ -618,4 +713,244 @@ test("with DISABLE_BOOST=1 not a single Boost process starts, probe included", a
 	await fire("session_shutdown", { reason: "quit" });
 	await new Promise((resolve) => setTimeout(resolve, 200));
 	assert.equal(existsSync(log), false, "the stand-in never ran");
+});
+
+// ---------------------------------------------------------------------------
+// Tool-result integrity (spec §1 invariant 5, §4, §16.2), on both pi lines
+
+const STRUCTURED = { output: NOISY, truncated: false, exit_code: 1, wall_time_seconds: 0.4 };
+
+/** The extension on the shared host stub, with a client that records every call. */
+function onStub(
+	line: PiLine,
+	options: { client?: Partial<BoostClient>; env?: NodeJS.ProcessEnv; file?: Record<string, unknown> } = {},
+) {
+	const stub = createPiStub({ line });
+	const used: string[] = [];
+	const record =
+		<T>(name: string, value: T) =>
+		(..._args: unknown[]) => {
+			used.push(name);
+			return value;
+		};
+	const client = stubClient({
+		filter: async () => {
+			used.push("filter");
+			return call(
+				"3 failures\n[Boost compressed ~97%. Get the full original output simply with: boost retrieve 12]",
+			);
+		},
+		convert: record("convert", Promise.resolve(call("", 1))),
+		mcp: record("mcp", Promise.resolve(call(""))),
+		observeDetached: record("observeDetached", undefined),
+		sync: record("sync", undefined),
+		...options.client,
+	});
+	const env = options.env ?? { PI_BOOST_OBSERVE: "1" };
+	createBoostExtension(stub.pi, {
+		client,
+		env,
+		settings: memorySettings({ env, ...(options.file ? { file: options.file } : {}) }),
+		config: fixedConfig(CLI_ON),
+		readiness: fixedReadiness(),
+	});
+	return { stub, used };
+}
+
+const failingBash = (line: PiLine, over: Record<string, unknown> = {}) =>
+	toolResultEvent(line, {
+		toolName: "bash",
+		input: { command: "npm test" },
+		content: `${NOISY}\n\nCommand exited with code 1`,
+		isError: true,
+		structuredContent: STRUCTURED,
+		details: undefined,
+		...over,
+	});
+
+test("a nested call never reaches the client, observe included", async () => {
+	const { stub, used } = onStub("1.2");
+	const event = failingBash("1.2", { parentToolCallId: "parent-1", toolCallId: "parent-1/1" });
+	assert.equal(await stub.emitToolResult(event), undefined);
+	assert.equal(used.length, 0, `no filter, no observe — nothing at all: ${used.join(", ")}`);
+	assert.deepEqual(stub.errors, []);
+	// The same call without a parent is compacted, so the skip is the parent's doing.
+	assert.ok(await stub.emitToolResult(failingBash("1.2")));
+	assert.ok(used.includes("filter"));
+});
+
+test("on pi 1.2, structuredContent comes back identical with the compacted content", async () => {
+	const { stub } = onStub("1.2");
+	const event = failingBash("1.2");
+	const patch = await stub.emitToolResult(event);
+	assert.ok(patch, "compacted");
+	assert.equal(patch.structuredContent, STRUCTURED, "the very same value, not a copy or a drop");
+	assert.deepEqual(STRUCTURED.output, NOISY, "and untouched");
+	assert.match(
+		textOfBlocks(patch.content),
+		/^3 failures\n\[Boost compressed ~97%[^\n]*\]\n\nCommand exited with code 1$/,
+	);
+	assert.equal(patch.isError, true);
+	assert.deepEqual((patch.details as { jfrogBoost?: unknown }).jfrogBoost, {
+		kind: "compacted",
+		before: event.content[0]?.type === "text" ? event.content[0].text.length : -1,
+		after: textOfBlocks(patch.content).length,
+		retrieveId: 12,
+	});
+	assert.deepEqual(stub.errors, []);
+});
+
+test("on pi 1.2, a compacted log read keeps structuredContent too", async () => {
+	const { stub } = onStub("1.2", { file: { readLogs: true } });
+	await stub.fire("session_start", { type: "session_start", reason: "startup" });
+	const structured = { content: NOISY };
+	const event = toolResultEvent("1.2", {
+		toolName: "read",
+		input: { path: "build.log" },
+		content: NOISY,
+		structuredContent: structured,
+	});
+	const patch = await stub.emitToolResult(event);
+	assert.ok(patch, "compacted");
+	assert.equal(patch.structuredContent, structured);
+});
+
+test("on pi 0.86, the same result is compacted without inventing structuredContent", async () => {
+	const { stub } = onStub("0.86");
+	const patch = await stub.emitToolResult(failingBash("0.86"));
+	assert.ok(patch, "compacted");
+	assert.equal("structuredContent" in patch, false);
+	assert.match(textOfBlocks(patch.content), /^3 failures\n/);
+	assert.deepEqual(stub.errors, []);
+});
+
+test("the tool's own details are kept, and only a plain object gains jfrogBoost", async () => {
+	const own = { truncation: { truncated: true }, fullOutputPath: "/tmp/pi-bash-1.log" };
+	const { stub } = onStub("1.2");
+	const merged = await stub.emitToolResult(failingBash("1.2", { details: own }));
+	const details = merged?.details as Record<string, unknown> | undefined;
+	assert.deepEqual(details?.truncation, own.truncation);
+	assert.equal(details?.fullOutputPath, own.fullOutputPath);
+	assert.equal((details?.jfrogBoost as { kind?: string } | undefined)?.kind, "compacted");
+	for (const details of [["custom"], "text", 7]) {
+		const patch = await stub.emitToolResult(failingBash("1.2", { details }));
+		assert.ok(patch, "still compacted");
+		assert.deepEqual(patch.details, details, `${JSON.stringify(details)} is left as it was`);
+	}
+});
+
+test("a throwing client never throws to pi", async () => {
+	const boom = () => {
+		throw new Error("boost exploded");
+	};
+	const reject = async () => {
+		throw new Error("boost exploded");
+	};
+	for (const line of ["0.86", "1.2"] as const) {
+		const { stub } = onStub(line, {
+			client: {
+				filter: reject,
+				convert: reject,
+				mcp: reject,
+				version: reject,
+				exec: reject,
+				observeDetached: boom,
+				sync: boom,
+				killAll: boom,
+				refresh: boom,
+			},
+		});
+		const ctx = stub.ctx();
+		await stub.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+		await stub.fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: {} }, ctx);
+		assert.equal(await stub.emitToolResult(failingBash(line), ctx), undefined, line);
+		await stub.fire(
+			"message_end",
+			{ message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+			ctx,
+		);
+		await stub.fire("agent_end", {}, ctx);
+		await stub.fire("session_before_compact", { reason: "manual" }, ctx);
+		await stub.fire("session_compact", {}, ctx);
+		await stub.fire("session_shutdown", { reason: "quit" }, ctx);
+		assert.deepEqual(stub.errors, [], `${line}: every handler kept the throw to itself`);
+	}
+});
+
+test("loading the extension twice in one process keeps the two apart (reload)", async () => {
+	const first = onStub("1.2");
+	const second = onStub("1.2");
+	await first.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	await second.stub.fire("session_start", { type: "session_start", reason: "reload" });
+	const secondSoFar = second.used.length;
+	assert.ok(await first.stub.emitToolResult(failingBash("1.2")), "the first instance compacts");
+	assert.equal(second.used.length, secondSoFar, "nothing the first did reached the second's client");
+	const footer = (stub: typeof first.stub) => stub.ui.statuses.filter((s) => s.text).map((s) => s.text);
+	assert.equal(footer(first.stub).length, 1, "the first instance counted its saving");
+	assert.deepEqual(footer(second.stub), [], "the second saw none of it");
+
+	const before = first.used.length;
+	assert.ok(await second.stub.emitToolResult(failingBash("1.2")), "the second compacts on its own");
+	assert.equal(first.used.length, before, "and nothing crossed back");
+	// A new session in one resets only that one.
+	await second.stub.fire("session_start", { type: "session_start", reason: "new" });
+	assert.ok(await first.stub.emitToolResult(failingBash("1.2")));
+	assert.equal(footer(first.stub).length, 2, "the first kept its running total");
+});
+
+// ---------------------------------------------------------------------------
+// The shell gate, with the real client and the Node stand-in (spec §8.4)
+
+async function gateRun(config: string, env: NodeJS.ProcessEnv) {
+	const log = join(root, `gate-${Math.random().toString(36).slice(2)}.jsonl`);
+	const childEnv: NodeJS.ProcessEnv = {
+		PATH: process.env.PATH ?? "",
+		SYSTEMROOT: process.env.SYSTEMROOT,
+		FAKE_BOOST_MODE: "compact-to",
+		FAKE_BOOST_OUTPUT: "3 failures",
+		FAKE_BOOST_LOG: log,
+		...env,
+	};
+	const settings = memorySettings({ env: childEnv });
+	const configReader = fixedConfig(config);
+	const client = createBoostClient({
+		env: childEnv,
+		home: root,
+		resolveBinary: () => join(import.meta.dirname, "fixtures", "fake-boost.mjs"),
+		launcher: (exe) => ({ file: process.execPath, args: [exe] }),
+		config: configReader.read,
+		shellMode: () => settings.effective().shell,
+		breaker: createBreaker(),
+	});
+	const stub = createPiStub({ cwd: root });
+	createBoostExtension(stub.pi, {
+		client,
+		env: childEnv,
+		settings,
+		config: configReader,
+		readiness: fixedReadiness(),
+	});
+	const patch = await stub.emitToolResult(failingBash("1.2"));
+	const lines = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
+	return {
+		patch,
+		spawns: lines.map((l) => JSON.parse(l) as { argv: string[]; env: Record<string, string> }),
+	};
+}
+
+test("with the shell gate off, not a single Boost process starts", async () => {
+	const off = await gateRun(CLI_OFF, {});
+	assert.equal(off.patch, undefined);
+	assert.deepEqual(off.spawns, [], "user = false: zero spawns");
+	const unknown = await gateRun("", {});
+	assert.deepEqual(unknown.spawns, [], "flag unrecorded on v0.15.4: Boost's default is off, zero spawns");
+	const settingOff = await gateRun(CLI_ON, { PI_BOOST_SHELL: "off" });
+	assert.deepEqual(settingOff.spawns, [], "shell: off wins over the flag");
+});
+
+test("shell: on forces CLI filtering for pi's own Boost call only", async () => {
+	const on = await gateRun(CLI_OFF, { PI_BOOST_SHELL: "on" });
+	assert.ok(on.patch, "compacted although config says user = false (F1)");
+	assert.equal(on.spawns.length, 1);
+	assert.equal(on.spawns[0]?.env.BOOST_FEATURE_FLAGS_FORCE_ENABLED, "boost-cli-filtering");
 });

@@ -34,7 +34,7 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import {
@@ -43,7 +43,11 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { createBoostClient } from "../src/boost-client.ts";
+import { createConfigReader } from "../src/boost-config.ts";
+import { createBreaker } from "../src/health.ts";
 import { createBoostExtension } from "../src/index.ts";
+import { createSettingsStore } from "../src/settings.ts";
 import {
 	applyToolResultHandlers,
 	type Block,
@@ -145,9 +149,35 @@ before(async () => {
 		].join("\n"),
 	);
 	writeFileSync(join(dir, "big.log"), Array.from({ length: 3000 }, (_, i) => `line ${i}`).join("\n"));
+	// A whole HTML page, well over minBytes: Boost would turn it into article
+	// text if it were sent (NP1), which `cat` of a file the model is about to
+	// edit must never get.
+	writeFileSync(
+		join(dir, "index.html"),
+		`<!doctype html>\n<html lang="en">\n<head><title>Docs</title></head>\n<body>\n${Array.from(
+			{ length: 120 },
+			(_, i) => `  <section id="s${i}"><h2>Section ${i}</h2><p>Paragraph ${i} of the page.</p></section>`,
+		).join("\n")}\n</body>\n</html>\n`,
+	);
+	// What a test run leaves behind as a log: exactly the kind of text Boost
+	// compacts on stdin, which a `read` must still return byte for byte.
+	writeFileSync(
+		join(dir, "tap.log"),
+		[
+			"TAP version 13",
+			...Array.from({ length: PASSING }, (_, i) => `ok ${i + 1} - case ${i} passes`),
+			"not ok 201 - case 0 fails",
+			`1..${PASSING + 1}`,
+		].join("\n"),
+	);
 
-	const pi = {
-		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+	await startExtension(handlers, {});
+});
+
+/** A pi host whose handlers land in `map`. */
+function piFor(map: Map<string, Handler[]>): ExtensionAPI {
+	return {
+		on: (event: string, handler: Handler) => map.set(event, [...(map.get(event) ?? []), handler]),
 		registerCommand: () => {},
 		// Never reaches child_process, so hold it to the never-spawn rule here.
 		exec: async (command: string, args: string[]) => {
@@ -155,25 +185,57 @@ before(async () => {
 			return { stdout: "", stderr: "", code: 0, killed: false };
 		},
 	} as unknown as ExtensionAPI;
-	// Created after `apply()`: the extension reads HOME and the environment
-	// live from `process.env`, which now is the hermetic one. Default deps, so
-	// the real wiring is under test: settings file, config reader, breaker and
-	// readiness all come from the hermetic HOME.
-	createBoostExtension(pi, { firstTurnWaitMs: 10_000 });
-	// Readiness is probed in the background from session_start and never
-	// awaited by a tool result (spec §8.1), so wait for it the way a session's
-	// first turn does — with a generous bound for a loaded machine. The
-	// awareness section is only set once Boost is ready.
-	for (const handler of handlers.get("session_start") ?? []) await handler(sessionStartEvent(), ctx());
+}
+
+/**
+ * Create the extension on `map` and wait until Boost is ready. Readiness is
+ * probed in the background from session_start and never awaited by a tool
+ * result (spec §8.1), so wait for it the way a session's first turn does —
+ * with a generous bound for a loaded machine. The awareness section is only
+ * set once Boost is ready.
+ */
+async function startExtension(map: Map<string, Handler[]>, deps: Parameters<typeof createBoostExtension>[1]) {
+	createBoostExtension(piFor(map), { firstTurnWaitMs: 10_000, ...deps });
+	for (const handler of map.get("session_start") ?? []) await handler(sessionStartEvent(), ctx());
 	const sections: Record<string, string> = {};
-	for (const handler of handlers.get("before_agent_start") ?? []) {
+	for (const handler of map.get("before_agent_start") ?? []) {
 		await handler(beforeAgentStartEvent(line, { sections }), ctx());
 	}
-	assert.ok(
-		sections["jfrog-boost"],
-		`Boost at ${hermetic.binary} did not become ready (unusable or too old)`,
-	);
-});
+	assert.ok(sections["jfrog-boost"], `Boost at ${h().binary} did not become ready (unusable or too old)`);
+}
+
+/**
+ * A second extension whose Boost children see a variant HOME (spec §16.3
+ * case 6), with `extra` in its environment. pi's own tools keep running in
+ * the default hermetic HOME; only what the extension reads and spawns moves.
+ * Every call to the client's filter is counted, so "zero spawns" is checked
+ * where the spawn would happen.
+ */
+async function variantExtension(variant: "user-false", extra: NodeJS.ProcessEnv) {
+	const home = h().variantHome(variant);
+	const env: NodeJS.ProcessEnv = { ...h().envFor(home), ...extra };
+	const config = createConfigReader({ home: () => home });
+	const settings = createSettingsStore({ env, home: () => home });
+	const breaker = createBreaker();
+	const real = createBoostClient({
+		env,
+		home,
+		config: config.read,
+		shellMode: () => settings.effective().shell,
+		breaker,
+	});
+	let filters = 0;
+	const client = {
+		...real,
+		filter: (...args: Parameters<typeof real.filter>) => {
+			filters++;
+			return real.filter(...args);
+		},
+	};
+	const map = new Map<string, Handler[]>();
+	await startExtension(map, { client, env, settings, config, breaker });
+	return { handlers: map, filters: () => filters };
+}
 
 after(() => {
 	restoreEnv?.();
@@ -199,7 +261,7 @@ function ctx(): ExtensionContext {
 async function run(
 	tool: "read" | "bash",
 	input: Record<string, unknown>,
-	options: { parentToolCallId?: string } = {},
+	options: { parentToolCallId?: string; handlers?: Map<string, Handler[]> } = {},
 ): Promise<Outcome> {
 	const definition = { read: createReadTool, bash: createBashTool }[tool](dir);
 	const toolCallId = `e2e-${++callId}`;
@@ -222,7 +284,8 @@ async function run(
 		structuredContent: output.structuredContent,
 		parentToolCallId: options.parentToolCallId,
 	});
-	const patch = await applyToolResultHandlers(line, handlers.get("tool_result") ?? [], event, ctx());
+	const map = options.handlers ?? handlers;
+	const patch = await applyToolResultHandlers(line, map.get("tool_result") ?? [], event, ctx());
 	return {
 		text: textOfBlocks(patch?.content ?? output.content),
 		isError: patch?.isError ?? isError,
@@ -257,16 +320,25 @@ test("the marker's retrieve recovers the original, which is not compacted again"
 	const id = MARKER.exec(tap.text)?.[1];
 	assert.ok(id, "compacted output carries a retrieve marker");
 
-	const recovered = await run("bash", { command: `boost retrieve ${id}` });
-	assert.equal(recovered.changed, false, "retrieved output must not be compacted again");
-	assert.equal(passLines(recovered.text), PASSING);
+	// By bare name (the binary's directory is on PATH), and by full path, the
+	// way the model calls it when `boost` is not on PATH (our-code 6).
+	for (const command of [`boost retrieve ${id}`, `'${h().binary}' retrieve ${id}`]) {
+		const recovered = await run("bash", { command });
+		assert.equal(recovered.changed, false, `${command}: retrieved output must not be compacted again`);
+		assert.equal(passLines(recovered.text), PASSING, command);
+	}
 });
 
-test("DISABLE_BOOST=1 on a command returns exactly what it printed", { skip }, async () => {
-	// The same run is compacted without the prefix — see the test above.
-	const exact = await run("bash", { command: `DISABLE_BOOST=1 ${TAP}` });
-	assert.equal(exact.changed, false);
-	assert.equal(passLines(exact.text), PASSING);
+test("DISABLE_BOOST=1 or BOOST_DISABLED=1 on a command returns exactly what it printed", {
+	skip,
+}, async () => {
+	// The same run is compacted without the prefix — see the tests above.
+	for (const prefix of ["DISABLE_BOOST=1", "BOOST_DISABLED=1", "export DISABLE_BOOST=1;"]) {
+		const exact = await run("bash", { command: `${prefix} ${TAP}` });
+		assert.equal(exact.changed, false, prefix);
+		assert.equal(exact.text, exact.original, prefix);
+		assert.equal(passLines(exact.text), PASSING, prefix);
+	}
 });
 
 test("a failed command is compacted, stays an error, and keeps pi's exit status", { skip }, async () => {
@@ -281,7 +353,10 @@ test("pi's continuation notice survives, whatever Boost does to the body", { ski
 	assert.match(partial.text, /\[2900 more lines in file\. Use offset=101 to continue\.\]$/);
 });
 
-test("an Office file pi returns as raw bytes reaches the model as text", { skip: termsSkip }, async () => {
+test("an Office file pi returns as raw bytes reaches the model as text", {
+	skip: termsSkip,
+	todo: "WP4 (spec §16.3 case 8): the document route; WP3 leaves documents exact",
+}, async () => {
 	const doc = await run("read", { path: DOCX });
 	assert.equal(doc.isError, false);
 	assert.ok(doc.changed, "pi's raw zip bytes were passed through");
@@ -296,32 +371,75 @@ test("a small source read is left exactly as pi returned it", { skip }, async ()
 	assert.equal(source.text, "export const answer = 42;\n");
 });
 
-// Spec §16.3 cases 1 (structuredContent, details.jfrogBoost) and 12 (nested
-// calls) need the integrity work of WP3: today's extension replaces content
-// without passing structuredContent on, so pi 1.x drops it, and it does not
-// look at parentToolCallId. Recorded here as `todo` so the gap shows in every
-// e2e run without failing it; WP3 removes the `todo` and they must pass.
-const onlyOn12 =
-	skip || (line !== "1.2" ? "pi 1.x only: 0.86 has no structuredContent or nested calls" : false);
-
-test("a compacted failure keeps pi's structuredContent and is marked in details", {
-	skip: onlyOn12,
-	todo: "WP3 (spec §16.3 case 1): preserve structuredContent and set details.jfrogBoost",
-}, async () => {
-	const failed = await run("bash", { command: `${TAP}; exit 3` });
-	assert.ok(failed.changed, "the failing command's output was not compacted");
-	assert.notEqual(failed.originalStructuredContent, undefined, "pi 1.x's bash returned structuredContent");
-	assert.deepEqual(failed.structuredContent, failed.originalStructuredContent);
-	const details = failed.details as { jfrogBoost?: unknown } | undefined;
-	assert.ok(details?.jfrogBoost, "details.jfrogBoost is set");
+test("HTML and log files are byte-exact, through read and through cat", { skip }, async () => {
+	for (const [tool, input] of [
+		["read", { path: "index.html" }],
+		["bash", { command: "cat index.html" }],
+		["read", { path: "tap.log" }],
+	] as const) {
+		const outcome = await run(tool, input);
+		assert.equal(outcome.changed, false, `${tool} ${JSON.stringify(input)}`);
+		assert.equal(outcome.text, outcome.original, `${tool} ${JSON.stringify(input)}`);
+	}
+	const page = await run("bash", { command: "cat index.html" });
+	assert.match(page.text, /^<!doctype html>/, "the source, not article text");
 });
 
-test("a nested tool call is left exactly as pi returned it", {
-	skip: onlyOn12,
-	todo: "WP3 (spec §16.3 case 12): skip calls with a parentToolCallId",
+test("output under 2 KiB is left exactly as printed", { skip }, async () => {
+	const small = await run("bash", {
+		command: `node -e "for (let i = 0; i < 20; i++) console.log('ok ' + i + ' - case ' + i)"`,
+	});
+	assert.ok(Buffer.byteLength(small.original) < 2048, `${Buffer.byteLength(small.original)} B`);
+	assert.equal(small.changed, false);
+	assert.equal(small.text, small.original);
+});
+
+test("with CLI filtering off in Boost's config, nothing is sent; shell: on compacts anyway", {
+	skip,
 }, async () => {
+	// HOME with `boost-cli-filtering` user = false and `shell: auto`: the gate
+	// is off, so not a single filter call is made (spec §8.4).
+	const auto = await variantExtension("user-false", {});
+	const untouched = await run("bash", { command: TAP }, { handlers: auto.handlers });
+	assert.equal(untouched.changed, false);
+	assert.equal(auto.filters(), 0, "zero filter spawns with the gate off");
+
+	// The same HOME with PI_BOOST_SHELL=on: CLI filtering is forced on in pi's
+	// own child environment only (F1), and config.toml is left as it was.
+	const configPath = join(h().variantHome("user-false"), ".boost", "config.toml");
+	const configBefore = readFileSync(configPath, "utf8");
+	const forced = await variantExtension("user-false", { PI_BOOST_SHELL: "on" });
+	const compacted = await run("bash", { command: TAP }, { handlers: forced.handlers });
+	assert.equal(forced.filters(), 1);
+	assert.ok(compacted.changed, "forced on, Boost compacted the run although config says user = false");
+	assert.ok(compacted.text.length < compacted.original.length);
+	assert.equal(readFileSync(configPath, "utf8"), configBefore, "Boost's config was not written");
+});
+
+// Spec §16.3 case 1: structuredContent and details.jfrogBoost. On 0.86 the
+// first half is moot (no structuredContent); the details half still holds.
+test("a compacted failure keeps pi's structuredContent and is marked in details", { skip }, async () => {
+	const failed = await run("bash", { command: `${TAP}; exit 3` });
+	assert.ok(failed.changed, "the failing command's output was not compacted");
+	assert.equal(failed.isError, true);
+	assert.match(failed.text, /\n\nCommand exited with code 3$/);
+	if (line === "1.2") {
+		assert.notEqual(failed.originalStructuredContent, undefined, "pi 1.x's bash returned structuredContent");
+		assert.deepEqual(failed.structuredContent, failed.originalStructuredContent);
+	}
+	const details = failed.details as
+		| { jfrogBoost?: { kind?: string; before?: number; after?: number } }
+		| undefined;
+	assert.equal(details?.jfrogBoost?.kind, "compacted");
+	assert.ok((details?.jfrogBoost?.after ?? Infinity) < (details?.jfrogBoost?.before ?? 0));
+});
+
+const onlyOn12 = skip || (line !== "1.2" ? "pi 1.x only: 0.86 has no nested calls" : false);
+
+test("a nested tool call is left exactly as pi returned it", { skip: onlyOn12 }, async () => {
 	const nested = await run("bash", { command: TAP }, { parentToolCallId: "e2e-parent" });
 	assert.equal(nested.changed, false);
+	assert.equal(nested.text, nested.original);
 });
 
 // Last on purpose: top-level tests run in order, so this sees every spawn above.

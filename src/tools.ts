@@ -1,114 +1,110 @@
 /**
  * Mapping pi's tools onto what Boost understands.
  *
- * Boost has no pi agent type. Its `hook <agent>` dialects stamp every span with
- * the agent named by the subcommand — `boost hook claude` rewrites `agent_type`
- * to `claude_code` even when the payload says otherwise — so using one would
- * file pi's sessions under Claude Code and corrupt `boost report`. The
- * agent-neutral surfaces honour the `agent_type` in `BOOST_HOOK_META`, so this
- * integration uses only those: the stdin filter and `boost read`.
+ * Attribution, as measured on Boost v0.15.4 (spec §14):
  *
- * That means output is filtered after a tool runs rather than streamed through
- * Boost during it. It is the same trade-off Boost's own OpenCode plugin makes
- * on Windows, and pi bounds tool output before handing it to us anyway.
+ *   surface                            span session.agent_type   Boost session list (conversations.tool)
+ *   ---------------------------------  ------------------------  ----------------------------------------
+ *   stdin filter, `boost read`         pi                        claude_code (Boost does not recognise pi)
+ *   `boost hook claude` (MCP)          claude_code               claude_code; mcp_tool_calls.agent_type =
+ *                                                                claude_code, no conversation id
+ *   `boost hook observe claude` (opt)  pi (earlier spans kept)   claude_code; creates and closes
+ *                                                                agent_tool_calls rows
+ *   `boost sync`                       unchanged                 unchanged; uploads, then prunes local
+ *                                                                rows (≥ 0.13.29)
  *
- * `edit` and `write` return diffs pi already summarises, and are left alone.
+ * So the agent-neutral surfaces — the stdin filter and `boost read` — carry
+ * pi's identity through `BOOST_HOOK_META` into the spans, while Boost's own
+ * session list files every pi session under claude_code whatever the
+ * surface. `hook opencode` is never used. MCP results go through
+ * `hook claude` because it is the only surface that runs Boost's MCP
+ * filters.
+ *
+ * Output is filtered after a tool runs, never streamed through Boost during
+ * it, and the executed command is never rewritten (invariant 3): pi bounds
+ * tool output before handing it over anyway.
+ *
+ * Which results are sent at all is decided in router.ts. Reads of text files,
+ * `edit`, `write`, `grep`, `find` and `ls` are left exact.
  */
+import { homedir } from "node:os";
+import { isAbsolute, resolve } from "node:path";
 
-/** pi tools whose output is worth piping through Boost. */
-const FILTERED: ReadonlySet<string> = new Set(["bash", "powershell", "read", "grep", "find", "ls"]);
+/** pi's shell tools: their output is the shell route's input. */
+export const SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
 
 /**
- * Files Boost can convert to Markdown. pi's `read` decodes the binary ones as
- * UTF-8 garbage rather than failing, so a binary-looking or failed read of one
- * is the signal to try `boost read` instead.
+ * Binary documents pi's `read` returns as raw bytes decoded as UTF-8, which
+ * Boost can convert to text (spec §5; converted from WP4 on).
  */
-const DOCUMENTS: ReadonlySet<string> = new Set([
-	".csv",
-	".doc",
-	".docx",
-	".htm",
-	".html",
-	".odp",
-	".ods",
-	".odt",
+export const BINARY_DOCS: ReadonlySet<string> = new Set([
 	".pdf",
-	".ppt",
-	".pptx",
-	".rtf",
-	".xls",
+	".docx",
 	".xlsx",
+	".pptx",
+	".odt",
+	".ods",
+	".odp",
 ]);
 
-/** Shell tools, whose failures are still worth compacting — think failing test runs. */
-const SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
+/** Legacy binary Office files: neither pi nor Boost can read them; Boost explains why (WP4). */
+export const LEGACY_OFFICE: ReadonlySet<string> = new Set([".doc", ".xls", ".ppt"]);
 
-/** A command that already runs Boost: `boost retrieve 12`, `… | boost`. */
-const RUNS_BOOST = /(?:^|[|;&(]\s*)boost(?:\.exe)?(?:\s|$)|\|\s*boost(?:\.exe)?(?:\s|[;&)]|$)/i;
-/** The per-command opt-out: `DISABLE_BOOST=1 cmd`, or PowerShell's `$env:DISABLE_BOOST=1`. */
-const OPTED_OUT = /(?:^|\s)DISABLE_BOOST=1(?:\s|$)|\$env:DISABLE_BOOST\s*=\s*['"]?1['"]?/i;
+/** Log files that `readLogs` (opt-in) sends through the stdin filter when read whole. */
+export const LOG_EXTENSIONS: ReadonlySet<string> = new Set([".log", ".out"]);
 
-export function isFiltered(toolName: string): boolean {
-	return FILTERED.has(toolName);
-}
+/**
+ * Tools that are never routed like a shell, even when `extraTools` names
+ * them: `read` of text, `edit` and `write` must reach the model exactly
+ * (invariant 1) — the model edits from what it read.
+ */
+export const NEVER_EXTRA: ReadonlySet<string> = new Set(["read", "edit", "write"]);
 
 export function isShell(toolName: string): boolean {
 	return SHELLS.has(toolName);
 }
 
+/** The lower-cased extension of a path, `""` when it has none (`.bashrc` has none). */
+export function extensionOf(path: unknown): string {
+	if (typeof path !== "string") return "";
+	const name = path.split(/[\\/]/).pop() ?? "";
+	const dot = name.lastIndexOf(".");
+	return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
 /**
- * Whether a shell command's output must reach the model as it was printed.
- *
- * pi's shell runs in its own process, so `DISABLE_BOOST=1` in a command never
- * reaches this extension's environment; it has to be spotted in the command
- * text. Boost's own commands are skipped too — compacting `boost retrieve`
- * would hand back another marker instead of the original. Both rules match
- * Boost's OpenCode plugin.
+ * The absolute path pi's `read` opened for `path`, resolved the way pi does
+ * without importing it: one leading `@` stripped, `~` and `~/` expanded,
+ * then resolved against the session's working directory.
  */
-export function bypassesBoost(command: unknown): boolean {
-	return typeof command === "string" && (RUNS_BOOST.test(command) || OPTED_OUT.test(command));
+export function resolveReadPath(path: string, cwd: string, home: string = homedir()): string {
+	let p = path.startsWith("@") ? path.slice(1) : path;
+	if (p === "~") p = home;
+	else if (p.startsWith("~/") || p.startsWith("~\\")) p = resolve(home, p.slice(2));
+	return isAbsolute(p) ? p : resolve(cwd, p);
 }
 
-/** Whether Boost might extract more from this path than pi's `read` can. */
-export function isDocument(path: unknown): path is string {
-	if (typeof path !== "string") return false;
-	const dot = path.lastIndexOf(".");
-	return dot > 0 && DOCUMENTS.has(path.slice(dot).toLowerCase());
-}
-
-function arg(value: unknown, fallback = "."): string {
-	if (typeof value !== "string" || !value) return fallback;
+/** Quote an argument for a POSIX shell command line when it needs it. */
+export function shellQuote(value: string): string {
 	return /^[\w./@=:+-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 /**
- * The shell command a pi tool call is equivalent to.
+ * The shell command a tool call is equivalent to, for `BOOST_HOOK_META`.
  *
- * Boost's filters are keyed on commands, not tool names, so the stdin filter
- * has to be told which one produced the output it is reading — the same trick
- * Boost's OpenCode plugin uses when it filters `read` results as `cat <path>`.
- * Returns undefined for tools with no equivalent.
+ * On v0.15.4 the stdin filter picks its filter from the output itself and
+ * mostly ignores `tool_input` (boost-surfaces 5), so this is kept for
+ * attribution and for filters that do key on the command:
+ * - a shell tool, or an `extraTools` tool with a `command`: that command;
+ * - a whole `read` of a log (`readLogs`): `cat <abs>`, the way Boost's own
+ *   integrations describe a file read.
+ * Undefined for anything else.
  */
 export function equivalentCommand(
 	toolName: string,
 	input: Readonly<Record<string, unknown>>,
+	absPath?: string,
 ): string | undefined {
-	switch (toolName) {
-		case "bash":
-		case "powershell":
-			return typeof input.command === "string" ? input.command : undefined;
-		case "read":
-			return `cat ${arg(input.path)}`;
-		case "ls":
-			return `ls -la ${arg(input.path)}`;
-		case "find":
-			return `find ${arg(input.path)} -name ${arg(input.pattern, "*")}`;
-		case "grep": {
-			const flags = `-rn${input.ignoreCase === true ? "i" : ""}${input.literal === true ? "F" : ""}`;
-			const glob = typeof input.glob === "string" && input.glob ? ` --include=${arg(input.glob)}` : "";
-			return `grep ${flags}${glob} ${arg(input.pattern, "")} ${arg(input.path)}`;
-		}
-		default:
-			return undefined;
-	}
+	if (toolName === "read") return absPath ? `cat ${shellQuote(absPath)}` : undefined;
+	return typeof input.command === "string" ? input.command : undefined;
 }

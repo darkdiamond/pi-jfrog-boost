@@ -27,6 +27,19 @@ export interface SyncScheduler {
 export function createSyncScheduler(client: BoostClient, delayMs = SYNC_DELAY_MS): SyncScheduler {
 	let timer: NodeJS.Timeout | undefined;
 
+	/**
+	 * Fail open: a throw from a timer callback would be an uncaught exception
+	 * that takes pi down with it, and one from flush() would surface as an
+	 * error in pi's shutdown. An upload is never worth either.
+	 */
+	const upload = (meta: HookMeta) => {
+		try {
+			client.sync(meta);
+		} catch {
+			/* nothing uploaded this time; the next settle tries again */
+		}
+	};
+
 	const cancel = () => {
 		if (!timer) return;
 		clearTimeout(timer);
@@ -39,7 +52,7 @@ export function createSyncScheduler(client: BoostClient, delayMs = SYNC_DELAY_MS
 			cancel();
 			timer = setTimeout(() => {
 				timer = undefined;
-				client.sync(meta);
+				upload(meta);
 			}, delayMs);
 			// A pending upload must never be the reason pi stays alive.
 			timer.unref?.();
@@ -47,7 +60,7 @@ export function createSyncScheduler(client: BoostClient, delayMs = SYNC_DELAY_MS
 		flush(meta) {
 			const wasPending = timer !== undefined;
 			cancel();
-			if (wasPending) client.sync(meta);
+			if (wasPending) upload(meta);
 		},
 		dispose: cancel,
 	};

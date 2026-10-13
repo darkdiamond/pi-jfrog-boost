@@ -1,9 +1,10 @@
 /**
- * Helpers for pi's tool and message content arrays.
+ * Helpers for pi's tool and message content arrays, and the text checks the
+ * router and the shell route share.
  *
  * pi models content as `(TextContent | ImageContent)[]`. Boost only ever deals
  * in text, so these narrow to the text blocks and put results back without
- * disturbing images.
+ * disturbing images. Everything here is pure: no I/O, no Boost.
  */
 import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 
@@ -44,13 +45,32 @@ export function withText(content: readonly ContentBlock[], text: string): Conten
 }
 
 /**
- * A trailing paragraph pi appended to a tool's output: a truncation or
- * continuation hint (`[Showing lines 1-2000 of 5000. Use offset=2001 to
- * continue.]`, `[100 matches limit reached. …]`, `… Full output: /tmp/…]`) or a
- * shell status line (`Command exited with code 1`).
+ * One trailing notice pi appends to a tool's output, after the blank line pi
+ * always puts before it. Matched narrowly, so ordinary output that happens to
+ * end in brackets — a printed `[1, 2, 3]`, a JSON array, a `[INFO] done` log
+ * line — stays part of the body and reaches Boost. 0.3.0 took any final
+ * bracketed line for a notice. The shapes, from pi 1.2.0
+ * `dist/core/tools/*.js` (0.86.1 emits the same):
+ *
+ *   bash, powershell  [Showing lines a-b of N. Full output: <path>]
+ *                     [Showing lines a-b of N (50.0KB limit). Full output: <path>]
+ *                     [Showing last 50.0KB of line N (line is 1.2MB). Full output: <path>]
+ *                     Command exited with code N
+ *                     Command timed out after N seconds
+ *                     Command aborted
+ *                     Command terminated without an exit code
+ *   read              [Showing lines a-b of N. Use offset=X to continue.]
+ *                     [Showing lines a-b of N (50.0KB limit). Use offset=X to continue.]
+ *                     [N more lines in file. Use offset=X to continue.]
+ *   grep, find, ls    [100 matches limit reached. Use limit=200 for more, or refine pattern]
+ *                     [50.0KB limit reached]
+ *                     [500 entries limit reached. Use limit=1000 for more]
+ *
+ * grep joins a "Some lines truncated" note onto a limit notice with ". ",
+ * which the `limit reached` alternative still covers.
  */
 const PI_NOTICE =
-	/\n\n(?:\[[^\n]*\]|Command (?:exited with code -?\d+|timed out after [\d.]+ seconds|aborted|terminated without an exit code))[ \t]*\n?$/;
+	/\n\n(?:\[(?:Showing (?:lines|last) [^\n]*|\d+ more lines in file\.[^\n]*|[^\n]*\blimit reached\b[^\n]*|[^\n]*Full output: [^\n]*)\]|Command (?:exited with code -?\d+|timed out after [\d.]+ seconds|aborted|terminated without an exit code))[ \t]*\n?$/;
 
 /**
  * Split pi's trailing notices off a tool's output.
@@ -68,6 +88,119 @@ export function splitNotices(text: string): { body: string; notices: string } {
 		body = body.slice(0, match.index);
 	}
 	return { body, notices };
+}
+
+/**
+ * Terminal escape sequences, which pi's bash passes through untouched (a test
+ * runner that believes it has a TTY colours its output):
+ *   - CSI, 7-bit `ESC [` or 8-bit `\x9b`: colours, cursor moves, erases;
+ *   - OSC, `ESC ]` or `\x9d`, up to BEL or ST: window titles, hyperlinks;
+ *   - the remaining `ESC` sequences: charset selection, keypad modes.
+ * Boost's filters match plain text — a coloured `✔ ok 12` is not a passing
+ * test to them (boost-surfaces 10) — so they are given stripped text.
+ */
+const ANSI =
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+	/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c)|\u001b[()*+][0-9A-Za-z]|\u001b[@-Z\\^_=>78]/g;
+
+/** `text` without terminal escape sequences. */
+export function stripAnsi(text: string): string {
+	return text.replace(ANSI, "");
+}
+
+/** How much of the start of a result the HTML sniff looks at. */
+const HTML_SNIFF_CHARS = 4096;
+/**
+ * Boost's own trigger for turning HTML into article text (NP1): a document
+ * that opens, after any comments, with a doctype or an `<html>` tag. Anchored,
+ * so a fragment, or a page quoted inside other output, does not match —
+ * Boost leaves those alone too.
+ */
+const HTML_DOCUMENT = /^(<!--[\s\S]*?-->\s*)*(<!doctype\s+html|<html[\s>])/i;
+
+/**
+ * Whether Boost would turn this text into readable article text. It does that
+ * whatever command produced the text, and no environment variable stops it
+ * (NP1, NP2), so `cat index.html` would hand the model prose instead of the
+ * source it is about to edit. The router lets such output through only for
+ * web fetches, where readable text is the point.
+ */
+export function looksLikeHtmlDocument(text: string): boolean {
+	const head = text.slice(0, HTML_SNIFF_CHARS).replace(/^﻿/, "").trimStart();
+	return HTML_DOCUMENT.test(head);
+}
+
+/**
+ * The marker Boost appends to compacted output, always as its last line:
+ * `[Boost compressed ~84%. Get the full original output simply with: boost retrieve 147]`.
+ * Anchored to the end, so a marker that is merely quoted in the output (an
+ * earlier session's log, this extension's own README) is never taken for one.
+ */
+const MARKER = /(?:^|\n)\[Boost compressed ~(\d+)%\.[^\n\]]*?\bboost retrieve (\d+)\][ \t]*\n?$/;
+
+/** The retrieve id and percentage from Boost's trailing marker, when there is one. */
+export function parseMarker(text: string): { id: number; percent: number } | undefined {
+	const match = MARKER.exec(text);
+	if (!match) return undefined;
+	return { percent: Number(match[1]), id: Number(match[2]) };
+}
+
+/** A changed result must save at least this many bytes (spec §6.2, §17)… */
+export const MIN_REDUCTION_BYTES = 256;
+/** …and at least this share of the original. */
+export const MIN_REDUCTION_RATIO = 0.05;
+
+/**
+ * Whether Boost's reply is worth replacing the original with: different once
+ * trailing whitespace is ignored, and at least `max(256 B, 5%)` smaller.
+ *
+ * Below that bar the model gains fewer than ~60 tokens and pays for them with
+ * output that is no longer exactly what the tool printed. A reply that only
+ * changed whitespace, or came back empty, is never a compaction; 0.3.0
+ * applied both.
+ */
+export function isMeaningfulReduction(original: string, reply: string): boolean {
+	const before = original.trimEnd();
+	const after = reply.trimEnd();
+	if (!after.trim() || after === before) return false;
+	const beforeBytes = Buffer.byteLength(before);
+	const saved = beforeBytes - Buffer.byteLength(after);
+	return saved >= Math.max(MIN_REDUCTION_BYTES, MIN_REDUCTION_RATIO * beforeBytes);
+}
+
+/**
+ * What `details.jfrogBoost` records about a result the extension changed.
+ * Numbers and labels only, never text: details are shown in pi's UI and
+ * persisted with the session, and the badge (WP7) is built from them.
+ */
+export interface BoostDetails {
+	kind: "compacted" | "converted" | "mcp";
+	/** Characters of text before and after. */
+	before?: number;
+	after?: number;
+	/** The id in Boost's trailing marker, for `boost retrieve`. */
+	retrieveId?: number;
+	[key: string]: unknown;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+/**
+ * The tool's `details` with `jfrogBoost` added, or undefined when the two
+ * cannot be merged safely. pi's renderers, and other extensions, read a
+ * tool's own details (bash's `truncation` and `fullOutputPath`), so those are
+ * kept as they are: only a plain object, or nothing at all, gains the key.
+ * Anything else — an array, a class instance a custom tool's renderer relies
+ * on — is left alone, and that row simply shows no badge.
+ */
+export function mergeDetails(details: unknown, boost: BoostDetails): Record<string, unknown> | undefined {
+	if (details === undefined) return { jfrogBoost: boost };
+	if (!isPlainObject(details)) return undefined;
+	return { ...details, jfrogBoost: boost };
 }
 
 /**
