@@ -28,7 +28,12 @@ export const BUCKETS = ["bash", "powershell", "extra", "logs", "documents", "mcp
 export type BucketName = (typeof BUCKETS)[number];
 
 export interface Bucket {
-	/** Results of this kind that reached the extension. */
+	/**
+	 * Results of this kind that reached the extension while it was working:
+	 * not nested, not switched off, Boost ready. An idle extension (off, or
+	 * Boost missing) counts nothing here, so it never writes a stats entry
+	 * into a session it had no part in (§10.5).
+	 */
 	seen: number;
 	/** Replaced by Boost's shorter text (shell, logs, MCP). */
 	compacted: number;
@@ -42,6 +47,16 @@ export interface Bucket {
 	bytesIn: number;
 	/** Characters of what the model got for them, after. */
 	bytesOut: number;
+	/**
+	 * Characters removed, summed per result and never negative per result.
+	 * Not `bytesIn - bytesOut`: a converted document is routinely longer
+	 * than pi's raw read of it (a stored .docx reads as pi's one-line "line
+	 * exceeds 50KB" notice), and that growth must not cancel what shell and
+	 * MCP compaction removed elsewhere — the footer would drop its savings or
+	 * `/boost status` read "nothing saved yet" next to a bucket that saved
+	 * (invariant 6).
+	 */
+	saved: number;
 }
 
 export interface StatsSnapshot {
@@ -57,6 +72,7 @@ const emptyBucket = (): Bucket => ({
 	failed: 0,
 	bytesIn: 0,
 	bytesOut: 0,
+	saved: 0,
 });
 
 export function emptySnapshot(): StatsSnapshot {
@@ -65,9 +81,9 @@ export function emptySnapshot(): StatsSnapshot {
 	return { v: STATS_VERSION, buckets };
 }
 
-/** Characters a bucket's replacements removed, never negative. */
+/** Characters a bucket's replacements removed: each result's own saving, never negative. */
 export function bucketSavings(bucket: Bucket): number {
-	return Math.max(0, bucket.bytesIn - bucket.bytesOut);
+	return bucket.saved;
 }
 
 /** All buckets added together. */
@@ -81,6 +97,7 @@ export function totals(snapshot: StatsSnapshot): Bucket {
 		sum.failed += b.failed;
 		sum.bytesIn += b.bytesIn;
 		sum.bytesOut += b.bytesOut;
+		sum.saved += b.saved;
 		for (const [reason, n] of Object.entries(b.skipped)) sum.skipped[reason] = (sum.skipped[reason] ?? 0) + n;
 	}
 	return sum;
@@ -141,6 +158,13 @@ export function parseSnapshot(data: unknown): StatsSnapshot | undefined {
 			if (n === undefined) valid = false;
 			else parsed[key] = n;
 		}
+		// `saved` came after the first entries of this version were written;
+		// one without it falls back to the bucket's net, the best it knew.
+		// Never more than went in: a larger number is not a real saving.
+		const saved =
+			fields.saved === undefined ? Math.max(0, parsed.bytesIn - parsed.bytesOut) : count(fields.saved);
+		if (saved === undefined || saved > parsed.bytesIn) valid = false;
+		else parsed.saved = saved;
 		const skipped = fields.skipped;
 		if (typeof skipped === "object" && skipped !== null && !Array.isArray(skipped)) {
 			for (const [reason, value] of Object.entries(skipped)) {
@@ -198,7 +222,7 @@ export function restoreSnapshot(sessionManager: SessionEntries | undefined): Sta
 }
 
 export interface Stats {
-	/** A result of this kind reached the extension. */
+	/** A result of this kind reached the extension while it was working (see {@link Bucket.seen}). */
 	seen(bucket: BucketName): void;
 	skip(bucket: BucketName, reason: string): void;
 	failed(bucket: BucketName): void;
@@ -238,8 +262,11 @@ export function createStats(): Stats {
 		},
 		processed(bucket, before, after, applied) {
 			const b = state.buckets[bucket];
-			b.bytesIn += Math.max(0, Math.round(before));
-			b.bytesOut += Math.max(0, Math.round(after));
+			const inChars = Math.max(0, Math.round(before));
+			const outChars = Math.max(0, Math.round(after));
+			b.bytesIn += inChars;
+			b.bytesOut += outChars;
+			b.saved += Math.max(0, inChars - outChars);
 			if (applied) b[applied]++;
 			dirty = true;
 		},

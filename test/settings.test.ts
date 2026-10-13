@@ -79,6 +79,22 @@ test("an invalid key warns once per process, naming the key, the file and the de
 	assert.equal(second.effective().footer, false, "the valid key in the same file still applies");
 });
 
+test("the once-per-process memory survives the module being evaluated afresh, as pi's loader does", async () => {
+	// pi loads extensions with jiti's module cache off, so every /new,
+	// /resume, /fork and /reload evaluates settings.ts again. A query string
+	// gets a second, independent instance of the module here, the same way.
+	const url = new URL("../src/settings.ts?reloaded=1", import.meta.url).href;
+	const reloaded = (await import(url)) as typeof import("../src/settings.ts");
+	assert.notEqual(reloaded.createSettingsStore, createSettingsStore, "a separate module instance");
+	const path = join(root, "warn-once-reloaded.json");
+	const env = { PI_JFROG_BOOST_SETTINGS: path };
+	const fs = memoryFs(new Map([[path, JSON.stringify({ minBytes: -1 })]]));
+	const first = createSettingsStore({ env, fs, home: () => home });
+	assert.equal(first.load().length, 1);
+	const second = reloaded.createSettingsStore({ env, fs, home: () => home });
+	assert.deepEqual(second.load(), [], "the re-evaluated module remembers the warning");
+});
+
 test("an unreadable file means all defaults plus one warning", () => {
 	const path = join(root, "corrupt.json");
 	const fs = memoryFs(new Map([[path, "{ not json"]]));

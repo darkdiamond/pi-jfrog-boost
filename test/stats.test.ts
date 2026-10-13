@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
 	BUCKETS,
 	bucketFor,
+	bucketSavings,
 	createStats,
 	emptySnapshot,
 	formatStats,
@@ -63,12 +64,42 @@ test("counting: seen, compacted, converted, skipped by reason, failed, sizes", (
 		failed: 0,
 		bytesIn: 13_000,
 		bytesOut: 4_000,
+		saved: 9_000,
 	});
 	assert.equal(snap.buckets.documents.converted, 1);
 	assert.equal(snap.buckets.mcp.failed, 1);
 	const sum = totals(snap);
 	assert.equal(sum.bytesIn - sum.bytesOut, 9_000 + 34_000);
+	assert.equal(sum.saved, 9_000 + 34_000);
 	assert.equal(sum.seen, 5);
+});
+
+test("a result that grew saves nothing, and does not cancel what others saved", () => {
+	const stats = createStats();
+	stats.processed("bash", 10_000, 2_000, "compacted");
+	// A .docx pi read as its one-line notice, converted to a long page.
+	stats.processed("documents", 5_000, 20_000, "converted");
+	const snap = stats.snapshot();
+	assert.equal(bucketSavings(snap.buckets.bash), 8_000);
+	assert.equal(bucketSavings(snap.buckets.documents), 0);
+	assert.equal(totals(snap).saved, 8_000, "not 8000 - 15000");
+	assert.equal(snap.buckets.documents.bytesOut, 20_000, "the sizes themselves stay as they were");
+});
+
+test("an entry written before `saved` existed falls back to its net; a bogus one is dropped", () => {
+	const legacy = {
+		seen: 1,
+		compacted: 1,
+		converted: 0,
+		skipped: {},
+		failed: 0,
+		bytesIn: 900,
+		bytesOut: 100,
+	};
+	const restored = parseSnapshot({ v: 1, buckets: { bash: legacy } });
+	assert.equal(restored?.buckets.bash.saved, 800);
+	const inflated = parseSnapshot({ v: 1, buckets: { bash: { ...legacy, saved: 901 } } });
+	assert.equal(inflated?.buckets.bash.seen, 0, "more saved than went in is not trusted");
 });
 
 test("a reason that is not a plain code is never kept as a key", () => {

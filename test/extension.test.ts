@@ -28,7 +28,7 @@ import {
 	TERMS_NOTICE,
 } from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
-import { STATS_ENTRY } from "../src/stats.ts";
+import { STATS_ENTRY, type StatsSnapshot } from "../src/stats.ts";
 import {
 	filtersDisabledNotice,
 	MISSING_NOTICE,
@@ -1579,4 +1579,90 @@ test("/boost status is built from the live state without spawning", async () => 
 	assert.match(report, /\n {2}skipped {3}small 1 · exact 0/);
 	assert.deepEqual(spawned, []);
 	assert.equal(ext.footerText(), stub.ui.statuses.at(-1)?.text);
+});
+
+test("a conversion that grew the text never cancels a shell saving in the footer or /boost status", async () => {
+	const page = Array.from({ length: 600 }, (_, i) => `row ${i + 1} of the quarterly table`).join("\n");
+	const { stub, ext, statusTexts } = uiExtension({
+		config: TERMS,
+		client: { convert: async () => call(page) },
+	});
+	await start(stub);
+	await stub.emitToolResult(failingBash("1.2"));
+	const afterBash = statusTexts().at(-1);
+	assert.match(afterBash ?? "", /^boost ✓ ~\S+ saved \(\d+%\)$/);
+	// pi's raw read of a stored .docx is short; the converted page is not.
+	const converted = await stub.emitToolResult(
+		toolResultEvent("1.2", { toolName: "read", input: { path: DOCX_PATH }, content: RAW }),
+	);
+	assert.equal((converted?.details as { jfrogBoost?: { kind?: string } })?.jfrogBoost?.kind, "converted");
+	const removed = Number(/~([\d.]+)k? saved/.exec(statusTexts().at(-1) ?? "")?.[1]);
+	assert.equal(
+		Number(/~([\d.]+)k? saved/.exec(afterBash ?? "")?.[1]),
+		removed,
+		"the saving stays; only the percentage's denominator grows",
+	);
+	const session = /\n {2}session {3}(.*)\n/.exec(ext.statusReport())?.[1] ?? "";
+	assert.match(
+		session,
+		/^~\S+ tokens saved \(\d+%\) — bash \S+$/,
+		"no documents part, no 'nothing saved yet'",
+	);
+});
+
+test("a legacy Office advisory is not counted as a conversion or a saving", async () => {
+	const advisory = "[boost] Legacy Office (.doc): save as docx/xlsx/pptx, then Read or boost read.";
+	const { stub, statusTexts } = uiExtension({
+		config: TERMS,
+		client: { convert: async () => call(advisory) },
+	});
+	await start(stub);
+	const patched = await stub.emitToolResult(
+		toolResultEvent("1.2", {
+			toolName: "read",
+			input: { path: OLE_PATH },
+			content: "\u0000garbage".repeat(5000),
+		}),
+	);
+	assert.equal(patched?.isError, true, "the advisory replaced the result");
+	assert.equal(statusTexts().at(-1), "boost ✓", "and saved nothing the footer could show");
+	await settle(stub);
+	const documents = (statsEntries(stub).at(-1)?.data as StatsSnapshot | undefined)?.buckets.documents;
+	assert.ok(documents);
+	assert.deepEqual(
+		{
+			converted: documents.converted,
+			saved: documents.saved,
+			bytesIn: documents.bytesIn,
+			skipped: documents.skipped,
+		},
+		{ converted: 0, saved: 0, bytesIn: 0, skipped: { advisory: 1 } },
+	);
+});
+
+test("an idle extension writes no stats entry: Boost off, missing, or a nested call", async () => {
+	const bash = () => toolResultEvent("1.2", { toolName: "bash", input: { command: "ls" }, content: "a" });
+	const cases = {
+		off: uiExtension({ file: { enabled: false } }),
+		missing: uiExtension({ readiness: { ...fixedReadiness({ kind: "missing" }), binary: () => undefined } }),
+		nested: uiExtension(),
+	};
+	for (const [name, { stub }] of Object.entries(cases)) {
+		await start(stub);
+		for (let i = 0; i < 3; i++) {
+			await stub.emitToolResult(name === "nested" ? failingBash("1.2", { parentToolCallId: "p1" }) : bash());
+			await stub.emitToolResult(
+				name === "nested" ? failingBash("1.2", { parentToolCallId: "p1" }) : failingBash("1.2"),
+			);
+			await settle(stub);
+		}
+		await stub.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		assert.deepEqual(statsEntries(stub), [], `${name}: nothing appended`);
+	}
+	// The same results on a working Boost are counted and persisted.
+	const working = uiExtension();
+	await start(working.stub);
+	await working.stub.emitToolResult(bash());
+	await settle(working.stub);
+	assert.equal(statsEntries(working.stub).length, 1);
 });

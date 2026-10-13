@@ -186,15 +186,30 @@ function view(over: Partial<StatusView> = {}, settings: Partial<Settings> = {}):
 	const effective = { ...DEFAULT_SETTINGS, ...settings };
 	const config = over.config ?? CONFIG;
 	const stats = emptySnapshot();
-	stats.buckets.bash = { ...stats.buckets.bash, seen: 50, compacted: 4, bytesIn: 102_000, bytesOut: 65_600 };
+	stats.buckets.bash = {
+		...stats.buckets.bash,
+		seen: 50,
+		compacted: 4,
+		bytesIn: 102_000,
+		bytesOut: 65_600,
+		saved: 36_400,
+	};
 	stats.buckets.documents = {
 		...stats.buckets.documents,
 		seen: 1,
 		converted: 1,
 		bytesIn: 10_000,
 		bytesOut: 2_000,
+		saved: 8_000,
 	};
-	stats.buckets.mcp = { ...stats.buckets.mcp, seen: 2, compacted: 1, bytesIn: 8_000, bytesOut: 3_200 };
+	stats.buckets.mcp = {
+		...stats.buckets.mcp,
+		seen: 2,
+		compacted: 1,
+		bytesIn: 8_000,
+		bytesOut: 3_200,
+		saved: 4_800,
+	};
 	return {
 		readiness: READY,
 		breaker: { kind: "closed" },
@@ -310,4 +325,26 @@ test("other skip reasons and errors are listed after the standing ones", () => {
 
 test("no savings yet is said plainly", () => {
 	assert.match(statusReport(view({ stats: emptySnapshot() })), /\n {2}session {3}nothing saved yet\n/);
+});
+
+test("the session total is the sum of its parts, never less, whatever a conversion did to the size", () => {
+	const stats = emptySnapshot();
+	stats.buckets.bash = {
+		...stats.buckets.bash,
+		seen: 1,
+		compacted: 1,
+		bytesIn: 40_000,
+		bytesOut: 4_000,
+		saved: 36_000,
+	};
+	// A .docx pi read as a 120-char notice, converted to a 30k-char page.
+	stats.buckets.documents = {
+		...stats.buckets.documents,
+		seen: 1,
+		converted: 1,
+		bytesIn: 120,
+		bytesOut: 30_000,
+		saved: 0,
+	};
+	assert.match(statusReport(view({ stats })), /\n {2}session {3}~9\.0k tokens saved \(90%\) — bash 9\.0k\n/);
 });

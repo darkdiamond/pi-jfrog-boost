@@ -395,10 +395,20 @@ export interface SettingsStoreDeps {
 }
 
 /**
- * Warnings already given in this process. Module-level on purpose: `/reload`
- * builds a new store, and the same bad key should not warn again for it.
+ * Warnings already given in this process (§10.4 `settings`: once per
+ * process). Not a module-level set: pi loads extensions with jiti's module
+ * cache off and rebuilds them for every `/new`, `/resume`, `/fork` and
+ * `/reload`, which evaluates this module afresh and would empty such a set,
+ * so the same bad key would warn on every session switch. Hung on
+ * `globalThis` under a registered symbol instead, as status.ts does for the
+ * other notices.
  */
-const warned = new Set<string>();
+function warnedInProcess(): Set<string> {
+	const key = Symbol.for("pi-jfrog-boost.settings-warned");
+	const store = globalThis as unknown as Record<symbol, Set<string> | undefined>;
+	store[key] ??= new Set<string>();
+	return store[key];
+}
 
 function formatDefault(value: unknown): string {
 	return JSON.stringify(value);
@@ -423,6 +433,7 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 			const path = pathOf();
 			file = loadSettingsFile(path, fs);
 			const out: string[] = [];
+			const warned = warnedInProcess();
 			const once = (id: string, message: string) => {
 				if (warned.has(id)) return;
 				warned.add(id);

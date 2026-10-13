@@ -417,7 +417,9 @@ function flagsLine(view: StatusView): string | undefined {
 
 function sessionLine(view: StatusView): string {
 	const all = totals(view.stats);
-	const removed = Math.max(0, all.bytesIn - all.bytesOut);
+	// The sum of the per-result savings the parts below are made of, so the
+	// headline can never read less than its parts (stats.ts `saved`).
+	const removed = all.saved;
 	if (removed === 0) return "nothing saved yet";
 	const parts = BUCKETS.map((name) => [name, bucketSavings(view.stats.buckets[name])] as const)
 		.filter(([, saved]) => saved > 0)

@@ -113,7 +113,7 @@ import {
 	tooOldNotice,
 } from "./status.ts";
 import { createSyncScheduler } from "./sync.ts";
-import { equivalentCommand, resolveReadPath } from "./tools.ts";
+import { equivalentCommand, LEGACY_OFFICE, resolveReadPath } from "./tools.ts";
 
 export { createNotices, TERMS_NOTICE };
 
@@ -309,7 +309,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			readiness: state,
 			paused: ready && breaker.state().kind === "open",
 			shellOn: ready && shellOn(),
-			removed: Math.max(0, sum.bytesIn - sum.bytesOut),
+			// Per-result savings, never offset by a conversion that grew the
+			// text (stats.ts `saved`), over everything that reached Boost.
+			removed: sum.saved,
 			original: sum.bytesIn,
 		});
 	};
@@ -325,7 +327,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			const b = breaker.state();
 			if (b.kind === "open" && b.until !== seenOpenUntil) {
 				seenOpenUntil = b.until;
-				const minutes = Math.max(1, Math.round((b.until - Date.now()) / 60_000));
+				// Rounded as `/boost status`'s breaker line rounds it, so the two agree.
+				const minutes = Math.max(1, Math.ceil((b.until - Date.now()) / 60_000));
 				notices.show(ctx, "paused", pausedNotice(b.reason, minutes), "warning");
 			}
 		} catch {
@@ -530,11 +533,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	// call outright, and nothing before a tool runs is Boost's business.
 
 	pi.on("tool_result", async (event, ctx) => {
+		// Until the route says the extension is working on this result, it is
+		// counted in the session counters only: a nested call, an off switch or
+		// a Boost that is missing or not ready leaves the persisted stats
+		// untouched, so an idle extension never appends an entry (§10.5).
 		let tally = tallyFor(undefined);
+		let bucket: BucketName | undefined;
 		try {
-			const bucket = bucketFor(event.toolName, event.input ?? {}, settings.effective().extraTools);
-			if (bucket) stats.seen(bucket);
-			tally = tallyFor(bucket);
+			bucket = bucketFor(event.toolName, event.input ?? {}, settings.effective().extraTools);
 		} catch {
 			/* counted in the session counters only */
 		}
@@ -577,6 +583,11 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 						: "unknown",
 				settings: settings.effective(),
 			});
+			const idle = decision.kind === "skip" && (decision.reason === "off" || decision.reason === "not-ready");
+			if (bucket && !idle) {
+				stats.seen(bucket);
+				tally = tallyFor(bucket);
+			}
 			if (decision.kind === "skip") {
 				tally.skip(decision.reason);
 				return;
@@ -619,9 +630,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					return;
 				}
 				if (isOff()) return;
-				// A page, or the advisory a legacy Office file becomes: either way
-				// the model reads Boost's answer instead of pi's raw bytes.
-				tally.processed(text.length, outcome.text.length, "converted");
+				// Only a page is a conversion. The other replacement is an error
+				// result — the advisory a legacy Office file becomes, or an offset
+				// past the end of the converted text — which says why there is no
+				// page: counted by why, and never as sizes, since a short advisory
+				// in place of ~50 KB of decoded binary saved the user nothing they
+				// could have used.
+				if (outcome.kind === "page") tally.processed(text.length, outcome.text.length, "converted");
+				else tally.skip(LEGACY_OFFICE.has(outcome.ext) ? "advisory" : "offset");
 				return asResult(documentPatch(event, outcome));
 			}
 			const signal = ctx.signal;
