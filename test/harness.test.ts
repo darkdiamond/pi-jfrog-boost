@@ -17,6 +17,7 @@ import {
 	toolResult12,
 	toolResult86,
 } from "./helpers/harness.ts";
+import { takeViolations, violations } from "./helpers/spawn-spy.ts";
 
 test("the installed pi is one of the supported lines", () => {
 	const version = installedPiVersion();
@@ -143,6 +144,29 @@ test("the current extension loads on both stub lines", async () => {
 		);
 		assert.deepEqual(stub.errors, [], line);
 	}
+});
+
+test("the stub's pi.exec holds the never-spawn rule, like the spawn spy", async () => {
+	const stub = createPiStub();
+	assert.deepEqual(violations(), []);
+	await assert.rejects(stub.pi.exec("boost", ["retrieve", "7"]), /forbidden Boost command `retrieve 7`/);
+	await assert.rejects(stub.pi.exec("/opt/boost", ["init"]), /forbidden/);
+	// Recorded, so a caller that swallows the rejection still fails the run.
+	const caught = takeViolations();
+	assert.deepEqual(
+		caught.map((v) => [v.file, ...v.args]),
+		[
+			["boost", "retrieve", "7"],
+			["/opt/boost", "init"],
+		],
+	);
+	assert.deepEqual(await stub.pi.exec("boost", ["report", "-t"]), {
+		stdout: "",
+		stderr: "",
+		code: 0,
+		killed: false,
+	});
+	assert.equal(stub.execCalls.length, 3, "every call, allowed or not, is recorded");
 });
 
 function toolResultEvent(line: "0.86" | "1.2") {

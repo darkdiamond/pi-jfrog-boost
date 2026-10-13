@@ -39,7 +39,7 @@
 		"lint": "biome ci .",
 		"typecheck": "tsc --noEmit",
 		"test": "node --import ./test/helpers/spawn-spy.ts --test \"test/*.test.ts\"",
-		"test:e2e": "PI_BOOST_E2E=1 node --import ./test/helpers/spawn-spy.ts --test test/e2e.test.ts",
+		"test:e2e": "node scripts/e2e.mjs",
 		"test:e2e:min": "node scripts/e2e-min.mjs",
 		"check:pack": "node scripts/check-pack.mjs",
 		"check": "npm run lint && npm run typecheck && npm test",

@@ -88,8 +88,9 @@ It is **hermetic** (`test/helpers/hermetic.ts`). Before anything spawns, it:
   temp HOME, every proxy variable at a refused port, and sets
   `BOOST_FEATURE_FLAGS_TTL=24h` and `PI_BOOST_SYNC=0`;
 - fingerprints (sha256, size, mtime) your real `~/.boost/config.toml`, history
-  DB and Boost data directories, and its last test fails if any of them
-  changed or a `.boost/` or `install_id` appeared.
+  DB (including one at a custom `BOOST_DB_PATH`) and every file in Boost's
+  data directories, and its last test fails if any of them changed or a
+  `.boost/` or `install_id` appeared.
 
 The 0.3.0 suite did not do this: it isolated only `XDG_DATA_HOME`, which Boost
 ignores on macOS, so each run wrote your real Boost history and counted its
@@ -102,8 +103,17 @@ BOOST_BIN=/path/to/boost BOOST_E2E_TERMS_FROM=/path/to/config.toml npm run test:
 npm run test:e2e:min                 # the same suite against pi 0.86.1
 ```
 
-It skips when no Boost binary is found; `npm run test:e2e` sets
-`PI_BOOST_E2E=1`, which makes a missing Boost a failure instead.
+It is opt-in: it runs only with `PI_BOOST_E2E=1`, which `npm run test:e2e`
+and `test:e2e:min` set on every OS, and then a missing Boost binary is a
+failure. Under `npm test`, `npm run check` and `prepublishOnly` it skips
+without touching Boost, even if Boost is installed.
+
+**Keep other Boost users idle while it runs.** The tripwire cannot tell the
+suite's writes from anyone else's: an agent whose Boost hooks fire mid-run
+(Claude Code, Cursor, a second pi) rewrites the real history DB and its WAL,
+and the last test fails naming those files. Rerun when they are quiet; a
+failure that names the hermetic temp HOME, or anything but files Boost writes
+in normal use, is a real leak.
 `test:e2e:min` copies the tree to a temp directory and installs pi 0.86.1
 there with `--no-save`, so nothing here changes (`--check` adds typecheck and
 unit tests). Run both before a release, and whenever pi or Boost changes

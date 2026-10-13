@@ -7,7 +7,8 @@
  * completions), `appendEntry`, `exec`, and on 1.x `registerToolRenderer` —
  * and a context with `sessionManager.getBranch/getEntries` and a scriptable
  * `ui` (notify, select, confirm, input, setStatus, theme). Everything the
- * extension does through it is recorded for assertions.
+ * extension does through it is recorded for assertions, and `exec` holds the
+ * never-spawn rule like the spawn spy does for real processes.
  *
  * Event factories come in two shapes because the extension must work on both:
  *   - 0.86-shaped: what pi 0.86.1 emits — no `structuredContent`,
@@ -25,6 +26,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { assertAllowedSpawn } from "./spawn-spy.ts";
 
 export type PiLine = "0.86" | "1.2";
 
@@ -405,6 +407,10 @@ export function createPiStub(options: PiStubOptions = {}): PiStub {
 		appendEntry: (customType: string, data?: unknown) => appended.push({ customType, data }),
 		exec: async (command: string, args: string[], execOptions?: unknown) => {
 			execCalls.push({ command, args, options: execOptions });
+			// The stub never reaches child_process, so the spy's patch cannot see
+			// this; apply the never-spawn rule here as well (spec invariant 4).
+			// The call stays recorded; the promise rejects like a failed spawn.
+			assertAllowedSpawn(command, args);
 			if (options.exec) return options.exec(command, args, execOptions);
 			return { stdout: "", stderr: "", code: 0, killed: false };
 		},

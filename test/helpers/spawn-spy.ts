@@ -60,6 +60,14 @@ export function isForbiddenSpawn(args: readonly string[] | undefined): boolean {
 	return sub !== undefined && FORBIDDEN.has(sub);
 }
 
+/** Record and throw when `file args` breaks the never-spawn rule. */
+function guard(state: SpyState, file: string, args: readonly string[] | undefined): void {
+	if (!isForbiddenSpawn(args)) return;
+	const violation = { file, args: [...(args ?? [])], stack: new Error("forbidden spawn").stack ?? "" };
+	state.violations.push(violation);
+	throw new Error(`spawn-spy: forbidden Boost command \`${violation.args.join(" ")}\``);
+}
+
 function install(): SpyState {
 	const existing = (globalThis as Record<symbol, unknown>)[KEY] as SpyState | undefined;
 	if (existing) return existing;
@@ -74,15 +82,7 @@ function install(): SpyState {
 		const original = cp[name] as (...a: unknown[]) => unknown;
 		cp[name] = function spied(this: unknown, file: unknown, args: unknown, ...rest: unknown[]) {
 			const argv = Array.isArray(args) ? (args as unknown[]).map(String) : undefined;
-			if (typeof file === "string" && isForbiddenSpawn(argv)) {
-				const violation = {
-					file,
-					args: argv ?? [],
-					stack: new Error("forbidden spawn").stack ?? "",
-				};
-				state.violations.push(violation);
-				throw new Error(`spawn-spy: forbidden Boost command \`${violation.args.join(" ")}\``);
-			}
+			if (typeof file === "string") guard(state, file, argv);
 			return original.call(this, file, args, ...rest);
 		};
 	}
@@ -101,6 +101,17 @@ function install(): SpyState {
 }
 
 const state = install();
+
+/**
+ * The same check for spawns that never reach `child_process` in tests: a pi
+ * stub's `exec` (`pi.exec("boost", ["retrieve", …])`) only records the call,
+ * so without this the rule would hold for real spawns but not for the
+ * extension's other way of running a command. Throws, and records the
+ * violation so the process still fails if the caller swallows the throw.
+ */
+export function assertAllowedSpawn(file: string, args: readonly string[] | undefined): void {
+	guard(state, file, args);
+}
 
 /** Violations recorded so far in this process. */
 export function violations(): readonly Violation[] {

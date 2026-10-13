@@ -300,9 +300,14 @@ test("exec reports the exit code, stdout and the injected clock's elapsed time",
 
 test("exec honours its timeout", async () => {
 	const client = clientFor({ FAKE_BOOST_MODE: "hang" }, { timeouts: { exec: 300 } });
+	const started = Date.now();
 	const result = await client.exec(["doctor"], root);
 	assert.equal(result.code, null);
 	assert.equal(result.stdout, "");
+	// The default exec timeout is 60 s and would produce the same result, so
+	// only the elapsed time proves the injected 300 ms one was used. Generous
+	// for a slow Windows runner's node start-up.
+	assert.ok(Date.now() - started < 5_000, "the injected exec timeout was ignored");
 });
 
 test("isFilterable rejects empty, binary, and oversized text", () => {

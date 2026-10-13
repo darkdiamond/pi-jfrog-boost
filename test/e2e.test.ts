@@ -16,9 +16,14 @@
  * counted its retrieve towards Boost switching a filter off for every agent;
  * that must never happen again. Never point this suite at your real HOME.
  *
- * Boost is not installed in CI (installing it means accepting JFrog's
- * agreement), so the suite skips when no binary is found. `npm run test:e2e`
- * sets PI_BOOST_E2E=1, which turns the skip into a failure. Assertions stick
+ * Opt-in: the suite runs only under PI_BOOST_E2E=1, which `npm run test:e2e`
+ * (scripts/e2e.mjs) sets, and then a missing Boost binary is a failure. The
+ * file matches `npm test`'s glob, but there — and so in `npm run check`,
+ * prepublishOnly and CI, where Boost is not installed because installing it
+ * means accepting JFrog's agreement — it skips without spawning Boost or
+ * fingerprinting anything, whatever Boost the machine happens to have. A
+ * release must not depend on the maintainer's Boost, or fail because another
+ * agent on the machine used Boost mid-run and tripped the tripwire. Assertions stick
  * to behaviour this integration guarantees, not to how much a given Boost
  * release happens to compress, so they hold across Boost versions.
  *
@@ -50,6 +55,7 @@ import {
 	toolResultEvent,
 } from "./helpers/harness.ts";
 import { createHermetic, type Hermetic } from "./helpers/hermetic.ts";
+import { assertAllowedSpawn } from "./helpers/spawn-spy.ts";
 
 const DOCX = join(import.meta.dirname, "fixtures", "sample.docx");
 const MARKER = /boost retrieve (\d+)/;
@@ -58,20 +64,29 @@ const PASSING = 200;
 const FAILING = 3;
 const TAP = "node --test --test-reporter=tap tap.test.mjs";
 
-const required = process.env.PI_BOOST_E2E === "1";
+const enabled = process.env.PI_BOOST_E2E === "1";
 const strict = process.env.PI_BOOST_E2E_STRICT === "1";
 
 // Built at load time, before any test spawns anything: it fingerprints the
 // real Boost state first and resolves the binary while HOME is still real.
-const hermetic: Hermetic = createHermetic();
-const skip =
-	!hermetic.binary && !required ? "Boost is not installed; run `npm run test:e2e` to require it" : false;
+// Not built at all when the suite is off, so `npm test` creates no temp HOME
+// and reads no real Boost state.
+const hermetic: Hermetic | undefined = enabled ? createHermetic() : undefined;
+const skip: string | false = hermetic
+	? false
+	: "real-Boost e2e is opt-in: run `npm run test:e2e` (sets PI_BOOST_E2E=1)";
+/** The harness, in code that only runs when the suite is on. */
+const h = (): Hermetic => {
+	if (!hermetic) throw new Error("e2e: the hermetic harness is not set up (PI_BOOST_E2E is not 1)");
+	return hermetic;
+};
 /**
  * Cases that need Boost's Preview Agreement recorded: `boost read` and
  * `boost retrieve` both exit 1 without it ("accept_terms is missing"), while
  * the stdin filter works regardless (spec F2, NP3).
  */
-const termsSkip = skip || (!hermetic.termsAvailable && !strict ? hermetic.termsMissingReason : false);
+const termsSkip =
+	skip || (hermetic && !hermetic.termsAvailable && !strict ? (hermetic.termsMissingReason ?? true) : false);
 
 /** pi 1.x reports nested calls and structured output and returns failures; 0.86 throws them. */
 const line: PiLine = installedPiLine();
@@ -83,6 +98,10 @@ interface Outcome {
 	changed: boolean;
 	/** What pi would hand the model's structured channel (1.x), after the patch. */
 	structuredContent: unknown;
+	/** The tool's `structuredContent`, before the extension. */
+	originalStructuredContent: unknown;
+	/** The result's `details`, after the patch. */
+	details: unknown;
 	/** The tool's own text, before the extension. */
 	original: string;
 }
@@ -101,7 +120,7 @@ let restoreEnv: (() => void) | undefined;
 const handlers = new Map<string, Handler[]>();
 
 before(async () => {
-	if (skip) return;
+	if (!hermetic) return;
 	if (!hermetic.binary) assert.fail("PI_BOOST_E2E=1 but no Boost binary was found (set BOOST_BIN)");
 	if (!hermetic.termsAvailable && strict)
 		assert.fail(`PI_BOOST_E2E_STRICT=1: ${hermetic.termsMissingReason}`);
@@ -129,7 +148,11 @@ before(async () => {
 	const pi = {
 		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
 		registerCommand: () => {},
-		exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+		// Never reaches child_process, so hold it to the never-spawn rule here.
+		exec: async (command: string, args: string[]) => {
+			assertAllowedSpawn(command, args);
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
 	} as unknown as ExtensionAPI;
 	// Created after `apply()`: the client reads HOME and the environment live
 	// from `process.env`, which now is the hermetic one.
@@ -139,7 +162,7 @@ before(async () => {
 
 after(() => {
 	restoreEnv?.();
-	hermetic.dispose();
+	hermetic?.dispose();
 });
 
 const ctx = () =>
@@ -156,7 +179,11 @@ const ctx = () =>
  * `structuredContent`; 0.86 throws, and pi reports the message as an error
  * result. Handler results are applied with pi's runner semantics.
  */
-async function run(tool: "read" | "bash", input: Record<string, unknown>): Promise<Outcome> {
+async function run(
+	tool: "read" | "bash",
+	input: Record<string, unknown>,
+	options: { parentToolCallId?: string } = {},
+): Promise<Outcome> {
 	const definition = { read: createReadTool, bash: createBashTool }[tool](dir);
 	const toolCallId = `e2e-${++callId}`;
 	let output: ToolOutput;
@@ -176,6 +203,7 @@ async function run(tool: "read" | "bash", input: Record<string, unknown>): Promi
 		details: output.details,
 		isError,
 		structuredContent: output.structuredContent,
+		parentToolCallId: options.parentToolCallId,
 	});
 	const patch = await applyToolResultHandlers(line, handlers.get("tool_result") ?? [], event, ctx());
 	return {
@@ -183,6 +211,8 @@ async function run(tool: "read" | "bash", input: Record<string, unknown>): Promi
 		isError: patch?.isError ?? isError,
 		changed: patch !== undefined,
 		structuredContent: patch ? patch.structuredContent : output.structuredContent,
+		originalStructuredContent: output.structuredContent,
+		details: patch ? patch.details : output.details,
 		original: textOfBlocks(output.content),
 	};
 }
@@ -191,9 +221,9 @@ const passLines = (text: string) =>
 	text.split("\n").filter((l) => /^\s*ok \d+ - case \d+ passes/.test(l)).length;
 
 test("the suite runs in a throwaway HOME, never the real one", { skip }, () => {
-	hermetic.assertIsolated();
-	assert.equal(process.env.BOOST_DB_PATH, join(hermetic.home, "history.db"));
-	assert.equal(process.env.BOOST_BIN, hermetic.binary);
+	h().assertIsolated();
+	assert.equal(process.env.BOOST_DB_PATH, join(h().home, "history.db"));
+	assert.equal(process.env.BOOST_BIN, h().binary);
 });
 
 test("a failing TAP run is compacted and carries a retrieve marker", { skip }, async () => {
@@ -249,9 +279,37 @@ test("a small source read is left exactly as pi returned it", { skip }, async ()
 	assert.equal(source.text, "export const answer = 42;\n");
 });
 
+// Spec §16.3 cases 1 (structuredContent, details.jfrogBoost) and 12 (nested
+// calls) need the integrity work of WP3: today's extension replaces content
+// without passing structuredContent on, so pi 1.x drops it, and it does not
+// look at parentToolCallId. Recorded here as `todo` so the gap shows in every
+// e2e run without failing it; WP3 removes the `todo` and they must pass.
+const onlyOn12 =
+	skip || (line !== "1.2" ? "pi 1.x only: 0.86 has no structuredContent or nested calls" : false);
+
+test("a compacted failure keeps pi's structuredContent and is marked in details", {
+	skip: onlyOn12,
+	todo: "WP3 (spec §16.3 case 1): preserve structuredContent and set details.jfrogBoost",
+}, async () => {
+	const failed = await run("bash", { command: `${TAP}; exit 3` });
+	assert.ok(failed.changed, "the failing command's output was not compacted");
+	assert.notEqual(failed.originalStructuredContent, undefined, "pi 1.x's bash returned structuredContent");
+	assert.deepEqual(failed.structuredContent, failed.originalStructuredContent);
+	const details = failed.details as { jfrogBoost?: unknown } | undefined;
+	assert.ok(details?.jfrogBoost, "details.jfrogBoost is set");
+});
+
+test("a nested tool call is left exactly as pi returned it", {
+	skip: onlyOn12,
+	todo: "WP3 (spec §16.3 case 12): skip calls with a parentToolCallId",
+}, async () => {
+	const nested = await run("bash", { command: TAP }, { parentToolCallId: "e2e-parent" });
+	assert.equal(nested.changed, false);
+});
+
 // Last on purpose: top-level tests run in order, so this sees every spawn above.
 test("the real Boost config and history were not touched", { skip }, (t) => {
-	for (const path of hermetic.tripwire.paths) t.diagnostic(`tripwire watched ${path}`);
-	hermetic.tripwire.assertUnchanged();
+	for (const path of h().tripwire.paths) t.diagnostic(`tripwire watched ${path}`);
+	h().tripwire.assertUnchanged();
 	t.diagnostic("tripwire: no change to the real Boost state");
 });

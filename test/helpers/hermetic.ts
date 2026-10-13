@@ -28,7 +28,10 @@
  *     sync. `PI_BOOST_SYNC=0` and `BOOST_FEATURE_FLAGS_TTL=24h` keep it quiet.
  *  5. Fingerprints the real Boost state (sha256 + size + mtime, or absence) so
  *     the suite can fail on any change — including a `.boost/` or
- *     `install_id` appearing where none was.
+ *     `install_id` appearing where none was. Data directories are walked and
+ *     every file in them fingerprinted, so a rewrite of state the suite does
+ *     not name (`unused-hint`, lock files) is caught too. Another agent using
+ *     the real Boost during the run trips it as well: keep them idle.
  *
  * Variant HOMEs (`user-false`, `no-metadata`, `no-terms`) are for cases that
  * need Boost to see a different machine state; each is its own directory with
@@ -42,6 +45,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	type Stats,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -93,28 +97,100 @@ export function synthesizeConfig(variant: HomeVariant, terms: readonly string[],
 // ---------------------------------------------------------------------------
 // Tripwire
 
+export interface FileFingerprint {
+	kind: "file";
+	sha256: string;
+	size: number;
+	mtimeMs: number;
+}
+
 export type Fingerprint =
 	| { kind: "absent" }
-	| { kind: "file"; sha256: string; size: number; mtimeMs: number }
-	| { kind: "dir"; entries: string[] }
+	| FileFingerprint
+	| {
+			kind: "dir";
+			/** Every entry below the directory, as sorted relative paths (`/`-separated). */
+			entries: string[];
+			/** A fingerprint of every regular file below it, keyed like `entries`. */
+			files: Record<string, FileFingerprint | { kind: "entry-only" }>;
+	  }
 	| { kind: "other" };
 
 /**
- * A read-only fingerprint. Directories are compared by their entry names, not
- * their mtime, so a new file (an `install_id`, a fresh `history.db`) shows up
- * while unrelated metadata churn does not.
+ * SQLite's shared-memory index: rewritten by any process that merely opens
+ * the DB in WAL mode, readers included, so its bytes say nothing about
+ * whether Boost wrote state. Its appearance or disappearance still counts.
+ */
+const ENTRY_ONLY = /-shm$/;
+/** Bounds for walking a watched directory; Boost's own hold a handful of files. */
+const MAX_DEPTH = 4;
+const MAX_ENTRIES = 2000;
+
+function fileFingerprint(path: string, stats: Stats): FileFingerprint {
+	const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
+	return { kind: "file", sha256, size: stats.size, mtimeMs: stats.mtimeMs };
+}
+
+/**
+ * A read-only fingerprint. A directory is walked, and each regular file in it
+ * is fingerprinted too (sha256 + size + mtime), not only its name: Boost
+ * keeps state in files the suite does not name — `unused-hint`, the
+ * `*.lock` files, files a future release adds — and a run that rewrote one
+ * must not pass. Directory mtimes are ignored; entries and file contents
+ * carry the signal.
  */
 export function fingerprint(path: string): Fingerprint {
-	let stats: ReturnType<typeof statSync>;
+	let stats: Stats;
 	try {
 		stats = statSync(path);
 	} catch {
 		return { kind: "absent" };
 	}
-	if (stats.isDirectory()) return { kind: "dir", entries: readdirSync(path).sort() };
-	if (!stats.isFile()) return { kind: "other" };
-	const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
-	return { kind: "file", sha256, size: stats.size, mtimeMs: stats.mtimeMs };
+	if (stats.isFile()) return fileFingerprint(path, stats);
+	if (!stats.isDirectory()) return { kind: "other" };
+	const entries: string[] = [];
+	const files: Record<string, FileFingerprint | { kind: "entry-only" }> = {};
+	const walk = (dir: string, prefix: string, depth: number) => {
+		for (const name of readdirSync(dir).sort()) {
+			if (entries.length >= MAX_ENTRIES) return;
+			const rel = prefix ? `${prefix}/${name}` : name;
+			const full = join(dir, name);
+			entries.push(rel);
+			let inner: Stats;
+			try {
+				inner = statSync(full);
+			} catch {
+				// Gone between readdir and stat: the entry list still records it,
+				// and the next fingerprint will not, so the change is reported.
+				continue;
+			}
+			if (inner.isFile()) {
+				files[rel] = ENTRY_ONLY.test(name) ? { kind: "entry-only" } : fileFingerprint(full, inner);
+			} else if (inner.isDirectory() && depth < MAX_DEPTH) {
+				walk(full, rel, depth + 1);
+			}
+		}
+	};
+	walk(path, "", 1);
+	return { kind: "dir", entries, files };
+}
+
+/** What changed inside a watched directory, one line per entry. */
+function dirChanges(
+	was: Extract<Fingerprint, { kind: "dir" }>,
+	now: Extract<Fingerprint, { kind: "dir" }>,
+): string[] {
+	const found: string[] = [];
+	const names = [...new Set([...was.entries, ...now.entries])].sort();
+	for (const name of names) {
+		const before = was.entries.includes(name) ? (was.files[name] ?? { kind: "dir" as const }) : undefined;
+		const after = now.entries.includes(name) ? (now.files[name] ?? { kind: "dir" as const }) : undefined;
+		if (JSON.stringify(before) === JSON.stringify(after)) continue;
+		const show = (print: typeof before) =>
+			print === undefined ? "absent" : print.kind === "file" ? describe(print) : print.kind;
+		found.push(`${name}: ${show(before)} → ${show(after)}`);
+	}
+	return found;
 }
 
 function describe(print: Fingerprint): string {
@@ -143,7 +219,10 @@ export function createTripwire(paths: readonly string[]): Tripwire {
 		const found: string[] = [];
 		for (const [path, was] of before) {
 			const now = fingerprint(path);
-			if (JSON.stringify(now) !== JSON.stringify(was)) {
+			if (JSON.stringify(now) === JSON.stringify(was)) continue;
+			if (now.kind === "dir" && was.kind === "dir") {
+				for (const change of dirChanges(was, now)) found.push(`${path}/${change}`);
+			} else {
 				found.push(`${path}: ${describe(was)} → ${describe(now)}`);
 			}
 		}
@@ -185,6 +264,10 @@ export function realBoostPaths(realHome: string, env: NodeJS.ProcessEnv, cwd: st
 		join(share, "history.db-wal"),
 		join(cwd, ".boost"),
 	];
+	// A custom DB location in the developer's own environment: `inherited()`
+	// strips BOOST_DB_PATH from the child env, so that DB is never written,
+	// but it is real Boost state and must be watched like the default one.
+	if (env.BOOST_DB_PATH) paths.push(env.BOOST_DB_PATH, `${env.BOOST_DB_PATH}-wal`);
 	if (env.XDG_DATA_HOME) paths.push(join(env.XDG_DATA_HOME, "boost"));
 	if (env.LOCALAPPDATA) paths.push(join(env.LOCALAPPDATA, "boost"));
 	return paths;
@@ -261,6 +344,12 @@ function inherited(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 				// command the suite runs through pi's bash (`node --test …`) would
 				// inherit it, think it is nested, and run nothing.
 				"NODE_TEST_CONTEXT",
+				// Startup files a non-interactive shell sources: pi's bash runs
+				// `bash -c`, which reads BASH_ENV (and sh reads ENV), so either
+				// could re-point HOME or PATH for the commands the suite runs —
+				// including `boost retrieve` — after this harness set them.
+				"BASH_ENV",
+				"ENV",
 			].includes(upper)
 		) {
 			continue;

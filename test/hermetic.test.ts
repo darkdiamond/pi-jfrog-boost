@@ -59,7 +59,8 @@ test("the tripwire fires when real Boost state is touched", () => {
 	wire.assertUnchanged();
 
 	writeFileSync(config, `${readFileSync(config, "utf8")}\n[feature_flags._metadata]\n`);
-	assert.equal(wire.changes().length, 1);
+	// Once for the file, once as a file inside the watched directory.
+	assert.equal(wire.changes().length, 2);
 	assert.throws(() => wire.assertUnchanged(), /real Boost state changed[\s\S]*config\.toml/);
 });
 
@@ -80,6 +81,52 @@ test("the tripwire notices a rewrite with identical size", () => {
 	writeFileSync(db, "DB");
 	assert.equal(statSync(db).size, 2);
 	assert.equal(wire.changes().length, 1);
+});
+
+test("the tripwire notices a rewrite of a file it does not name, like unused-hint", () => {
+	const real = fakeRealHome();
+	const support = join(real, "Library", "Application Support", "boost");
+	writeFileSync(join(support, "unused-hint"), "2026-10-01");
+	writeFileSync(join(support, "history.retention.lock"), "");
+	mkdirSync(join(support, "cache"));
+	writeFileSync(join(support, "cache", "state"), "a");
+	const wire = createTripwire([support]);
+	assert.deepEqual(wire.changes(), []);
+
+	writeFileSync(join(support, "unused-hint"), "2026-10-13");
+	writeFileSync(join(support, "cache", "state"), "b");
+	const changes = wire.changes();
+	assert.equal(changes.length, 2, changes.join("\n"));
+	assert.match(changes.join("\n"), /unused-hint: file 10 B/);
+	assert.match(changes.join("\n"), /cache\/state: file 1 B/);
+});
+
+test("the SQLite -shm index counts by presence, not by its bytes", () => {
+	const real = fakeRealHome();
+	const support = join(real, "Library", "Application Support", "boost");
+	writeFileSync(join(support, "history.db-shm"), "index-1");
+	const wire = createTripwire([support]);
+	// Rewritten by any process that only reads the DB: not a state change.
+	writeFileSync(join(support, "history.db-shm"), "index-2");
+	assert.deepEqual(wire.changes(), []);
+	rmSync(join(support, "history.db-shm"));
+	assert.match(wire.changes().join("\n"), /history\.db-shm: entry-only → absent/);
+});
+
+test("a custom BOOST_DB_PATH in the real environment is watched too", () => {
+	const real = fakeRealHome();
+	const db = join(root, `custom-${homes}.db`);
+	writeFileSync(db, "db");
+	const hermetic = hermeticFor(real, { BOOST_DB_PATH: db });
+	try {
+		assert.ok(hermetic.tripwire.paths.includes(db));
+		assert.ok(hermetic.tripwire.paths.includes(`${db}-wal`));
+		assert.notEqual(hermetic.env.BOOST_DB_PATH, db, "the child env never points at it");
+		writeFileSync(`${db}-wal`, "wal");
+		assert.throws(() => hermetic.tripwire.assertUnchanged(), /custom-\d+\.db-wal/);
+	} finally {
+		hermetic.dispose();
+	}
 });
 
 test("a hermetic run fingerprints the real home and never writes it", () => {
@@ -160,6 +207,8 @@ test("the environment points everything Boost can find into the temp HOME", () =
 		BOOST_FEATURE_FLAGS_FORCE_ENABLED: "x",
 		NO_PROXY: "*",
 		NODE_TEST_CONTEXT: "child-v8",
+		BASH_ENV: "/real/.bashrc",
+		ENV: "/real/.shrc",
 	});
 	try {
 		const { env, home } = hermetic;
@@ -184,6 +233,8 @@ test("the environment points everything Boost can find into the temp HOME", () =
 			"BOOST_FEATURE_FLAGS_FORCE_ENABLED",
 			"NO_PROXY",
 			"NODE_TEST_CONTEXT",
+			"BASH_ENV",
+			"ENV",
 		]) {
 			assert.equal(env[key], undefined, key);
 		}
