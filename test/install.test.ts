@@ -22,21 +22,24 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { RunResult } from "../src/boost-process.ts";
 import type { ReadinessState } from "../src/health.ts";
 import {
 	commandsText,
 	confirmText,
 	createInstaller,
+	defaultVerify,
 	findAsset,
 	INSTALL_COMMAND,
 	INSTALL_OPTIONS,
 	type InstallHost,
 	OFFICIAL_TIMEOUT_MS,
 	releasePlatform,
+	tildePath,
 	WINDOWS_TEXT,
 } from "../src/install.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
@@ -85,8 +88,22 @@ interface Setup {
 	body?: Buffer;
 	/** What the fake tar does: write a regular file (default), fail, a symlink, or nothing. */
 	tar?: "ok" | "fail" | "symlink" | "empty";
+	/** What the host's settled readiness says (default: missing). */
 	state?: ReadinessState;
 	binary?: string;
+	/**
+	 * After the refresh, pi resolves this binary in that state instead of the
+	 * new file — BOOST_BIN/BOOST_EXE pointing at an older build.
+	 */
+	inUse?: { binary: string; state: ReadinessState };
+	/** What `boost version` answers, per binary (default: v0.15.4). */
+	verify?: (binary: string) => Promise<RunResult>;
+	/** Serves the asset download instead of the in-memory archive. */
+	download?: (init: RequestInit | undefined) => Response | Promise<Response>;
+	downloadTimeoutMs?: number;
+	lookupTimeoutMs?: number;
+	signal?: AbortSignal;
+	onPath?: boolean;
 }
 
 function setup(options: Setup = {}) {
@@ -100,10 +117,13 @@ function setup(options: Setup = {}) {
 	const printed: string[] = [];
 	let refreshed = 0;
 	let installed: string | undefined = options.binary;
+	let refreshedState: ReadinessState | undefined;
+	const verified: string[] = [];
 
 	const stub = createPiStub({
 		hasUI: options.hasUI ?? true,
 		...(options.ui ? { ui: options.ui } : {}),
+		...(options.signal ? { signal: options.signal } : {}),
 		exec: async (command, args) => {
 			if (command !== "tar") return { stdout: "", stderr: "", code: 0, killed: false };
 			const into = args[args.indexOf("-C") + 1] as string;
@@ -123,23 +143,33 @@ function setup(options: Setup = {}) {
 	});
 
 	const api = options.api === undefined ? release() : options.api;
-	const fakeFetch = (async (url: string | URL) => {
+	const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
 		fetched.push(String(url));
 		if (String(url).includes("api.github.com")) {
-			return typeof api === "function" ? (api as () => Response)() : Response.json(api);
+			return typeof api === "function"
+				? (api as (init?: RequestInit) => Response | Promise<Response>)(init)
+				: Response.json(api);
 		}
+		if (options.download) return options.download(init);
 		return new Response(new Uint8Array(options.body ?? ARCHIVE));
 	}) as typeof fetch;
 
 	const host: InstallHost = {
 		binary: () => installed,
-		state: () => options.state ?? { kind: "missing" },
-		async refresh() {
+		current: async () => refreshedState ?? options.state ?? { kind: "missing" },
+		async refresh(ctx) {
+			assert.ok(ctx, "refresh gets the context whose footer it repaints");
 			refreshed++;
-			if (existsSync(dest)) installed = dest;
-			return installed ? { kind: "ready", version: [0, 15, 4] } : { kind: "missing" };
+			if (options.inUse) {
+				installed = options.inUse.binary;
+				refreshedState = options.inUse.state;
+			} else {
+				if (existsSync(dest)) installed = dest;
+				refreshedState = installed ? { kind: "ready", version: [0, 15, 4] } : { kind: "missing" };
+			}
+			return refreshedState;
 		},
-		onPath: () => false,
+		onPath: () => options.onPath ?? false,
 		shellOffByBoost: () => true,
 		termsAccepted: () => false,
 	};
@@ -151,8 +181,13 @@ function setup(options: Setup = {}) {
 		home,
 		dest,
 		tmpdir: work,
-		verify: async () => call("boost v0.15.4 (abc)\n"),
+		verify: async (binary) => {
+			verified.push(binary);
+			return options.verify ? options.verify(binary) : call("boost v0.15.4 (abc)\n");
+		},
 		print: (_ctx, text) => printed.push(text),
+		...(options.downloadTimeoutMs ? { downloadTimeoutMs: options.downloadTimeoutMs } : {}),
+		...(options.lookupTimeoutMs ? { lookupTimeoutMs: options.lookupTimeoutMs } : {}),
 	});
 	const run = (args = "") => install(args, stub.ctx() as ExtensionCommandContext);
 	return {
@@ -162,6 +197,7 @@ function setup(options: Setup = {}) {
 		work,
 		fetched,
 		printed,
+		verified,
 		refreshes: () => refreshed,
 		notices: () => stub.ui.notices.map((x) => x.message),
 	};
@@ -235,6 +271,7 @@ test("binary only: confirmed, verified, placed atomically, refreshed, temp remov
 	if (process.platform !== "win32") assert.equal(statSync(s.dest).mode & 0o777, 0o755);
 	assert.deepEqual(readdirSync(dirname(s.dest)), ["boost"], "no staging file left next to it");
 	assert.deepEqual(readdirSync(s.work), [], "the temp directory is removed");
+	assert.deepEqual(s.verified, [`${s.dest}.tmp-${process.pid}`], "verified while staged, before the rename");
 	assert.equal(s.refreshes(), 1);
 	assert.deepEqual(
 		s.stub.execCalls.map((c) => c.command),
@@ -431,4 +468,170 @@ test("a Boost too old to use gets the menu titled Update", async () => {
 	});
 	await s.run();
 	assert.equal(s.stub.ui.selects[0]?.title, "Update JFrog Boost");
+});
+
+test("paths are shortened to ~/… with the platform's separator, and only under home", () => {
+	const home = join(root, "home-x");
+	assert.equal(tildePath(join(home, ".local", "bin", "boost"), home), "~/.local/bin/boost");
+	assert.equal(tildePath(home, home), "~");
+	assert.equal(tildePath(`${home}2${sep}boost`, home), `${home}2${sep}boost`, "a sibling is not under home");
+	assert.equal(tildePath(join(root, "elsewhere", "boost"), home), join(root, "elsewhere", "boost"));
+	assert.equal(tildePath("/opt/boost", ""), "/opt/boost");
+});
+
+test("a binary that fails `boost version` is never placed, and an existing one is kept", async () => {
+	const s = setup({
+		binary: "/opt/boost",
+		state: { kind: "too-old", version: [0, 12, 1] },
+		ui: { select: [BINARY], confirm: [true] },
+		verify: async (binary) =>
+			binary.includes(".tmp-") ? call("dyld: Library not loaded\n", 1) : call("boost v0.12.1\n"),
+	});
+	mkdirSync(dirname(s.dest), { recursive: true });
+	writeFileSync(s.dest, "the old one");
+	await s.run();
+	assert.equal(readFileSync(s.dest, "utf8"), "the old one", "not replaced");
+	assert.deepEqual(readdirSync(dirname(s.dest)), ["boost"], "no staging file left");
+	assert.deepEqual(readdirSync(s.work), []);
+	assert.equal(s.refreshes(), 0);
+	const message = s.notices().at(-1) ?? "";
+	assert.match(message, /^JFrog Boost was not installed: verify failed \(`boost version` exited 1\)/);
+	assert.match(message, /dyld: Library not loaded/);
+});
+
+test("when BOOST_BIN wins over the new file, the report says so instead of claiming success", async () => {
+	const old: ReadinessState = { kind: "too-old", version: [0, 12, 1] };
+	const s = setup({
+		binary: "/opt/old/boost",
+		state: old,
+		inUse: { binary: "/opt/old/boost", state: old },
+		ui: { select: [BINARY], confirm: [true] },
+	});
+	await s.run();
+	assert.equal(s.stub.ui.selects[0]?.title, "Update JFrog Boost");
+	assert.equal(readFileSync(s.dest, "utf8"), "#!/bin/sh\necho boost v0.15.4\n", "the new file is placed");
+	const done = s.stub.ui.notices.at(-1);
+	assert.equal(done?.level, "warning");
+	const message = done?.message ?? "";
+	assert.doesNotMatch(message, /^Installed/);
+	assert.ok(
+		message.startsWith(
+			`Placed JFrog Boost v0.15.4 at ${s.dest}, but pi uses /opt/old/boost (v0.12.1): BOOST_BIN or BOOST_EXE points there, or it is found first. Unset it, or point it at ${s.dest}.`,
+		),
+		message,
+	);
+	assert.match(message, /can't use it yet: it is v0\.12\.1, older than v0\.13\.13/);
+	assert.match(
+		message,
+		new RegExp(`^${dirname("/opt/old/boost").replace(/[\\/.]/g, "\\$&")} isn't on your PATH`, "m"),
+	);
+	assert.doesNotMatch(
+		message,
+		/~\/\.local\/bin isn't on your PATH/,
+		"the hint names the binary's own directory",
+	);
+	assert.doesNotMatch(message, /Shell output|boost init/, "no hints for a Boost pi cannot use");
+});
+
+test("the installed-and-current check asks the binary when readiness has no verdict", async () => {
+	for (const kind of ["disabled", "probing"] as const) {
+		const old = setup({
+			binary: "/opt/boost",
+			state: { kind },
+			ui: { select: [undefined] },
+			verify: async () => call("boost v0.12.1\n"),
+		});
+		await old.run();
+		assert.deepEqual(old.verified, ["/opt/boost"]);
+		assert.equal(old.stub.ui.selects[0]?.title, "Update JFrog Boost", `${kind}: too old is not current`);
+
+		const current = setup({ binary: "/opt/boost", state: { kind }, ui: { select: [undefined] } });
+		await current.run();
+		assert.equal(current.stub.ui.selects.length, 0);
+		assert.match(current.notices()[0] ?? "", /JFrog Boost v0\.15\.4 is installed at \/opt\/boost/);
+	}
+});
+
+test("a Boost that does not answer or prints no version is not called current", async () => {
+	const silent = setup({
+		binary: "/opt/boost",
+		state: { kind: "not-responding" },
+		ui: { select: [undefined] },
+	});
+	await silent.run();
+	assert.equal(
+		silent.stub.ui.selects[0]?.title,
+		"Reinstall JFrog Boost — the one at /opt/boost does not answer `boost version`",
+	);
+	const odd = setup({ binary: "/opt/boost", state: { kind: "unknown-version" }, hasUI: false });
+	await odd.run();
+	assert.match(
+		odd.printed[0] ?? "",
+		/^JFrog Boost at \/opt\/boost prints a version pi-jfrog-boost cannot read\.\n/,
+	);
+});
+
+test("a stalled download times out, installs nothing and cleans up", async () => {
+	// AbortSignal.timeout is unref'd: something must keep the loop alive.
+	const keep = setInterval(() => {}, 1_000);
+	try {
+		const s = setup({
+			ui: { select: [BINARY], confirm: [true] },
+			downloadTimeoutMs: 100,
+			download: () => new Response(new ReadableStream({ pull: () => new Promise(() => {}) })),
+		});
+		await s.run();
+		assert.match(s.notices().at(-1) ?? "", /download failed \(timed out\)/);
+		assert.equal(existsSync(s.dest), false);
+		assert.deepEqual(readdirSync(s.work), []);
+		assert.equal(s.stub.execCalls.length, 0);
+	} finally {
+		clearInterval(keep);
+	}
+});
+
+test("an aborted command (ctx.signal) stops the download and cleans up", async () => {
+	const s = setup({ ui: { select: [BINARY], confirm: [true] }, signal: AbortSignal.abort() });
+	await s.run();
+	const message = s.notices().at(-1) ?? "";
+	assert.match(message, /download failed/);
+	assert.doesNotMatch(message, /timed out/, "the user's abort is not reported as a timeout");
+	assert.equal(existsSync(s.dest), false);
+	assert.deepEqual(readdirSync(s.work), []);
+	assert.equal(s.stub.execCalls.length, 0);
+});
+
+test("a GitHub lookup that never answers times out to the commands text", async () => {
+	const keep = setInterval(() => {}, 1_000);
+	try {
+		const s = setup({
+			ui: { select: [BINARY] },
+			lookupTimeoutMs: 50,
+			api: (init?: RequestInit) =>
+				new Promise<Response>((_resolve, reject) => {
+					const signal = init?.signal;
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+				}),
+		});
+		await s.run();
+		const message = s.notices().at(-1) ?? "";
+		assert.match(message, /^Could not look up the Boost release \(GitHub did not answer in time\)/);
+		assert.match(message, /To install JFrog Boost yourself/);
+		assert.equal(s.stub.ui.confirms.length, 0);
+	} finally {
+		clearInterval(keep);
+	}
+});
+
+test("the default verify runs `<binary> version` with flag fetching disabled", async (t) => {
+	if (process.platform === "win32") t.skip("a shell script stands in for boost");
+	const dir = join(root, `verify-${++n}`);
+	mkdirSync(dir);
+	const script = join(dir, "boost");
+	writeFileSync(script, '#!/bin/sh\necho "boost v0.15.4 args=$* flags=$BOOST_FEATURE_FLAGS_DISABLE"\n', {
+		mode: 0o755,
+	});
+	const result = await defaultVerify(script);
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout.trim(), "boost v0.15.4 args=version flags=1");
 });

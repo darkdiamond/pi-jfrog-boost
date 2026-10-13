@@ -5,13 +5,17 @@
  * asserted is what the commands ask of it (`report -t`, never `report`).
  */
 import assert from "node:assert/strict";
-import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BoostCall } from "../src/boost-client.ts";
 import { completions, OBSERVE_CONFIRM, SUBCOMMANDS } from "../src/commands.ts";
 import { type Breaker, createBreaker, type Readiness, type ReadinessState } from "../src/health.ts";
 import { createBoostExtension, createNotices } from "../src/index.ts";
+import { INSTALL_OPTIONS } from "../src/install.ts";
 import { createSettingsStore, type SettingsFs, settingsPath } from "../src/settings.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memoryFs, stubClient } from "./helpers/runtime.ts";
@@ -460,4 +464,90 @@ test("/boost install and the alias run the same flow", async () => {
 	await s.run("install", s.noUi());
 	assert.match(s.printed.at(-1) ?? "", /To install JFrog Boost yourself/);
 	assert.equal(s.stub.execCalls.length, 0);
+});
+
+test("after /boost install the footer is repainted at once, not at the next tool result", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-footer-install-"));
+	try {
+		const home = join(dir, "home");
+		const dest = join(home, ".local", "bin", "boost");
+		const archive = Buffer.from("fake archive");
+		const asset = "boost-darwin-arm64.tar.gz";
+		const url = `https://github.com/jfrog/boost/releases/download/v0.15.4/${asset}`;
+		const stub = createPiStub({
+			ui: { select: [INSTALL_OPTIONS[0]], confirm: [true] },
+			exec: async (_command, args) => {
+				writeFileSync(join(args[args.indexOf("-C") + 1] as string, "boost"), "#!/bin/sh\n");
+				return { stdout: "", stderr: "", code: 0, killed: false };
+			},
+		});
+		// Missing until the install's re-check finds the new file.
+		let state: ReadinessState = { kind: "missing" };
+		const binary = () => (existsSync(dest) ? dest : undefined);
+		const readiness: Readiness = {
+			...fixedReadiness(),
+			state: () => state,
+			check: () => state,
+			wait: async () => state,
+			retry() {
+				state = binary() ? { kind: "ready", version: [0, 15, 4] } : { kind: "missing" };
+			},
+			binary,
+			version: () => ("version" in state ? state.version : undefined),
+		};
+		const settings = createSettingsStore({ env: {}, home: () => HOME, fs: memoryFs() });
+		createBoostExtension(stub.pi, {
+			client: stubClient({ binary }),
+			env: {},
+			settings,
+			config: fixedConfig(CLI_OFF),
+			readiness,
+			notices: createNotices(),
+			install: {
+				platform: "darwin",
+				arch: "arm64",
+				home,
+				dest,
+				tmpdir: dir,
+				verify: async () => call("boost v0.15.4\n"),
+				fetch: (async (target: string | URL) =>
+					String(target).includes("api.github.com")
+						? Response.json({
+								tag_name: "v0.15.4",
+								assets: [
+									{
+										name: asset,
+										browser_download_url: url,
+										size: archive.length,
+										digest: `sha256:${createHash("sha256").update(archive).digest("hex")}`,
+									},
+								],
+							})
+						: new Response(new Uint8Array(archive))) as typeof fetch,
+			},
+		});
+		settings.load();
+		await stub.fire("session_start", { type: "session_start", reason: "startup" });
+		assert.equal(stub.ui.statuses.at(-1)?.text, "boost: not installed (/boost install)");
+		await stub.command("boost", "install");
+		assert.match(stub.ui.notices.at(-1)?.message ?? "", /^Installed JFrog Boost v0\.15\.4 at /);
+		assert.equal(stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "repainted by the install itself");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("without a UI a /boost that throws says so in print mode instead of nothing", async () => {
+	const s = setup({
+		readiness: {
+			...fixedReadiness(),
+			wait: async () => {
+				throw new Error("probe exploded");
+			},
+		},
+	});
+	await s.run("install", s.noUi());
+	assert.equal(s.printed.at(-1), "pi-jfrog-boost: /boost failed: probe exploded");
+	await s.stub.command("boost-install", "", s.noUi());
+	assert.equal(s.printed.at(-1), "pi-jfrog-boost: install failed: probe exploded");
 });

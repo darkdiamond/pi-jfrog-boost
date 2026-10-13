@@ -942,8 +942,20 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				client.refresh();
 				return client.binary();
 			},
-			state: uiState,
-			refresh: recheck,
+			// Raw readiness, not uiState: `/boost off` must not make a too-old
+			// Boost look current to the install flow (it asks the binary itself
+			// when this has no verdict).
+			async current() {
+				readiness.check();
+				return readiness.wait(PROBE_UI_WAIT_MS);
+			},
+			// After an install the footer is repainted at once (§11): otherwise
+			// it would keep "not installed" until the next tool result or turn.
+			async refresh(ctx) {
+				await recheck();
+				refreshUi(ctx);
+				return readiness.state();
+			},
 			onPath: (binary) => onPath(binary, env),
 			shellOffByBoost,
 			termsAccepted: () => config.read().termsAccepted,
@@ -998,7 +1010,11 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				// A dialog torn down mid-command (a stale context) or a bug: say
 				// so once, never as an unhandled rejection in pi.
 				try {
-					if (ctx.hasUI) ctx.ui.notify(`pi-jfrog-boost: /boost failed: ${(error as Error).message}`, "error");
+					const text = `pi-jfrog-boost: /boost failed: ${(error as Error).message}`;
+					// Print mode (`pi -p "/boost install"`) has no UI, and silence
+					// there would look like success.
+					if (ctx.hasUI) ctx.ui.notify(text, "error");
+					else print(ctx, text);
 				} catch {
 					/* nothing more to do */
 				}
@@ -1012,8 +1028,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				await install(args, ctx);
 			} catch (error) {
 				try {
-					if (ctx.hasUI)
-						ctx.ui.notify(`pi-jfrog-boost: install failed: ${(error as Error).message}`, "error");
+					const text = `pi-jfrog-boost: install failed: ${(error as Error).message}`;
+					if (ctx.hasUI) ctx.ui.notify(text, "error");
+					else print(ctx, text);
 				} catch {
 					/* nothing more to do */
 				}
