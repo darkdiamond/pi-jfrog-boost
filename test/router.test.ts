@@ -21,7 +21,6 @@ function input(over: Partial<RouteInput> = {}): RouteInput {
 		ready: true,
 		paused: false,
 		shellOn: true,
-		termsAccepted: true,
 		settings: { minBytes: 2048, readLogs: false, documents: true, notebooks: true, extraTools: [] },
 		...over,
 	};
@@ -198,12 +197,13 @@ test("read: legacy Office files take the document route (for Boost's advisory)",
 	}
 });
 
-test("read: documents need the setting and the Preview Agreement", () => {
+test("read: documents need the setting; the Preview Agreement is checked later, on the file", () => {
 	const off = settings({ documents: false });
 	assert.equal(reason(route(read({ input: { path: "q3.pdf" }, settings: off }))), "exact");
 	assert.equal(reason(route(read({ input: { path: "n.ipynb" }, settings: off }))), "exact");
-	assert.equal(reason(route(read({ input: { path: "q3.pdf" }, termsAccepted: false }))), "terms");
-	assert.equal(reason(route(read({ input: { path: "a.doc" }, termsAccepted: false }))), "terms");
+	// documents.ts skips as `terms` only after the size and magic checks, so a
+	// text file called .pdf without the terms still counts as `not-document`.
+	assert.equal(reason(route(read({ input: { path: "q3.pdf" } }))), "document");
 });
 
 test("read: notebooks are converted only on a whole read with `notebooks` on", () => {

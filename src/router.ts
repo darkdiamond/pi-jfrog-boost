@@ -57,7 +57,6 @@ export type SkipReason =
 	| "small"
 	| "large"
 	| "error"
-	| "terms"
 	| "exact"
 	| "untouched";
 
@@ -95,12 +94,6 @@ export interface RouteInput {
 	paused: boolean;
 	/** The shell gate (spec §8.4) resolves on. */
 	shellOn: boolean;
-	/**
-	 * Boost's Preview Agreement is recorded in its config. `boost read` exits 1
-	 * without it (NP3), so documents are not even tried; shell and MCP
-	 * filtering work regardless (F2), which is why it gates nothing else.
-	 */
-	termsAccepted: boolean;
 	settings: RouteSettings;
 }
 
@@ -197,6 +190,14 @@ function routeRead(r: RouteInput): Route {
  *
  * Notebooks are text, and their JSON is what a partial read asks for, so
  * only whole reads are converted (the size floor is checked on the file).
+ *
+ * Boost's Preview Agreement is not checked here. `boost read` exits 1
+ * without it (NP3), so documents.ts skips the read as `terms` before any
+ * spawn — after the stat, the notebook size floor and the magic-number check,
+ * so a read that would not have been converted anyway is counted as what it
+ * is (`small`, `not-document`), and the terms notice is not shown for it.
+ * Shell and MCP filtering work without the terms (F2), so they gate nothing
+ * else.
  */
 function routeDocument(r: RouteInput): Route | undefined {
 	const mode = documentMode(r.input.path);
@@ -212,6 +213,5 @@ function routeDocument(r: RouteInput): Route | undefined {
 			return skip("exact");
 		}
 	}
-	if (!r.termsAccepted) return skip("terms");
 	return { kind: "document" };
 }

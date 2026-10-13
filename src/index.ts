@@ -43,7 +43,14 @@ import {
 	structuredContentOf,
 	type ToolResultPatch,
 } from "./compat.ts";
-import { type ContentBlock, mergeDetails, textOf, truncateForObserve, withText } from "./content.ts";
+import {
+	type ContentBlock,
+	isPlainObject,
+	mergeDetails,
+	textOf,
+	truncateForObserve,
+	withText,
+} from "./content.ts";
 import { createDocumentCache, type DocumentOutcome, readDocument } from "./documents.ts";
 import {
 	type Breaker,
@@ -93,6 +100,8 @@ export interface BoostExtensionDeps {
 	/** Injected by tests; defaults to probing the client's binary. */
 	readiness?: Readiness;
 	breaker?: Breaker;
+	/** Injected by tests, to see what was counted. */
+	counters?: Counters;
 	/** Live environment for kill switches and overrides; defaults to `process.env`. */
 	env?: NodeJS.ProcessEnv;
 	syncDelayMs?: number;
@@ -123,7 +132,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		});
 	const config = deps.config ?? createConfigReader();
 	const breaker = deps.breaker ?? createBreaker();
-	const counters: Counters = createCounters();
+	const counters: Counters = deps.counters ?? createCounters();
 	const client =
 		deps.client ??
 		createBoostClient({
@@ -296,12 +305,18 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		return { systemPrompt: withAwareness(event.systemPrompt) };
 	}
 
-	/** Count why a call to Boost produced nothing usable. */
-	const noteCall = (call: BoostCall) => {
+	/**
+	 * Count why a call to Boost produced nothing usable. Returns whether it
+	 * counted anything, so a caller with its own reason for the same outcome
+	 * (the document route's `busy` or `failed`) does not count it twice.
+	 */
+	const noteCall = (call: BoostCall): boolean => {
 		if (call.skipped) counters.skip(call.skipped);
 		else if (call.timedOut) counters.error("timeout");
 		else if (call.spawnError) counters.error("spawn");
 		else if (call.killedBy) counters.error("killed", call.killedBy);
+		else return false;
+		return true;
 	};
 
 	/**
@@ -343,17 +358,21 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				ready,
 				paused: ready && breaker.state().kind === "open",
 				shellOn: ready && shellOn(),
-				termsAccepted: ready && config.read().termsAccepted,
 				settings: settings.effective(),
 			});
 			if (decision.kind === "skip") {
 				counters.skip(decision.reason);
-				if (decision.reason === "terms") termsNotice(ctx);
 				return;
 			}
 			if (decision.kind === "document") {
 				const outcome = await readDocument(
-					{ path: event.input.path, offset: event.input.offset, limit: event.input.limit, cwd: ctx.cwd },
+					{
+						path: event.input.path,
+						offset: event.input.offset,
+						limit: event.input.limit,
+						cwd: ctx.cwd,
+						termsAccepted: config.read().termsAccepted,
+					},
 					{
 						cache: documentCache,
 						convert: (abs, size) =>
@@ -364,12 +383,17 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 							}),
 					},
 				);
-				if (outcome.call) noteCall(outcome.call);
+				// A refusal by the client (busy, paused, …) or a timeout is counted
+				// once, by the call; the outcome's reason only when the call said
+				// nothing (an exit, an invalid answer, an abort, no call at all).
+				const counted = outcome.call ? noteCall(outcome.call) : false;
 				if (outcome.kind === "skip") {
-					counters.skip(outcome.reason);
-					// Accepted since the config was read, or Boost disagrees: either
-					// way the user is the one who can fix it, once told.
-					if (outcome.reason === "exit" && !config.read().termsAccepted) termsNotice(ctx);
+					if (!counted) counters.skip(outcome.reason);
+					if (outcome.reason === "terms") termsNotice(ctx);
+					// Boost exited non-zero and the terms are gone since the config
+					// was read just above (the user revoked them mid-read): the user
+					// is the one who can fix it, once told.
+					else if (outcome.reason === "exit" && !config.read().termsAccepted) termsNotice(ctx);
 					return;
 				}
 				if (isOff()) return;
@@ -457,7 +481,19 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			isError: !isPage,
 		};
 		if (hasStructured(event)) patch.structuredContent = isPage ? outcome.page : outcome.text;
-		const details = mergeDetails(event.details, {
+		// pi's `details.truncation` describes the raw bytes it read — typically
+		// "first line exceeds 50KB" for a stored zip — and pi's renderer prints
+		// it under the result. It is replaced by the converted page's own, as
+		// pi's read would have set it for this text, or dropped (invariant 6).
+		let base = event.details;
+		if (isPlainObject(base) && "truncation" in base) {
+			const { truncation: _raw, ...rest } = base;
+			base = rest;
+		}
+		if (isPage && outcome.truncation && (base === undefined || isPlainObject(base))) {
+			base = { ...(base ?? {}), truncation: outcome.truncation };
+		}
+		const details = mergeDetails(base, {
 			kind: "converted",
 			ext: outcome.ext,
 			...(isPage ? { lines: outcome.lines } : { error: true }),

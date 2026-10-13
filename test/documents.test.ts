@@ -25,6 +25,7 @@ import {
 	formatSize,
 	headerFor,
 	invalidOutput,
+	isDocumentFile,
 	legacyAdvisory,
 	NOTEBOOK_MIN_BYTES,
 	PI_MAX_BYTES,
@@ -105,7 +106,7 @@ async function piRead(
 	path: string,
 	offset?: number,
 	limit?: number,
-): Promise<{ text: string; error?: string }> {
+): Promise<{ text: string; error?: string; truncation?: Record<string, unknown> }> {
 	const tool = createReadTool(root);
 	const args: Record<string, unknown> = { path };
 	if (offset !== undefined) args.offset = offset;
@@ -113,8 +114,13 @@ async function piRead(
 	try {
 		const result = (await tool.execute("t", args as never)) as unknown as {
 			content: { type: string; text?: string }[];
+			details?: { truncation?: Record<string, unknown> };
 		};
-		return { text: result.content.map((b) => b.text ?? "").join("") };
+		const text = result.content.map((b) => b.text ?? "").join("");
+		const truncation = result.details?.truncation;
+		if (!truncation) return { text };
+		const { content: _content, ...numbers } = truncation;
+		return { text, truncation: numbers };
 	} catch (error) {
 		return { text: "", error: (error as Error).message };
 	}
@@ -155,7 +161,11 @@ test("paging matches the installed pi's read on the same text, for every shape",
 				assert.deepEqual(ours, { kind: "error", message: pi.error }, label);
 			} else {
 				assert.equal(ours.kind, "page", label);
-				if (ours.kind === "page") assert.equal(`${ours.page}${ours.notice}`, pi.text, label);
+				if (ours.kind === "page") {
+					assert.equal(`${ours.page}${ours.notice}`, pi.text, label);
+					// What pi's renderer warns from: the same numbers, or none when pi sets none.
+					assert.deepEqual(ours.truncation, pi.truncation, `${label} truncation`);
+				}
 			}
 		}
 	}
@@ -269,11 +279,15 @@ function converter(reply: BoostCall | ((abs: string) => BoostCall)) {
 	return { deps, calls };
 }
 
-const request = (path: string, over: { offset?: number; limit?: number; cwd?: string } = {}) => ({
+const request = (
+	path: string,
+	over: { offset?: number; limit?: number; cwd?: string; termsAccepted?: boolean } = {},
+) => ({
 	path,
 	offset: over.offset,
 	limit: over.limit,
 	cwd: over.cwd ?? root,
+	termsAccepted: over.termsAccepted ?? true,
 });
 
 test("a document is converted, given a header, and paged like pi", async () => {
@@ -426,7 +440,104 @@ test("notebooks: whole reads of files ≥ 16 KiB only, from line 1", async () =>
 test("offset and limit that pi would not accept leave the read alone", async () => {
 	file("args.pdf", PDF);
 	const { deps, calls } = converter(call("text"));
-	const outcome = await readDocument({ path: "args.pdf", offset: "5", limit: undefined, cwd: root }, deps);
+	const outcome = await readDocument(
+		{ path: "args.pdf", offset: "5", limit: undefined, cwd: root, termsAccepted: true },
+		deps,
+	);
 	assert.deepEqual(outcome, { kind: "skip", reason: "exact" });
 	assert.equal(calls.length, 0);
+});
+
+test("without the Preview Agreement: no spawn, but only a real document counts as `terms`", async () => {
+	file("t.pdf", PDF);
+	file("t-text.pdf", "just text, called .pdf");
+	file("t-small.ipynb", JSON.stringify({ cells: [] }));
+	const { deps, calls } = converter(call("converted"));
+	const noTerms = { termsAccepted: false };
+	assert.deepEqual(await readDocument(request("t.pdf", noTerms), deps), { kind: "skip", reason: "terms" });
+	assert.deepEqual(await readDocument(request("t-text.pdf", noTerms), deps), {
+		kind: "skip",
+		reason: "not-document",
+	});
+	assert.deepEqual(await readDocument(request("t-small.ipynb", noTerms), deps), {
+		kind: "skip",
+		reason: "small",
+	});
+	assert.equal(calls.length, 0);
+	// Converted while the terms were there, unchanged since: still served.
+	await readDocument(request("t.pdf"), deps);
+	assert.equal((await readDocument(request("t.pdf", noTerms), deps)).kind, "page");
+	assert.equal(calls.length, 1);
+});
+
+test("a PDF header anywhere in the first 1 KiB counts; an encrypted (OLE2) OOXML file does not", async () => {
+	file("bom.pdf", Buffer.concat([Buffer.from("\ufeff\r\n", "utf-8"), PDF]));
+	file(
+		"preamble.pdf",
+		Buffer.concat([Buffer.from(`Content-Type: application/pdf\n${" ".repeat(900)}\n`), PDF]),
+	);
+	file("late.pdf", Buffer.concat([Buffer.alloc(1100, 0x20), PDF]));
+	file("locked.xlsx", OLE);
+	file("locked.odt", OLE);
+	const { deps, calls } = converter(call("text"));
+	for (const name of ["bom.pdf", "preamble.pdf"]) {
+		assert.equal((await readDocument(request(name), deps)).kind, "page", name);
+	}
+	// Past the window; and OLE2 under an OOXML/ODF name, which Boost would
+	// only echo back as raw bytes.
+	for (const name of ["late.pdf", "locked.xlsx", "locked.odt"]) {
+		assert.deepEqual(await readDocument(request(name), deps), { kind: "skip", reason: "not-document" }, name);
+	}
+	assert.equal(calls.length, 2);
+});
+
+test("isDocumentFile: zip and OLE at byte 0 only; notebooks have no magic", () => {
+	const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0]);
+	assert.equal(isDocumentFile(".docx", zip), true);
+	assert.equal(isDocumentFile(".docx", Buffer.concat([Buffer.from(" "), zip])), false);
+	assert.equal(isDocumentFile(".doc", OLE), true);
+	assert.equal(isDocumentFile(".doc", zip), false);
+	assert.equal(isDocumentFile(".ipynb", Buffer.alloc(0)), true);
+});
+
+test("a page carries pi's truncation numbers when pi's read would, and only then", async () => {
+	file("trunc.pdf", PDF);
+	const long = await readDocument(request("trunc.pdf"), converter(call(numbered(2500))).deps);
+	assert.equal(long.kind, "page");
+	if (long.kind === "page") {
+		assert.deepEqual(long.truncation, {
+			truncated: true,
+			truncatedBy: "lines",
+			totalLines: 2500,
+			totalBytes: Buffer.byteLength(numbered(2500)),
+			outputLines: 2000,
+			outputBytes: Buffer.byteLength(numbered(2000)),
+			lastLinePartial: false,
+			firstLineExceedsLimit: false,
+			maxLines: 2000,
+			maxBytes: 51200,
+		});
+	}
+	const short = await readDocument(request("trunc.pdf"), converter(call("one\ntwo")).deps);
+	assert.equal(short.kind === "page" && short.truncation, undefined);
+	const limited = await readDocument(request("trunc.pdf", { limit: 2 }), converter(call(numbered(10))).deps);
+	assert.equal(limited.kind === "page" && limited.truncation, undefined, "pi sets none for a user limit");
+	const wide = await readDocument(request("trunc.pdf"), converter(call(`${"x".repeat(60_000)}\nend`)).deps);
+	assert.equal(wide.kind === "page" && wide.truncation?.firstLineExceedsLimit, true);
+});
+
+test("pi's look-alike names are tried in pi's order", async () => {
+	// A macOS screenshot name (narrow no-break space before PM) and a curly apostrophe.
+	file("Shot 1.02.03\u202FPM.pdf", PDF);
+	file("Capture d\u2019\u00e9cran.pdf".normalize("NFD"), PDF);
+	const { deps, calls } = converter(call("text"));
+	for (const typed of ["Shot 1.02.03 PM.pdf", "Capture d'\u00e9cran.pdf"]) {
+		assert.equal((await readDocument(request(typed), deps)).kind, "page", typed);
+	}
+	// Compared in NFC: on a normalisation-insensitive file system (APFS) the
+	// NFC curly variant already exists, exactly as it does for pi.
+	assert.deepEqual(
+		calls.map((c) => c.normalize("NFC")),
+		[join(root, "Shot 1.02.03\u202FPM.pdf"), join(root, "Capture d\u2019\u00e9cran.pdf")],
+	);
 });

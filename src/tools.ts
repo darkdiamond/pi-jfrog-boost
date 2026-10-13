@@ -28,7 +28,8 @@
  * `edit`, `write`, `grep`, `find` and `ls` are left exact.
  */
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** pi's shell tools: their output is the shell route's input. */
 export const SHELLS: ReadonlySet<string> = new Set(["bash", "powershell"]);
@@ -78,16 +79,76 @@ export function extensionOf(path: unknown): string {
 	return dot > 0 ? name.slice(dot).toLowerCase() : "";
 }
 
+/** pi's `UNICODE_SPACES` (pi/dist/utils/paths.js): spaces a model may type that the file name does not have. */
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
 /**
- * The absolute path pi's `read` opened for `path`, resolved the way pi does
- * without importing it: one leading `@` stripped, `~` and `~/` expanded,
- * then resolved against the session's working directory.
+ * pi's `normalizeWindowsShellPath` (pi/dist/utils/paths.js): a Git Bash,
+ * MSYS, Cygwin or WSL drive path (`/c/Users/x`, `/mnt/c/x`,
+ * `/cygdrive/c/x`) in the form native Windows APIs accept. Applied on win32
+ * only, as pi does; anything else is returned unchanged.
  */
-export function resolveReadPath(path: string, cwd: string, home: string = homedir()): string {
-	let p = path.startsWith("@") ? path.slice(1) : path;
+export function normalizeWindowsShellPath(path: string): string {
+	if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return path;
+	const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+	if (!match) return path;
+	const suffix = match[2]?.replaceAll("/", "\\");
+	return `${(match[1] as string).toUpperCase()}:\\${suffix ?? ""}`;
+}
+
+/**
+ * The absolute path pi's `read` opens for `path`, resolved the way pi 1.2.0
+ * does without importing it (`resolveToCwd` in
+ * pi/dist/core/tools/path-utils.js, which calls `normalizePath` in
+ * pi/dist/utils/paths.js with `normalizeUnicodeSpaces` and `stripAtPrefix`):
+ *
+ *   1. Unicode spaces (NBSP, the U+2000 range, narrow NBSP, …) become ` `
+ *   2. one leading `@` is stripped
+ *   3. on win32 only, an MSYS/WSL drive path becomes `C:\…`
+ *   4. `~` and `~/` expand to the home directory; `~\` too, on win32 only —
+ *      elsewhere `~\a.pdf` is a relative file name, and expanding it would
+ *      stat (and convert) a different file from the one pi read
+ *   5. a `file://` URL becomes its path
+ *   6. resolved against the session's working directory
+ *
+ * pi then tries a few look-alike names when this one does not exist; see
+ * {@link readPathCandidates}. `platform` is injectable for tests.
+ */
+export function resolveReadPath(
+	path: string,
+	cwd: string,
+	home: string = homedir(),
+	platform: NodeJS.Platform = process.platform,
+): string {
+	let p = path.replace(UNICODE_SPACES, " ");
+	if (p.startsWith("@")) p = p.slice(1);
+	if (platform === "win32") p = normalizeWindowsShellPath(p);
 	if (p === "~") p = home;
-	else if (p.startsWith("~/") || p.startsWith("~\\")) p = resolve(home, p.slice(2));
-	return isAbsolute(p) ? p : resolve(cwd, p);
+	else if (p.startsWith("~/") || (platform === "win32" && p.startsWith("~\\"))) p = join(home, p.slice(2));
+	else if (/^file:\/\//.test(p)) {
+		try {
+			p = fileURLToPath(p);
+		} catch {
+			/* pi would throw here and refuse the read; the stat that follows fails the same way */
+		}
+	}
+	return isAbsolute(p) ? resolve(p) : resolve(cwd, p);
+}
+
+/**
+ * The paths pi's `read` tries, in its order, when the resolved one does not
+ * exist (`resolveReadPath` in pi/dist/core/tools/path-utils.js): macOS
+ * screenshot names with a narrow no-break space before AM/PM, the NFD form
+ * macOS stores names in, a curly apostrophe (U+2019) for a straight one, and
+ * NFD with the curly apostrophe. pi opens the first that exists, so the
+ * caller stats these in order and takes the first hit — the same file pi
+ * read. Duplicates are dropped.
+ */
+export function readPathCandidates(abs: string): string[] {
+	const nfd = abs.normalize("NFD");
+	const curly = (p: string) => p.replace(/'/g, "\u2019");
+	const all = [abs, abs.replace(/ (AM|PM)\./gi, "\u202F$1."), nfd, curly(abs), curly(nfd)];
+	return [...new Set(all)];
 }
 
 /** Quote an argument for a POSIX shell command line when it needs it. */

@@ -11,7 +11,13 @@ import { after, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type BoostClient, createBoostClient, type HookMeta, type HookPayload } from "../src/boost-client.ts";
 import type { ConfigReader } from "../src/boost-config.ts";
-import { createBreaker, createReadiness, type Readiness } from "../src/health.ts";
+import {
+	type Counters,
+	createBreaker,
+	createCounters,
+	createReadiness,
+	type Readiness,
+} from "../src/health.ts";
 import { createBoostExtension, NO_BOOST_FLAG, TERMS_NOTICE } from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
 import { docx } from "./helpers/docx.ts";
@@ -53,6 +59,7 @@ interface HarnessOptions {
 	readiness?: Readiness;
 	settings?: SettingsStore;
 	config?: ConfigReader;
+	counters?: Counters;
 }
 
 function harness({
@@ -66,6 +73,7 @@ function harness({
 	readiness = fixedReadiness(),
 	settings,
 	config = fixedConfig(CLI_ON),
+	counters,
 }: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const commands: string[] = [];
@@ -122,6 +130,7 @@ function harness({
 			}),
 		config,
 		readiness,
+		...(counters ? { counters } : {}),
 		syncDelayMs: 5,
 		firstTurnWaitMs: 50,
 	});
@@ -309,6 +318,127 @@ test("without the Preview Agreement documents are left alone, and the user is to
 	const { fire, calls, notices } = harness({ readResult: "# Quarterly report", config: fixedConfig(CLI_ON) });
 	for (let i = 0; i < 3; i++) assert.equal(await fire("tool_result", docResult(DOCX_PATH)), undefined);
 	assert.deepEqual(readCalls(calls), []);
+	assert.deepEqual(
+		notices.filter((n) => n === TERMS_NOTICE),
+		[TERMS_NOTICE],
+	);
+});
+
+test("pi's raw-byte truncation never survives a conversion; the page's own replaces it", async () => {
+	// What pi's read sets for a stored zip: its XML is one line far over 50 KiB.
+	const raw = {
+		truncated: true,
+		truncatedBy: "bytes",
+		totalLines: 3,
+		totalBytes: 90_000,
+		outputLines: 0,
+		outputBytes: 0,
+		lastLinePartial: false,
+		firstLineExceedsLimit: true,
+		maxLines: 2000,
+		maxBytes: 51200,
+		content: "",
+	};
+	const short = harness({ readResult: "# Quarterly report", config: fixedConfig(TERMS) });
+	const patched = (await short.fire(
+		"tool_result",
+		docResult(DOCX_PATH, { details: { truncation: raw, x: 1 } }),
+	)) as {
+		details: Record<string, unknown>;
+	};
+	assert.deepEqual(patched.details, {
+		x: 1,
+		jfrogBoost: { kind: "converted", ext: ".docx", lines: [1, 1, 1] },
+	});
+
+	const long = Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n");
+	const paged = harness({ readResult: long, config: fixedConfig(TERMS) });
+	const page = (await paged.fire("tool_result", docResult(DOCX_PATH, { details: { truncation: raw } }))) as {
+		details: { truncation: Record<string, unknown> };
+	};
+	assert.equal(page.details.truncation.firstLineExceedsLimit, false);
+	assert.equal(page.details.truncation.truncatedBy, "lines");
+	assert.equal(page.details.truncation.outputLines, 2000);
+	assert.equal(page.details.truncation.totalLines, 2500);
+	assert.equal("content" in page.details.truncation, false, "details hold numbers, not the page");
+
+	const legacy = harness({
+		readResult: "[boost] Legacy Office (.doc): save as docx.",
+		config: fixedConfig(TERMS),
+	});
+	const advisory = (await legacy.fire(
+		"tool_result",
+		docResult(OLE_PATH, { details: { truncation: raw } }),
+	)) as {
+		details: Record<string, unknown>;
+	};
+	assert.equal("truncation" in advisory.details, false);
+});
+
+test("a client refusal on the document route is counted once", async () => {
+	const counters = createCounters();
+	const { fire } = harness({
+		config: fixedConfig(TERMS),
+		counters,
+		overrides: { convert: async () => ({ ...call(""), code: null, skipped: "busy" }) },
+	});
+	assert.equal(await fire("tool_result", docResult(DOCX_PATH)), undefined);
+	assert.deepEqual(counters.skips(), { busy: 1 });
+
+	const timeouts = createCounters();
+	const slow = harness({
+		config: fixedConfig(TERMS),
+		counters: timeouts,
+		overrides: { convert: async () => ({ ...call(""), code: null, timedOut: true }) },
+	});
+	assert.equal(await slow.fire("tool_result", docResult(DOCX_PATH)), undefined);
+	assert.deepEqual(timeouts.errors(), { timeout: 1 });
+	assert.deepEqual(timeouts.skips(), {}, "a timeout is an error, not also a skip");
+
+	const exits = createCounters();
+	const failing = harness({ config: fixedConfig(TERMS), counters: exits }); // convert exits 1
+	await failing.fire("tool_result", docResult(DOCX_PATH));
+	assert.deepEqual(exits.skips(), { exit: 1 });
+});
+
+test("without the terms, a read that would not convert anyway is not `terms`, and says nothing", async () => {
+	const counters = createCounters();
+	const textPdf = join(docRoot, "notes.pdf");
+	writeFileSync(textPdf, "plain text in a .pdf");
+	const { fire, calls, notices } = harness({ config: fixedConfig(CLI_ON), counters });
+	assert.equal(await fire("tool_result", docResult(textPdf)), undefined);
+	assert.deepEqual(counters.skips(), { "not-document": 1 });
+	assert.deepEqual(
+		notices.filter((n) => n === TERMS_NOTICE),
+		[],
+	);
+	assert.deepEqual(readCalls(calls), []);
+});
+
+test("terms revoked while Boost ran: its non-zero exit brings the notice, once", async () => {
+	let revokedNow = false;
+	const accepted = fixedConfig(TERMS).read();
+	const revoked = fixedConfig(CLI_ON).read();
+	// Every read before the spawn sees the terms; every read after it does not.
+	const config: ConfigReader = { ...fixedConfig(TERMS), read: () => (revokedNow ? revoked : accepted) };
+	const counters = createCounters();
+	const { fire, notices, calls } = harness({
+		config,
+		counters,
+		overrides: {
+			convert: async () => {
+				calls.push({ kind: "read", meta: {} as HookMeta, fields: {} });
+				revokedNow = true;
+				return call("accept_terms is missing", 1);
+			},
+		},
+	});
+	for (let i = 0; i < 2; i++) {
+		revokedNow = false;
+		assert.equal(await fire("tool_result", docResult(DOCX_PATH)), undefined);
+	}
+	assert.equal(readCalls(calls).length, 2, "Boost ran: the exit branch, not the terms skip");
+	assert.deepEqual(counters.skips(), { exit: 2 });
 	assert.deepEqual(
 		notices.filter((n) => n === TERMS_NOTICE),
 		[TERMS_NOTICE],
