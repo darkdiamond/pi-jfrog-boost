@@ -26,7 +26,13 @@
  *     Bash hook's `.boost/hook-meta/` files.
  *
  * A call costs ~200 ms, so results under 2 KiB are not sent, and nothing over
- * 1 MiB (the stdin ceiling every route shares).
+ * 1 MiB (the stdin ceiling every route shares). That ceiling is on what goes
+ * down the pipe, and here that is the JSON payload, not the text: escaping
+ * alone grows JSON-heavy text by ~10% (1.10× on the Slack fixture), and the
+ * envelope and `tool_input` add more. The router's gate on the text is the
+ * cheap first cut; `compactMcpResult` measures the payload it built against
+ * the same 1 MiB before calling Boost, so text just under the limit is
+ * counted as `large` here rather than refused, less visibly, by the client.
  *
  * Privacy: Boost stores the full request and response of every MCP call it
  * filters in its local DB, and `boost sync` uploads them. `mcp: false` and
@@ -47,9 +53,9 @@
 import { realpathSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { sep } from "node:path";
+import { basename, sep } from "node:path";
 import { atLeast, type BoostVersion, MCP_MIN_VERSION } from "./boost-binary.ts";
-import type { BoostCall } from "./boost-client.ts";
+import { type BoostCall, MAX_INPUT_BYTES } from "./boost-client.ts";
 import { type ContentBlock, isMeaningfulReduction, isPlainObject, parseMarker } from "./content.ts";
 import { excludedBy } from "./settings.ts";
 
@@ -57,8 +63,11 @@ import { excludedBy } from "./settings.ts";
 export const MCP_TOOL_PREFIX = "mcp__";
 /** Below this, a ~200 ms hook call saves too little to be worth it (spec §8.5). */
 export const MCP_MIN_BYTES = 2048;
-/** The largest text sent (spec §8.5), shared with every other route. */
-export const MCP_MAX_BYTES = 1024 * 1024;
+/**
+ * The largest payload sent (spec §8.5): the stdin ceiling the client enforces
+ * on every route, so the two can never disagree.
+ */
+export const MCP_MAX_BYTES = MAX_INPUT_BYTES;
 /**
  * pi's cap on an MCP tool's text: `MCP_OUTPUT_MAX_BYTES = 20*1024` in pi
  * 1.2.0's bundle. A reply built from the full output must fit in it, so the
@@ -67,6 +76,12 @@ export const MCP_MAX_BYTES = 1024 * 1024;
 export const PI_MCP_OUTPUT_MAX_BYTES = 20 * 1024;
 /** The first line of pi's truncated MCP output (pi 1.2.0 `limitMcpContent`). */
 const PI_TRUNCATED = /^Warning: truncated output \(original token count: \d+\)\n/;
+/**
+ * The name pi gives an MCP full-output file: `pi-mcp-<8 random bytes as
+ * hex>.txt` (pi 1.2.0 `saveToTempFile` → `utils/output-files.js`
+ * `createOutputFilePath("pi-mcp", ".txt")`).
+ */
+const PI_MCP_OUTPUT_FILE = /^pi-mcp-[0-9a-f]{16}\.txt$/;
 
 export function isMcpTool(toolName: string): boolean {
 	return toolName.startsWith(MCP_TOOL_PREFIX);
@@ -190,7 +205,9 @@ export interface FullOutputDeps {
 	tmpdir?: () => string;
 	readFile?: (path: string) => Promise<string>;
 	realpath?: (path: string) => string;
-	stat?: (path: string) => { isFile(): boolean; size: number };
+	stat?: (path: string) => { isFile(): boolean; size: number; uid?: number };
+	/** The current user's id, or undefined where there is none (Windows); defaults to `process.getuid`. */
+	uid?: () => number | undefined;
 }
 
 /**
@@ -206,10 +223,20 @@ export function piTruncatedPath(text: string, details: unknown): string | null |
 
 /**
  * The text of pi's full-output file, or undefined when it must not be read.
- * Only a regular file inside the temp directory pi writes to (after
- * resolving links), and only up to the 1 MiB every route is capped at:
- * `details` is the tool's to fill, and another extension's MCP tool could
- * name any path there.
+ * `details` is the tool's to fill, and any `mcp__*` tool can fill it (on pi
+ * 0.86 every one comes from an extension), so the path is checked before
+ * anything in it goes to Boost — whose DB keeps it and whose sync uploads
+ * it — or replaces the result. Only a file that is, after resolving links:
+ *
+ *   - inside the temp directory pi writes to;
+ *   - named the way pi names these files (`pi-mcp-<16 hex>.txt`), so an
+ *     unrelated temp file of another program's is never picked up;
+ *   - a regular file owned by this user (pi creates it 0600), where the
+ *     platform has user ids;
+ *   - no larger than the 1 MiB every route is capped at.
+ *
+ * A pi release that names the file differently only costs the re-filter:
+ * the result is then left as pi truncated it.
  */
 export async function readFullOutput(path: string, deps: FullOutputDeps = {}): Promise<string | undefined> {
 	const realpath = deps.realpath ?? realpathSync;
@@ -219,8 +246,11 @@ export async function readFullOutput(path: string, deps: FullOutputDeps = {}): P
 		const root = realpath((deps.tmpdir ?? tmpdir)());
 		const real = realpath(path);
 		if (!real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) return undefined;
+		if (!PI_MCP_OUTPUT_FILE.test(basename(real))) return undefined;
 		const info = stat(real);
 		if (!info.isFile() || info.size > MCP_MAX_BYTES) return undefined;
+		const me = (deps.uid ?? (() => process.getuid?.()))();
+		if (me !== undefined && info.uid !== undefined && info.uid !== me) return undefined;
 		const text = await read(real);
 		return text.includes("\0") ? undefined : text;
 	} catch {
@@ -245,8 +275,15 @@ export interface McpCompaction {
 export interface McpOutcome {
 	call?: BoostCall;
 	compaction?: McpCompaction;
-	/** Why nothing was sent, when the decision was made here rather than by the router. */
-	skipped?: "truncated";
+	/**
+	 * Why the result was left alone, when that was decided here rather than by
+	 * the router or the client: `truncated` when pi's own truncated text
+	 * stands (no usable full-output file, or Boost's version of it would not
+	 * fit pi's cap), `large` when the payload is over the stdin ceiling.
+	 * With `call` set, Boost did run; the caller counts this reason instead of
+	 * "unchanged".
+	 */
+	skipped?: "truncated" | "large";
 }
 
 export interface McpRequest {
@@ -283,16 +320,18 @@ export async function compactMcpResult(
 		sent = [full];
 		sentText = full;
 	}
-	const call = await hook(
-		buildMcpPayload({
-			sessionId: request.sessionId,
-			cwd: request.cwd,
-			toolName: request.toolName,
-			toolInput: request.toolInput,
-			toolUseId: request.toolUseId,
-			texts: sent,
-		}),
-	);
+	const payload = buildMcpPayload({
+		sessionId: request.sessionId,
+		cwd: request.cwd,
+		toolName: request.toolName,
+		toolInput: request.toolInput,
+		toolUseId: request.toolUseId,
+		texts: sent,
+	});
+	// The ceiling is on the payload (see the module comment): text the router
+	// let through can still escape past it.
+	if (Buffer.byteLength(payload) > MCP_MAX_BYTES) return { skipped: "large" };
+	const call = await hook(payload);
 	if (call.skipped || call.code !== 0) return { call };
 	const reply = parseMcpReply(call.stdout);
 	if (reply === undefined || !isMeaningfulReduction(sentText, reply)) return { call };
@@ -302,7 +341,7 @@ export async function compactMcpResult(
 	if (fullPath !== undefined) {
 		// More than pi's own cap would hand the model more than pi meant it to
 		// see; pi's truncated text, with its pointer to the file, stands.
-		if (Buffer.byteLength(body) > PI_MCP_OUTPUT_MAX_BYTES) return { call };
+		if (Buffer.byteLength(body) > PI_MCP_OUTPUT_MAX_BYTES) return { call, skipped: "truncated" };
 		const lines = sentText.split("\n").length;
 		text = `${body}\n\n[Boost compacted the full ${lines}-line output. Full output: ${fullPath} (read it with offset/limit)]`;
 	}

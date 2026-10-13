@@ -37,9 +37,12 @@
  *     not name (`unused-hint`, lock files) is caught too. Another agent using
  *     the real Boost during the run trips it as well: keep them idle.
  *
- * Variant HOMEs (`user-false`, `no-metadata`, `no-terms`) are for cases that
- * need Boost to see a different machine state; each is its own directory with
- * its own DB and temp dir.
+ * Variant HOMEs (`user-false`, `no-metadata`, `no-terms`, `mcp-unset`) are
+ * for cases that need Boost to see a different machine state; each is its own
+ * directory with its own DB and temp dir. `mcp-unset` records no MCP flag at
+ * all, which is what most users' configs look like: the router then treats
+ * the flag as unknown and Boost applies its built-in default, whatever a
+ * given release makes that.
  */
 import { createHash } from "node:crypto";
 import {
@@ -57,7 +60,7 @@ import { tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveBoostBinary } from "../../src/boost-binary.ts";
 
-export type HomeVariant = "default" | "user-false" | "no-metadata" | "no-terms";
+export type HomeVariant = "default" | "user-false" | "no-metadata" | "no-terms" | "mcp-unset";
 
 /** A port nothing listens on: connections are refused at once rather than timing out. */
 export const REFUSED_PROXY = "http://127.0.0.1:9";
@@ -94,9 +97,13 @@ export function synthesizeConfig(variant: HomeVariant, terms: readonly string[],
 	}
 	parts.push(
 		`[feature_flags."boost-cli-filtering"]\nuser = ${variant === "user-false" ? "false" : "true"}\n`,
-		`[feature_flags."boost-mcp-filtering"]\nuser = true\n`,
-		`[feature_flags."boost-mcp-browser-budget"]\nuser = true\n`,
 	);
+	if (variant !== "mcp-unset") {
+		parts.push(
+			`[feature_flags."boost-mcp-filtering"]\nuser = true\n`,
+			`[feature_flags."boost-mcp-browser-budget"]\nuser = true\n`,
+		);
+	}
 	return parts.join("\n");
 }
 

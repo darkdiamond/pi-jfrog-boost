@@ -34,6 +34,7 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -572,7 +573,10 @@ const mcpFixture = (name: string): McpFixture =>
  * deliver it. There is no MCP server here: what is under test is what Boost's
  * `hook claude` does with pi's result shape, and how it is put back.
  */
-async function emitMcp(f: McpFixture): Promise<Outcome & { content: Block[] }> {
+async function emitMcp(
+	f: McpFixture,
+	target: { handlers: Map<string, Handler[]>; ctx: () => ExtensionContext } = { handlers, ctx },
+): Promise<Outcome & { content: Block[] }> {
 	const event = toolResultEvent(line, {
 		toolName: f.toolName,
 		toolCallId: `e2e-${++callId}`,
@@ -581,7 +585,12 @@ async function emitMcp(f: McpFixture): Promise<Outcome & { content: Block[] }> {
 		details: f.details,
 		structuredContent: f.structuredContent,
 	});
-	const patch = await applyToolResultHandlers(line, handlers.get("tool_result") ?? [], event, ctx());
+	const patch = await applyToolResultHandlers(
+		line,
+		target.handlers.get("tool_result") ?? [],
+		event,
+		target.ctx(),
+	);
 	return {
 		text: textOfBlocks(patch?.content ?? f.content),
 		content: patch?.content ?? f.content,
@@ -623,6 +632,33 @@ test("MCP results are compacted by Boost's MCP filters; images and structuredCon
 	assert.equal(existsSync(join(dir, ".boost")), false, "no .boost/ in the working directory");
 });
 
+test("with no MCP flag recorded, Boost's own default applies and nothing is lost", { skip }, async (t) => {
+	// What most users run: their config.toml says nothing about
+	// boost-mcp-filtering, the router counts that as eligible, and Boost
+	// decides. v0.15.4 compacts Slack and leaves snapshots whole, but a
+	// release may change that default, so only fail-open behaviour is
+	// asserted: each result is either compacted (with a marker) or exactly
+	// pi's, and its images and structuredContent are untouched either way.
+	const ext = await variantExtension("mcp-unset", {});
+	for (const name of ["mcp-slack.json", "mcp-snapshot.json"]) {
+		const f = mcpFixture(name);
+		const outcome = await emitMcp(f, { handlers: ext.handlers, ctx: ext.ctx });
+		t.diagnostic(`${f.toolName}: ${outcome.changed ? "compacted" : "left alone"} by Boost's default`);
+		if (outcome.changed) {
+			assert.ok(outcome.text.length < outcome.original.length, f.toolName);
+			assert.match(outcome.text, MARKER, f.toolName);
+		} else {
+			assert.deepEqual(outcome.content, f.content, f.toolName);
+		}
+		assert.deepEqual(
+			outcome.content.filter((block) => block.type !== "text"),
+			f.content.filter((block) => block.type !== "text"),
+			f.toolName,
+		);
+		if (line === "1.2") assert.deepEqual(outcome.structuredContent, f.structuredContent, f.toolName);
+	}
+});
+
 test("an MCP tool Boost has no filter for comes back the same size and is left alone", { skip }, async () => {
 	const text = Array.from({ length: 300 }, (_, i) => `row ${i}: ${"value ".repeat(8)}`).join("\n");
 	const outcome = await emitMcp({
@@ -645,7 +681,8 @@ test("an MCP result pi truncated is re-filtered from pi's full-output file", { s
 	const items = page.split("\n").filter((l) => l.startsWith("      ") || l.startsWith("    - list "));
 	const full = [page, ...Array.from({ length: 12 }, () => items.join("\n"))].join("\n");
 	assert.ok(Buffer.byteLength(full) > 4 * PI_MCP_OUTPUT_MAX_BYTES);
-	const path = join(tmpdir(), "pi-mcp-e2e.txt");
+	// Named as pi 1.2.0 names it: the route reads no other file.
+	const path = join(tmpdir(), `pi-mcp-${randomBytes(8).toString("hex")}.txt`);
 	writeFileSync(path, full);
 	const half = PI_MCP_OUTPUT_MAX_BYTES / 2;
 	const truncated = `Warning: truncated output (original token count: ${Math.ceil(Buffer.byteLength(full) / 4)})\nTotal output lines: ${full.split("\n").length}\n\n${full.slice(0, half)}\u2026${full.length - 2 * half} chars truncated\u2026${full.slice(-half)}\n\n[Full output: ${path} (read it with offset/limit)]`;

@@ -299,12 +299,16 @@ test("synthesizeConfig covers every variant", () => {
 		/accept_terms[\s\S]*last_updated_at[\s\S]*user = true/,
 	);
 	assert.match(synthesizeConfig("user-false", terms, now), /user = false/);
-	// MCP filtering and the browser budget are on in every variant (e2e case 11).
+	// MCP filtering and the browser budget are on in every variant but one (e2e case 11)…
 	for (const variant of ["default", "user-false", "no-metadata", "no-terms"] as const) {
 		const config = synthesizeConfig(variant, terms, now);
 		assert.match(config, /\[feature_flags\."boost-mcp-filtering"\]\nuser = true\n/, variant);
 		assert.match(config, /\[feature_flags\."boost-mcp-browser-budget"\]\nuser = true\n/, variant);
 	}
+	// …which records no MCP flag, so Boost's own default applies; the rest is the default HOME's.
+	const unset = synthesizeConfig("mcp-unset", terms, now);
+	assert.doesNotMatch(unset, /boost-mcp-/);
+	assert.match(unset, /accept_terms[\s\S]*last_updated_at[\s\S]*"boost-cli-filtering"\]\nuser = true/);
 	assert.doesNotMatch(synthesizeConfig("no-metadata", terms, now), /_metadata/);
 	assert.doesNotMatch(synthesizeConfig("no-terms", terms, now), /accept_terms/);
 });

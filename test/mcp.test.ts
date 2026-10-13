@@ -6,18 +6,29 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { type BoostCall, type BoostClient, createBoostClient } from "../src/boost-client.ts";
+import {
+	type BoostCall,
+	type BoostClient,
+	createBoostClient,
+	FILTER_STDOUT_CAP,
+	filterTimeoutMs,
+} from "../src/boost-client.ts";
+import type { ProcessRunner, RunResult } from "../src/boost-process.ts";
 import type { ContentBlock } from "../src/content.ts";
 import { createCounters, type ReadinessState } from "../src/health.ts";
 import { createBoostExtension } from "../src/index.ts";
 import {
 	buildMcpPayload,
 	compactMcpResult,
+	MCP_MAX_BYTES,
+	type McpGateInput,
 	type McpRequest,
+	mcpSkip,
 	PI_MCP_OUTPUT_MAX_BYTES,
 	parseMcpReply,
 	piTruncatedPath,
@@ -81,6 +92,16 @@ test("mcpExclude globs: `*` is any run, everything else literal, the whole name 
 	assert.equal(globMatches("a*b*c", "a_c_b"), false);
 	assert.equal(excludedBy("mcp__slack__x", ["mcp__github__*", " mcp__slack__* "]), " mcp__slack__* ");
 	assert.equal(excludedBy("mcp__slack__x", []), undefined);
+	// pi turns everything outside [A-Za-z0-9_] in a tool name into "_"; a
+	// pattern written with the server's configured name is read the same way,
+	// and reported as the user wrote it.
+	assert.equal(excludedBy("mcp__my_secrets__get", ["mcp__my-secrets__*"]), "mcp__my-secrets__*");
+	assert.equal(excludedBy("mcp__acme_slack__post", ["mcp__acme.slack__*"]), "mcp__acme.slack__*");
+	assert.equal(excludedBy("mcp__acme_slack__post", ["mcp__acme slack__*"]), "mcp__acme slack__*");
+	assert.equal(excludedBy("mcp__my_secrets__get", ["mcp__my-secret__*"]), undefined);
+	// Normalising never widens a pattern past `*`.
+	assert.equal(excludedBy("mcp__slack__x", ["mcp__slack__?"]), undefined);
+	assert.equal(excludedBy("mcp__slack__x", ["mcp__.*"]), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -255,6 +276,9 @@ function truncatedRequest(full: string, path: string | undefined): McpRequest {
 	});
 }
 
+/** A full-output file name as pi 1.2.0 makes it (`pi-mcp-<8 random bytes, hex>.txt`). */
+const piName = () => `pi-mcp-${randomBytes(8).toString("hex")}.txt`;
+
 const HUGE = Array.from({ length: 2000 }, (_, i) => `{"id":${i},"avatar":"https://x/${i}.png"}`).join("\n");
 
 test("a result pi truncated is recognised by its header, with or without a path", () => {
@@ -270,7 +294,7 @@ test("a result pi truncated is recognised by its header, with or without a path"
 
 test("pi's full-output file is re-filtered, and the reply carries the file's path", async () => {
 	const tmp = mkdtempSync(join(root, "tmp-"));
-	const path = join(tmp, "pi-mcp-0123.txt");
+	const path = join(tmp, piName());
 	writeFileSync(path, HUGE);
 	const h = hook(both(SHORT));
 	const outcome = await compactMcpResult(truncatedRequest(HUGE, path), h, { tmpdir: () => tmp });
@@ -287,9 +311,9 @@ test("pi's full-output file is re-filtered, and the reply carries the file's pat
 	});
 });
 
-test("a reply over pi's 20 KiB cap keeps pi's truncated text", async () => {
+test("a reply over pi's 20 KiB cap keeps pi's truncated text, and says so", async () => {
 	const tmp = mkdtempSync(join(root, "tmp-"));
-	const path = join(tmp, "pi-mcp-big.txt");
+	const path = join(tmp, piName());
 	writeFileSync(path, HUGE);
 	const tooBig = `${HUGE.slice(0, PI_MCP_OUTPUT_MAX_BYTES + 1)}\n${MARKER}`;
 	const outcome = await compactMcpResult(truncatedRequest(HUGE, path), hook(both(tooBig)), {
@@ -297,16 +321,18 @@ test("a reply over pi's 20 KiB cap keeps pi's truncated text", async () => {
 	});
 	assert.equal(outcome.compaction, undefined);
 	assert.ok(outcome.call);
+	// Boost ran and answered; pi's truncation is why the answer is unused.
+	assert.equal(outcome.skipped, "truncated");
 });
 
 test("no usable full-output file: nothing is sent, pi's truncated text stands", async () => {
 	const tmp = mkdtempSync(join(root, "tmp-"));
 	const outside = mkdtempSync(join(root, "elsewhere-"));
-	const elsewhere = join(outside, "pi-mcp-x.txt");
+	const elsewhere = join(outside, piName());
 	writeFileSync(elsewhere, HUGE);
-	const big = join(tmp, "pi-mcp-huge.txt");
+	const big = join(tmp, piName());
 	writeFileSync(big, "x".repeat(1024 * 1024 + 1));
-	const dir = join(tmp, "pi-mcp-dir.txt");
+	const dir = join(tmp, piName());
 	mkdirSync(dir);
 	for (const [label, path] of [
 		["outside the temp dir", elsewhere],
@@ -322,6 +348,38 @@ test("no usable full-output file: nothing is sent, pi's truncated text stands", 
 	}
 	assert.equal(await readFullOutput(elsewhere, { tmpdir: () => tmp }), undefined);
 	assert.equal(await readFullOutput(`${tmp}-sibling/x`, { tmpdir: () => tmp }), undefined);
+});
+
+test("only a file named and owned the way pi writes it is read", async () => {
+	const tmp = mkdtempSync(join(root, "tmp-"));
+	const good = join(tmp, piName());
+	writeFileSync(good, HUGE);
+	assert.equal(await readFullOutput(good, { tmpdir: () => tmp }), HUGE);
+	// Another program's temp file, though inside the temp dir and readable:
+	// any `mcp__*` tool can name a path in `details`.
+	for (const name of [
+		"notes.txt",
+		"pi-mcp-0123.txt",
+		"pi-mcp-0123456789abcdef.json",
+		"pi-mcp-0123456789ABCDEF.txt",
+		"pi-bash-0123456789abcdef.txt",
+		"xpi-mcp-0123456789abcdef.txt",
+	]) {
+		const path = join(tmp, name);
+		writeFileSync(path, HUGE);
+		assert.equal(await readFullOutput(path, { tmpdir: () => tmp }), undefined, name);
+		const h = hook(both(SHORT));
+		const outcome = await compactMcpResult(truncatedRequest(HUGE, path), h, { tmpdir: () => tmp });
+		assert.deepEqual(outcome, { skipped: "truncated" }, name);
+		assert.equal(h.payloads.length, 0, name);
+	}
+	// A well-named file someone else owns (pi creates its own 0600).
+	const theirs = { isFile: () => true, size: 10, uid: 4242 };
+	const deps = { tmpdir: () => tmp, uid: () => 501, stat: () => theirs, readFile: async () => HUGE };
+	assert.equal(await readFullOutput(good, deps), undefined);
+	assert.equal(await readFullOutput(good, { ...deps, uid: () => 4242 }), HUGE);
+	// No user ids (Windows): the name and place are what is checked.
+	assert.equal(await readFullOutput(good, { ...deps, uid: () => undefined }), HUGE);
 });
 
 // ---------------------------------------------------------------------------
@@ -417,6 +475,15 @@ test("on pi 0.86 (MCP from an extension) the same patch applies, without structu
 	assert.equal(patch && "structuredContent" in patch, false);
 });
 
+test("a pattern naming a server as configured (`my-secrets`) excludes pi's `my_secrets` tools", async () => {
+	const { stub, calls, counters, start } = extension("1.2", { file: { mcpExclude: ["mcp__my-secrets__*"] } });
+	await start();
+	const event = mcpEvent("1.2", SLACK, { toolName: "mcp__my_secrets__get_secret" });
+	assert.equal(await stub.emitToolResult(event), undefined);
+	assert.equal(calls.length, 0);
+	assert.deepEqual(counters.skips(), { excluded: 1 });
+});
+
 test("nested, failed, small and excluded calls are never sent", async () => {
 	const { stub, calls, counters, start } = extension("1.2", { file: { mcpExclude: ["mcp__slack__*"] } });
 	await start();
@@ -471,6 +538,54 @@ test("a reply that is not a compaction leaves the result alone and is counted as
 	});
 	assert.equal(await stub.emitToolResult(mcpEvent("1.2", SLACK)), undefined);
 	assert.deepEqual(counters.errors(), { timeout: 1 });
+});
+
+test("a non-zero exit is counted as `exit`, not lost and not `unchanged`", async () => {
+	const { stub, counters } = extension("1.2", { mcp: async () => call(both(SHORT), 1) });
+	assert.equal(await stub.emitToolResult(mcpEvent("1.2", SLACK)), undefined);
+	assert.deepEqual(counters.skips(), { exit: 1 });
+	assert.deepEqual(counters.errors(), {});
+});
+
+test("a full-output reply over pi's 20 KiB cap is counted as `truncated`, once", async () => {
+	const path = join(root, piName());
+	writeFileSync(path, HUGE);
+	const tooBig = `${HUGE.slice(0, PI_MCP_OUTPUT_MAX_BYTES + 1)}\n${MARKER}`;
+	const { stub, counters } = extension("1.2", { mcp: async () => call(both(tooBig)) });
+	const req = truncatedRequest(HUGE, path);
+	const event = mcpEvent("1.2", SLACK, { content: req.content, details: req.details });
+	assert.equal(await stub.emitToolResult(event), undefined);
+	assert.deepEqual(counters.skips(), { truncated: 1 });
+});
+
+test("text under the router's 1 MiB whose JSON payload is over it is not sent, and counted as large", async () => {
+	// A quote doubles under JSON escaping: 600 KiB of text, 1.2 MiB of payload.
+	const text = '"'.repeat(600 * 1024);
+	assert.ok(Buffer.byteLength(text) < MCP_MAX_BYTES);
+	const gate: McpGateInput = {
+		toolName: "mcp__slack__x",
+		isError: false,
+		text,
+		settings: { mcp: true, mcpExclude: [] },
+		boostVersion: [0, 15, 4],
+		mcpFlag: "unknown",
+	};
+	assert.equal(mcpSkip(gate), undefined, "the router routes it");
+	const h = hook(both(SHORT));
+	const outcome = await compactMcpResult(request({ content: [{ type: "text", text }] }), h);
+	assert.deepEqual(outcome, { skipped: "large" });
+	assert.equal(h.payloads.length, 0);
+	// An ordinary payload goes through.
+	const fits = await compactMcpResult(request({ content: [{ type: "text", text: BIG } as ContentBlock] }), h);
+	assert.ok(fits.call);
+	// Through the extension: one `large`, no spawn.
+	const { stub, calls, counters } = extension("1.2");
+	assert.equal(
+		await stub.emitToolResult(mcpEvent("1.2", SLACK, { content: [{ type: "text", text }] })),
+		undefined,
+	);
+	assert.equal(calls.length, 0);
+	assert.deepEqual(counters.skips(), { large: 1 });
 });
 
 test("a throwing MCP call never reaches pi", async () => {
@@ -529,6 +644,46 @@ test("the client runs `boost hook claude` with the payload on stdin and the hot-
 	assert.equal(only?.env.BOOST_FEATURE_FLAGS_DISABLE, "1");
 	assert.equal(JSON.parse(only?.env.BOOST_HOOK_META ?? "{}").agent_type, "pi");
 	assert.equal(existsSync(join(cwd, ".boost")), false);
+});
+
+test("the hook gets the size-scaled filter timeout and the 2 MiB stdout cap (§8.5)", async () => {
+	const seen: { args: readonly string[]; timeoutMs: number; maxStdout: number; input?: string }[] = [];
+	const runner: ProcessRunner = {
+		run: async (_exe, args, options): Promise<RunResult> => {
+			seen.push({
+				args,
+				timeoutMs: options.timeoutMs,
+				maxStdout: options.maxStdout,
+				...(options.input !== undefined ? { input: options.input } : {}),
+			});
+			return call("");
+		},
+		detached: () => {},
+		active: () => 0,
+		killAll: () => {},
+	};
+	const client = createBoostClient({
+		env: {},
+		resolveBinary: () => "/fake/boost",
+		runner,
+		config: fixedConfig("").read,
+	});
+	const meta = { session_id: "s", cwd: root };
+	for (const size of [10, 300 * 1024, 900 * 1024]) {
+		const payload = JSON.stringify({ text: "x".repeat(size) });
+		await client.mcp(meta, payload);
+		const last = seen.at(-1);
+		assert.deepEqual(last?.args, ["hook", "claude"]);
+		assert.equal(last?.input, payload);
+		assert.equal(last?.timeoutMs, filterTimeoutMs(Buffer.byteLength(payload)), `${size} B`);
+		assert.equal(last?.maxStdout, FILTER_STDOUT_CAP);
+	}
+	// 3 s plus 4 ms per started KiB of payload. (The 10 s ceiling is past the
+	// 1 MiB stdin limit for MCP, so a payload never reaches it.)
+	assert.deepEqual(
+		seen.map((s) => s.timeoutMs),
+		[3_004, 4_204, 6_604],
+	);
 });
 
 function createPiStubFor(client: BoostClient) {

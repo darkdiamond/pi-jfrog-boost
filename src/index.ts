@@ -329,6 +329,18 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	};
 
 	/**
+	 * Counts a filter or MCP call that ran to completion without its reply
+	 * being used. A non-zero exit is a skip of its own (`exit`, as on the
+	 * document route), not an error: it is Boost declining deterministically,
+	 * and the breaker does not count it either (§8.2). Uncounted, it would be
+	 * the one outcome `/boost stats` could not show.
+	 */
+	const noteUnused = (call: BoostCall | undefined): void => {
+		if (!call || call.skipped || call.timedOut || call.spawnError || call.killedBy || call.aborted) return;
+		counters.skip(call.code === 0 ? "unchanged" : "exit");
+	};
+
+	/**
 	 * Whether Boost's stdin filter will filter shell output at all (spec §8.4),
 	 * decided from settings, config.toml and the environment without spawning.
 	 */
@@ -429,11 +441,15 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					},
 					(payload) => client.mcp(hookMeta, payload, { signal, toolInput: event.input }),
 				);
-				if (outcome.skipped) counters.skip(outcome.skipped);
-				if (outcome.call) noteCall(outcome.call);
+				// Counted once: the client's refusal or error if it had one, else the
+				// route's own reason (pi's truncated text stands, payload too large),
+				// else the call's result.
+				const counted = outcome.call ? noteCall(outcome.call) : false;
 				const compaction = outcome.compaction;
 				if (!compaction) {
-					if (outcome.call && !outcome.call.skipped && outcome.call.code === 0) counters.skip("unchanged");
+					if (counted) return;
+					if (outcome.skipped) counters.skip(outcome.skipped);
+					else noteUnused(outcome.call);
 					return;
 				}
 				if (isOff()) return;
@@ -458,10 +474,10 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				// shell-full (WP6): not routed yet.
 				return;
 			}
-			if (outcome.call) noteCall(outcome.call);
+			const counted = outcome.call ? noteCall(outcome.call) : false;
 			const compaction = outcome.compaction;
 			if (!compaction) {
-				if (outcome.call && !outcome.call.skipped && outcome.call.code === 0) counters.skip("unchanged");
+				if (!counted) noteUnused(outcome.call);
 				return;
 			}
 			// Re-checked: a kill switch flipped while Boost ran wins over its reply.

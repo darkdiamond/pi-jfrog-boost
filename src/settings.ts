@@ -287,9 +287,11 @@ export function flagIsOn(value: unknown): boolean {
  * Deliberately this small: a full glob or regex grammar would make a privacy
  * control easy to get subtly wrong (`.` or `?` matching more than the user
  * meant) for no gain, since pi's MCP tool names are `[A-Za-z0-9_]` only — it
- * replaces everything else with `_` when it builds them. Implemented by hand rather than as a RegExp
- * so a user pattern can never be a pathological expression; the greedy
- * backtracking below is linear in practice for names this short.
+ * replaces everything else with `_` when it builds them, and so does
+ * {@link excludedBy} with the pattern before it gets here. Implemented by
+ * hand rather than as a RegExp so a user pattern can never be a pathological
+ * expression; the greedy backtracking below is linear in practice for names
+ * this short.
  */
 export function globMatches(pattern: string, name: string): boolean {
 	const parts = pattern.split("*");
@@ -311,9 +313,26 @@ export function globMatches(pattern: string, name: string): boolean {
 	return true;
 }
 
-/** The first `mcpExclude` pattern `toolName` matches, if any. */
+/**
+ * A `mcpExclude` pattern spelled the way pi spells tool names. pi builds
+ * `mcp__<server>__<tool>` and then turns every character outside
+ * `[A-Za-z0-9_]` into `_` (`createMcpToolName`, pi 1.2.0
+ * `dist/extensions/mcp/tools.js`), so a server configured as `my-secrets` or
+ * `acme.slack` reaches this extension as `mcp__my_secrets__…` /
+ * `mcp__acme_slack__…`. A user naturally writes the server's configured
+ * name; compared literally, that pattern could never match, and this privacy
+ * control would silently let the server's bodies through to Boost's DB and
+ * sync. The pattern gets pi's rewrite (sparing `*`, the one wildcard), which
+ * can only make it match the name pi really uses — never a wider set, since
+ * pi has already folded those characters together in the names themselves.
+ */
+export function normalizeExcludePattern(pattern: string): string {
+	return pattern.trim().replace(/[^A-Za-z0-9_*]/g, "_");
+}
+
+/** The first `mcpExclude` pattern `toolName` matches, if any (as the user wrote it). */
 export function excludedBy(toolName: string, patterns: readonly string[]): string | undefined {
-	return patterns.find((pattern) => globMatches(pattern.trim(), toolName));
+	return patterns.find((pattern) => globMatches(normalizeExcludePattern(pattern), toolName));
 }
 
 // ---------------------------------------------------------------------------

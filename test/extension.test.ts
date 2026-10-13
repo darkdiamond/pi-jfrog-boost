@@ -491,6 +491,22 @@ test("pi's truncation notice survives compaction verbatim", async () => {
 	assert.equal(filterCalls(calls)[0]?.text, NOISY);
 });
 
+test("a shell filter that ran but was not used is counted: `unchanged` on exit 0, `exit` otherwise", async () => {
+	for (const [code, reason] of [
+		[0, "unchanged"],
+		[1, "exit"],
+	] as const) {
+		const counters = createCounters();
+		const { fire } = harness({
+			counters,
+			overrides: { filter: async (_meta, text) => call(code === 0 ? text : "compacted", code) },
+		});
+		assert.equal(await fire("tool_result", bashResult("npm test")), undefined);
+		assert.deepEqual(counters.skips(), { [reason]: 1 }, reason);
+		assert.deepEqual(counters.errors(), {}, reason);
+	}
+});
+
 test("terminal escapes are stripped for Boost, and kept when its reply is not used", async () => {
 	const coloured = `\u001b[32m${NOISY}\u001b[0m`;
 	const echo = harness({ overrides: { filter: async (_meta, text) => call(text) } });
