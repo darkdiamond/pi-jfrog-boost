@@ -276,6 +276,47 @@ export function flagIsOn(value: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// mcpExclude
+
+/**
+ * Whether `name` matches a `mcpExclude` pattern: `*` stands for any run of
+ * characters (none included), everything else is literal and case-sensitive,
+ * and the whole name must match. `mcp__secrets__*` covers one server,
+ * `*__delete_*` a kind of tool on every server.
+ *
+ * Deliberately this small: a full glob or regex grammar would make a privacy
+ * control easy to get subtly wrong (`.` or `?` matching more than the user
+ * meant) for no gain, since pi's MCP tool names are `[A-Za-z0-9_]` only — it
+ * replaces everything else with `_` when it builds them. Implemented by hand rather than as a RegExp
+ * so a user pattern can never be a pathological expression; the greedy
+ * backtracking below is linear in practice for names this short.
+ */
+export function globMatches(pattern: string, name: string): boolean {
+	const parts = pattern.split("*");
+	if (parts.length === 1) return pattern === name;
+	const first = parts[0] as string;
+	const last = parts[parts.length - 1] as string;
+	if (name.length < first.length + last.length) return false;
+	if (!name.startsWith(first) || !name.endsWith(last)) return false;
+	// Each middle piece must appear, in order, between the fixed ends; taking
+	// the earliest occurrence of each is always safe for `*`-only patterns.
+	let index = first.length;
+	const end = name.length - last.length;
+	for (const part of parts.slice(1, -1)) {
+		if (!part) continue;
+		const found = name.indexOf(part, index);
+		if (found < 0 || found + part.length > end) return false;
+		index = found + part.length;
+	}
+	return true;
+}
+
+/** The first `mcpExclude` pattern `toolName` matches, if any. */
+export function excludedBy(toolName: string, patterns: readonly string[]): string | undefined {
+	return patterns.find((pattern) => globMatches(pattern.trim(), toolName));
+}
+
+// ---------------------------------------------------------------------------
 // The store
 
 export type SettingSource = "default" | "file" | "env";

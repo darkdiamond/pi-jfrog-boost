@@ -17,7 +17,11 @@
  *     `.boost/config.toml`: fresh `[feature_flags._metadata] last_updated_at`
  *     (without it every call stalls ~5 s on a flag refresh, spec F2) and
  *     `boost-cli-filtering` `user = true`, so shell filtering is
- *     deterministic whatever JFrog's remote default is that day.
+ *     deterministic whatever JFrog's remote default is that day. Likewise
+ *     `boost-mcp-filtering` and `boost-mcp-browser-budget`: with no value
+ *     recorded, v0.15.4 filters MCP results but leaves browser snapshots
+ *     whole (the budget's built-in default is off; JFrog turns it on
+ *     remotely), and the MCP case expects both.
  *  3. Copies only the three terms lines, read-only, from
  *     `BOOST_E2E_TERMS_FROM` (default: the real `~/.boost/config.toml`), or
  *     the whole config from `BOOST_E2E_HOME/.boost/config.toml`. The suite
@@ -90,6 +94,8 @@ export function synthesizeConfig(variant: HomeVariant, terms: readonly string[],
 	}
 	parts.push(
 		`[feature_flags."boost-cli-filtering"]\nuser = ${variant === "user-false" ? "false" : "true"}\n`,
+		`[feature_flags."boost-mcp-filtering"]\nuser = true\n`,
+		`[feature_flags."boost-mcp-browser-budget"]\nuser = true\n`,
 	);
 	return parts.join("\n");
 }

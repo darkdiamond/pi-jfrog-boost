@@ -13,6 +13,8 @@
  *                       boost read        PDF/Office/ODF reads and large
  *                                         notebooks converted to text, paged
  *                                         like any read (documents.ts)
+ *                       boost hook claude mcp__* results through Boost's MCP
+ *                                         filters (mcp.ts)
  *   before_agent_start  (none)            teaches the model `boost retrieve`
  *   agent_end/shutdown  boost sync        uploads what Boost measured
  *
@@ -35,7 +37,13 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AWARENESS_BODY, AWARENESS_SECTION, withAwareness } from "./awareness.ts";
 import { binaryStamp } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
-import { type ConfigReader, createConfigReader, shellGate } from "./boost-config.ts";
+import {
+	type ConfigReader,
+	createConfigReader,
+	MCP_FILTERING_FLAG,
+	resolveFlag,
+	shellGate,
+} from "./boost-config.ts";
 import {
 	asResult,
 	hasStructured,
@@ -61,6 +69,7 @@ import {
 	type Readiness,
 } from "./health.ts";
 import { COMMAND_NAME, registerInstallCommand } from "./install.ts";
+import { compactMcpResult, isMcpTool } from "./mcp.ts";
 import { route } from "./router.ts";
 import { createSettingsStore, type SettingsStore } from "./settings.ts";
 import { type Compaction, compactShellOutput } from "./shell.ts";
@@ -358,6 +367,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				ready,
 				paused: ready && breaker.state().kind === "open",
 				shellOn: ready && shellOn(),
+				boostVersion: readiness.version(),
+				// Read from config.toml only for an MCP result that may be sent.
+				mcpFlag:
+					ready && isMcpTool(event.toolName)
+						? resolveFlag(config.read(), MCP_FILTERING_FLAG, env).value
+						: "unknown",
 				settings: settings.effective(),
 			});
 			if (decision.kind === "skip") {
@@ -401,6 +416,30 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				return asResult(documentPatch(event, outcome));
 			}
 			const signal = ctx.signal;
+			if (decision.kind === "mcp") {
+				const outcome = await compactMcpResult(
+					{
+						toolName: event.toolName,
+						toolInput: event.input,
+						toolUseId: event.toolCallId,
+						sessionId: hookMeta.session_id,
+						cwd: hookMeta.cwd,
+						content: event.content,
+						details: event.details,
+					},
+					(payload) => client.mcp(hookMeta, payload, { signal, toolInput: event.input }),
+				);
+				if (outcome.skipped) counters.skip(outcome.skipped);
+				if (outcome.call) noteCall(outcome.call);
+				const compaction = outcome.compaction;
+				if (!compaction) {
+					if (outcome.call && !outcome.call.skipped && outcome.call.code === 0) counters.skip("unchanged");
+					return;
+				}
+				if (isOff()) return;
+				recordSavings(ctx, compaction.before - compaction.after);
+				return asResult(compactedPatch(event, compaction, "mcp"));
+			}
 			let outcome: Awaited<ReturnType<typeof compactShellOutput>>;
 			if (decision.kind === "shell") {
 				outcome = await compactShellOutput(text, (body) =>
@@ -416,7 +455,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					client.filter(hookMeta, body, { signal, toolInput }),
 				);
 			} else {
-				// mcp (WP5), shell-full (WP6): not routed yet.
+				// shell-full (WP6): not routed yet.
 				return;
 			}
 			if (outcome.call) noteCall(outcome.call);
@@ -438,23 +477,27 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	});
 
 	/**
-	 * The patch for a compacted result. `isError` is left out, so a failing
-	 * command stays a failure. `structuredContent` is passed through as it
-	 * was: pi 1.x drops it when a handler replaces `content` without
-	 * returning it, and it is the tool's own record of what ran (exit code,
-	 * full output path), which compaction does not change.
+	 * The patch for a compacted result, shell or MCP. `isError` is left out,
+	 * so a failing command stays a failure. `structuredContent` is passed
+	 * through as it was: pi 1.x drops it when a handler replaces `content`
+	 * without returning it, and it is the tool's own record of what ran (exit
+	 * code, full output path; an MCP server's typed result), which compaction
+	 * does not change. The text blocks collapse into one at the first one's
+	 * position; images and other blocks keep their places (`withText`).
 	 */
 	function compactedPatch(
 		event: { content: ContentBlock[]; details?: unknown },
-		compaction: Compaction,
+		compaction: Compaction & { full?: true },
+		kind: "compacted" | "mcp" = "compacted",
 	): ToolResultPatch {
 		const patch: ToolResultPatch = { content: withText(event.content, compaction.text) };
 		if (hasStructured(event)) patch.structuredContent = structuredContentOf(event);
 		const details = mergeDetails(event.details, {
-			kind: "compacted",
+			kind,
 			before: compaction.before,
 			after: compaction.after,
 			...(compaction.retrieveId !== undefined ? { retrieveId: compaction.retrieveId } : {}),
+			...(compaction.full ? { full: true } : {}),
 		});
 		if (details) patch.details = details;
 		return patch;

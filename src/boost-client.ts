@@ -430,6 +430,25 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 				maxStdout: CONVERT_STDOUT_CAP,
 			});
 		},
+		/**
+		 * Why `boost hook claude`, of all the ways into Boost:
+		 *
+		 * - The stdin filter never runs MCP filters. They are keyed on an MCP
+		 *   tool name, and stdin carries no tool name at all, so a Slack or
+		 *   Playwright result piped into `boost` comes back as generic text
+		 *   (cmax-1, NP5). Only a PostToolUse hook payload reaches them.
+		 * - Of the hook dialects, `claude` is the one whose payload shape pi can
+		 *   reproduce exactly (`tool_response: {content: [...]}`), and it costs
+		 *   nothing in attribution: Boost already lists every pi session as
+		 *   `claude_code` (`conversations.tool`, Probe 1), so these calls land
+		 *   on the same session label. Their spans and `mcp_tool_calls` rows say
+		 *   `claude_code` too; Boost ignores the `pi` in `BOOST_HOOK_META` here.
+		 * - `hook opencode` would relabel: its calls are recorded as OpenCode,
+		 *   splitting one pi session across two agents in `boost report`.
+		 *
+		 * Same hot-path environment and size-scaled timeout as `filter`, and the
+		 * same breaker: a stalled hook is as slow for the user as a stalled filter.
+		 */
 		mcp(meta, payload, options = {}) {
 			const bytes = Buffer.byteLength(payload);
 			return guarded("mcp", ["hook", HOOK_DIALECT], meta, payload, options, {

@@ -21,7 +21,15 @@ function input(over: Partial<RouteInput> = {}): RouteInput {
 		ready: true,
 		paused: false,
 		shellOn: true,
-		settings: { minBytes: 2048, readLogs: false, documents: true, notebooks: true, extraTools: [] },
+		settings: {
+			minBytes: 2048,
+			readLogs: false,
+			documents: true,
+			notebooks: true,
+			extraTools: [],
+			mcp: true,
+			mcpExclude: [],
+		},
 		...over,
 	};
 }
@@ -33,6 +41,8 @@ const settings = (over: Partial<RouteInput["settings"]>) => ({
 	documents: true,
 	notebooks: true,
 	extraTools: [] as string[],
+	mcp: true,
+	mcpExclude: [] as string[],
 	...over,
 });
 
@@ -292,8 +302,53 @@ test("grep, find, ls, edit, write and other tools are untouched", () => {
 	}
 });
 
-test("MCP results are untouched until their route lands (WP5)", () => {
-	assert.equal(reason(route(input({ toolName: "mcp__slack__slack_get_users", input: {} }))), "untouched");
+// ---------------------------------------------------------------------------
+// mcp__*
+
+const mcp = (over: Partial<RouteInput> = {}) =>
+	input({ toolName: "mcp__slack__slack_get_users", input: {}, boostVersion: [0, 15, 4], ...over });
+
+test("MCP rows: a large result from a current Boost takes the MCP route", () => {
+	assert.deepEqual(route(mcp()), { kind: "mcp" });
+	// The shell gate is about Boost's stdin filter; MCP filters do not use it.
+	assert.deepEqual(route(mcp({ shellOn: false })), { kind: "mcp" });
+	// An unknown flag is Boost's default (on), which Boost applies itself.
+	assert.deepEqual(route(mcp({ mcpFlag: "unknown" })), { kind: "mcp" });
+	assert.deepEqual(route(mcp({ mcpFlag: true })), { kind: "mcp" });
+});
+
+test("MCP rows: the setting, mcpExclude, an error, Boost's version and its flag", () => {
+	assert.equal(reason(route(mcp({ settings: settings({ mcp: false }) }))), "mcp-off");
+	assert.equal(reason(route(mcp({ settings: settings({ mcpExclude: ["mcp__slack__*"] }) }))), "excluded");
+	assert.equal(reason(route(mcp({ settings: settings({ mcpExclude: ["mcp__github__*"] }) }))), "mcp");
+	assert.equal(reason(route(mcp({ isError: true }))), "error");
+	assert.equal(reason(route(mcp({ boostVersion: [0, 15, 2] }))), "mcp-unsupported");
+	assert.equal(reason(route(mcp({ boostVersion: [0, 15, 3] }))), "mcp");
+	assert.equal(reason(route(mcp({ boostVersion: undefined }))), "mcp-unsupported");
+	assert.equal(reason(route(mcp({ mcpFlag: false }))), "mcp-flag-off");
+});
+
+test("MCP rows: the text must be 2 KiB to 1 MiB, without NUL", () => {
+	assert.equal(reason(route(mcp({ text: "x".repeat(2047) }))), "small");
+	assert.equal(reason(route(mcp({ text: "x".repeat(2048) }))), "mcp");
+	// minBytes is the shell and log floor; MCP's is fixed at 2 KiB.
+	assert.equal(reason(route(mcp({ text: "x".repeat(2048), settings: settings({ minBytes: 8192 }) }))), "mcp");
+	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_ROUTE_BYTES) }))), "mcp");
+	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_ROUTE_BYTES + 1) }))), "large");
+	assert.equal(reason(route(mcp({ text: `${"x".repeat(4096)}\0` }))), "binary");
+});
+
+test("MCP rows: the pre-checks still come first, and nested calls are never sent", () => {
+	assert.equal(reason(route(mcp({ nested: true }))), "nested");
+	assert.equal(reason(route(mcp({ ready: false }))), "not-ready");
+	assert.equal(reason(route(mcp({ paused: true }))), "paused");
+	assert.equal(reason(route(mcp({ text: "" }))), "empty");
+});
+
+test("MCP rows: only the mcp__ prefix routes a tool to Boost's MCP filters", () => {
+	for (const toolName of ["mcp_slack", "slack__get_users", "MCP__x__y", "x_mcp__y"]) {
+		assert.equal(reason(route(mcp({ toolName }))), "untouched", toolName);
+	}
 });
 
 test("shell rows: a coloured HTML document is still an HTML document", () => {

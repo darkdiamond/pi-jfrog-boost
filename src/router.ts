@@ -27,16 +27,24 @@
  *                                  (`documents`, `notebooks`; converted by
  *                                  documents.ts), and whole reads of
  *                                  *.log/*.out with `readLogs` on
+ *   mcp__*                         the MCP route (mcp.ts), unless `mcp` is
+ *                                  off, the name matches `mcpExclude`, the
+ *                                  call failed, Boost is older than 0.15.3
+ *                                  or its `boost-mcp-filtering` flag is
+ *                                  explicitly false, or the text is outside
+ *                                  2 KiB…1 MiB or holds NUL
  *   everything else                untouched: grep, find and ls never
  *                                  compact on v0.15.4 and cost ~240 ms each;
  *                                  edit and write are what the model edits from
  *
- * The MCP (WP5) and full-output (WP6) routes are declared in {@link Route}
- * but not produced yet: those results are skipped as `untouched` and go down
- * the plain shell route until their work packages land.
+ * The full-output route (WP6) is declared in {@link Route} but not produced
+ * yet: truncated shell results go down the plain shell route until it lands.
  */
+
+import type { BoostVersion } from "./boost-binary.ts";
 import { looksLikeHtmlDocument, splitNotices } from "./content.ts";
 import { documentMode, PI_OFFSET_ERROR } from "./documents.ts";
+import { isMcpTool, type McpSkipReason, mcpSkip } from "./mcp.ts";
 import { bypassesBoost, isWebFetch } from "./shell.ts";
 import { extensionOf, isShell, LOG_EXTENSIONS, NEVER_EXTRA } from "./tools.ts";
 
@@ -58,7 +66,8 @@ export type SkipReason =
 	| "large"
 	| "error"
 	| "exact"
-	| "untouched";
+	| "untouched"
+	| McpSkipReason;
 
 export type Route =
 	| { kind: "skip"; reason: SkipReason }
@@ -75,6 +84,8 @@ export interface RouteSettings {
 	documents: boolean;
 	notebooks: boolean;
 	extraTools: readonly string[];
+	mcp: boolean;
+	mcpExclude: readonly string[];
 }
 
 /** A tool result and the state it is judged against, gathered by the caller. */
@@ -94,6 +105,13 @@ export interface RouteInput {
 	paused: boolean;
 	/** The shell gate (spec §8.4) resolves on. */
 	shellOn: boolean;
+	/** The running Boost's version, when known (the MCP route needs ≥ 0.15.3). */
+	boostVersion?: BoostVersion | undefined;
+	/**
+	 * `boost-mcp-filtering` as Boost will resolve it (env, then config).
+	 * Only consulted for `mcp__*` tools; absent counts as unknown.
+	 */
+	mcpFlag?: boolean | "unknown";
 	settings: RouteSettings;
 }
 
@@ -121,7 +139,20 @@ export function route(r: RouteInput): Route {
 
 	if (isShellLike(r.toolName, r.settings.extraTools)) return routeShell(r);
 	if (r.toolName === "read") return routeRead(r);
+	if (isMcpTool(r.toolName)) return routeMcp(r);
 	return skip("untouched");
+}
+
+function routeMcp(r: RouteInput): Route {
+	const reason = mcpSkip({
+		toolName: r.toolName,
+		isError: r.isError,
+		text: r.text,
+		settings: r.settings,
+		boostVersion: r.boostVersion,
+		mcpFlag: r.mcpFlag ?? "unknown",
+	});
+	return reason ? skip(reason) : { kind: "mcp" };
 }
 
 function routeShell(r: RouteInput): Route {

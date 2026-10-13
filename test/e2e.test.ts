@@ -34,7 +34,8 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import {
@@ -47,6 +48,7 @@ import { createBoostClient } from "../src/boost-client.ts";
 import { createConfigReader } from "../src/boost-config.ts";
 import { createBreaker } from "../src/health.ts";
 import { createBoostExtension, TERMS_NOTICE } from "../src/index.ts";
+import { PI_MCP_OUTPUT_MAX_BYTES } from "../src/mcp.ts";
 import { createSettingsStore } from "../src/settings.ts";
 import { writeLongDocx } from "./helpers/docx.ts";
 import {
@@ -551,12 +553,128 @@ test("a compacted failure keeps pi's structuredContent and is marked in details"
 	assert.ok((details?.jfrogBoost?.after ?? Infinity) < (details?.jfrogBoost?.before ?? 0));
 });
 
+// ---------------------------------------------------------------------------
+// MCP (spec §16.3 case 11)
+
+interface McpFixture {
+	toolName: string;
+	input: Record<string, unknown>;
+	content: Block[];
+	details: unknown;
+	structuredContent: unknown;
+}
+
+const mcpFixture = (name: string): McpFixture =>
+	JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", name), "utf8")) as McpFixture;
+
+/**
+ * Hand a synthetic MCP result to the extension as pi 1.x's MCP client would
+ * deliver it. There is no MCP server here: what is under test is what Boost's
+ * `hook claude` does with pi's result shape, and how it is put back.
+ */
+async function emitMcp(f: McpFixture): Promise<Outcome & { content: Block[] }> {
+	const event = toolResultEvent(line, {
+		toolName: f.toolName,
+		toolCallId: `e2e-${++callId}`,
+		input: f.input,
+		content: f.content,
+		details: f.details,
+		structuredContent: f.structuredContent,
+	});
+	const patch = await applyToolResultHandlers(line, handlers.get("tool_result") ?? [], event, ctx());
+	return {
+		text: textOfBlocks(patch?.content ?? f.content),
+		content: patch?.content ?? f.content,
+		isError: patch?.isError ?? false,
+		changed: patch !== undefined,
+		structuredContent: patch ? patch.structuredContent : event.structuredContent,
+		originalStructuredContent: event.structuredContent,
+		details: patch ? patch.details : f.details,
+		original: textOfBlocks(f.content),
+	};
+}
+
+test("MCP results are compacted by Boost's MCP filters; images and structuredContent stay", {
+	skip,
+}, async () => {
+	for (const name of ["mcp-slack.json", "mcp-snapshot.json"]) {
+		const f = mcpFixture(name);
+		const outcome = await emitMcp(f);
+		assert.ok(outcome.changed, `${f.toolName}: Boost left the result alone`);
+		assert.ok(outcome.text.length < outcome.original.length, f.toolName);
+		assert.match(outcome.text, MARKER, `${f.toolName}: compacted output carries a retrieve marker`);
+		// Non-text blocks keep their places; the text collapses into the first text slot.
+		assert.deepEqual(
+			outcome.content.map((block) => block.type),
+			f.content.map((block) => block.type),
+			f.toolName,
+		);
+		assert.deepEqual(
+			outcome.content.filter((block) => block.type !== "text"),
+			f.content.filter((block) => block.type !== "text"),
+			f.toolName,
+		);
+		if (line === "1.2") assert.deepEqual(outcome.structuredContent, f.structuredContent, f.toolName);
+		const details = outcome.details as { jfrogBoost?: { kind?: string; retrieveId?: number } } | undefined;
+		assert.equal(details?.jfrogBoost?.kind, "mcp", f.toolName);
+		assert.equal(String(details?.jfrogBoost?.retrieveId), MARKER.exec(outcome.text)?.[1], f.toolName);
+	}
+	// NP5: the hook writes nothing into the project, unlike Boost's Bash hook.
+	assert.equal(existsSync(join(dir, ".boost")), false, "no .boost/ in the working directory");
+});
+
+test("an MCP tool Boost has no filter for comes back the same size and is left alone", { skip }, async () => {
+	const text = Array.from({ length: 300 }, (_, i) => `row ${i}: ${"value ".repeat(8)}`).join("\n");
+	const outcome = await emitMcp({
+		toolName: "mcp__gh__dump",
+		input: {},
+		content: [{ type: "text", text }],
+		details: { server: "gh", tool: "dump" },
+		structuredContent: { rows: 300 },
+	});
+	assert.equal(outcome.changed, false);
+	assert.equal(outcome.text, text);
+});
+
+test("an MCP result pi truncated is re-filtered from pi's full-output file", { skip }, async () => {
+	// pi 1.x cuts MCP text to 20 KiB in the middle and saves the whole of it
+	// under os.tmpdir() (the hermetic HOME's tmp here); the format is copied
+	// from pi 1.2.0's `limitMcpContent`.
+	const snapshot = mcpFixture("mcp-snapshot.json");
+	const page = (snapshot.content[0] as { text: string }).text;
+	const items = page.split("\n").filter((l) => l.startsWith("      ") || l.startsWith("    - list "));
+	const full = [page, ...Array.from({ length: 12 }, () => items.join("\n"))].join("\n");
+	assert.ok(Buffer.byteLength(full) > 4 * PI_MCP_OUTPUT_MAX_BYTES);
+	const path = join(tmpdir(), "pi-mcp-e2e.txt");
+	writeFileSync(path, full);
+	const half = PI_MCP_OUTPUT_MAX_BYTES / 2;
+	const truncated = `Warning: truncated output (original token count: ${Math.ceil(Buffer.byteLength(full) / 4)})\nTotal output lines: ${full.split("\n").length}\n\n${full.slice(0, half)}\u2026${full.length - 2 * half} chars truncated\u2026${full.slice(-half)}\n\n[Full output: ${path} (read it with offset/limit)]`;
+	const outcome = await emitMcp({
+		...snapshot,
+		content: [{ type: "text", text: truncated }, ...snapshot.content.slice(1)],
+		details: { server: "playwright", tool: "browser_snapshot", fullOutputPath: path },
+	});
+	assert.ok(outcome.changed, "Boost left pi's truncated snapshot alone");
+	assert.match(outcome.text, MARKER);
+	assert.ok(
+		outcome.text.endsWith(`Full output: ${path} (read it with offset/limit)]`),
+		outcome.text.slice(-200),
+	);
+	assert.doesNotMatch(outcome.text, /chars truncated/, "built from the whole output, not pi's cut");
+	assert.ok(Buffer.byteLength(outcome.text) < truncated.length);
+});
+
 const onlyOn12 = skip || (line !== "1.2" ? "pi 1.x only: 0.86 has no nested calls" : false);
 
 test("a nested tool call is left exactly as pi returned it", { skip: onlyOn12 }, async () => {
 	const nested = await run("bash", { command: TAP }, { parentToolCallId: "e2e-parent" });
 	assert.equal(nested.changed, false);
 	assert.equal(nested.text, nested.original);
+	// A codemode script's MCP call: its result goes back to the script.
+	const f = mcpFixture("mcp-snapshot.json");
+	const event = toolResultEvent(line, { ...f, parentToolCallId: "e2e-parent" });
+	const patch = await applyToolResultHandlers(line, handlers.get("tool_result") ?? [], event, ctx());
+	assert.equal(patch, undefined);
 });
 
 // Last on purpose: top-level tests run in order, so this sees every spawn above.
