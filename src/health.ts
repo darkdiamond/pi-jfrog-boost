@@ -93,13 +93,22 @@ interface Memo {
 
 const sameStamp = (a: BinaryStamp, b: BinaryStamp) => a.mtimeMs === b.mtimeMs && a.size === b.size;
 
-/** What a finished `boost version` run means. */
+/**
+ * What a finished `boost version` run means. (Busy and aborted runs never get
+ * here: they say nothing about Boost, and runProbe forgets them.)
+ *
+ * `unknown-version` is only for a Boost that exited 0 with a banner this
+ * extension cannot parse: that is deterministic, so it is cached until the
+ * binary changes. A run that exited non-zero without a banner is a failure,
+ * not an answer — one transient exit 1 must not disable Boost for the whole
+ * session — so it is `not-responding`, which backs off and retries.
+ */
 export function classifyProbe(result: RunResult): Memo["outcome"] {
 	if (result.timedOut || result.spawnError || result.killedBy || result.busy || result.code === null) {
 		return { kind: "not-responding" };
 	}
 	const version = parseBoostVersion(result.stdout);
-	if (!version) return { kind: "unknown-version" };
+	if (!version) return result.code === 0 ? { kind: "unknown-version" } : { kind: "not-responding" };
 	return isSupportedVersion(version) ? { kind: "ready", version } : { kind: "too-old", version };
 }
 
@@ -126,9 +135,12 @@ export function createReadiness(deps: ReadinessDeps): Readiness {
 			.catch((): RunResult => ({ code: null, stdout: "", ms: 0, timedOut: false, aborted: false }))
 			.then((result) => {
 				if (gen !== generation) return;
-				if (result.busy) {
-					// Nothing ran: the process slots were full. That says nothing about
-					// Boost, so forget the attempt and let the next check probe again.
+				if (result.busy || result.aborted) {
+					// Nothing ran (the process slots were full), or the probe was killed
+					// on purpose (killAll() at session shutdown). Neither says anything
+					// about Boost (§8.2: abort is neutral), so forget the attempt rather
+					// than record a failure and its 30 s backoff, and let the next
+					// check probe again.
 					memo = undefined;
 					return;
 				}

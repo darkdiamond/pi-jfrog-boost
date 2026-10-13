@@ -78,19 +78,24 @@ function pathDirs(env: NodeJS.ProcessEnv): string[] {
  * installed. `BOOST_BIN` wins outright so users can point at a custom build;
  * one that does not exist falls through rather than disabling Boost.
  *
- * On Windows a `.exe` anywhere beats an extensionless `boost` anywhere: the
- * extensionless one is the POSIX shell script Boost's installer leaves for
- * Git Bash, which `spawn` cannot run without a shell.
+ * On Windows only a `.exe` is found by searching: an extensionless `boost`
+ * in `~/.local/bin` or on PATH is the POSIX shell script Boost's installer
+ * leaves for Git Bash, which `spawn` cannot run without a shell. Accepting it
+ * would turn "not installed" into a probe that fails forever (`not
+ * responding`, retried on backoff) instead of pointing the user at
+ * `/boost install`. A `.exe` anywhere still beats an explicit
+ * `BOOST_BIN`/`BOOST_EXE` that is not one, but an explicit path is otherwise
+ * honoured as given: the user asked for that file.
  */
 export function resolveBoostBinary(options: ResolveOptions): string | undefined {
 	const { env, platform, home } = options;
 	const isExecutable = options.isExecutable ?? isExecutableFile;
 	const list = candidates(env, platform, home);
-	if (platform === "win32") {
-		const exe = list.find((path) => path.toLowerCase().endsWith(".exe") && isExecutable(path));
-		if (exe) return exe;
-	}
-	return list.find(isExecutable);
+	if (platform !== "win32") return list.find(isExecutable);
+	const exe = list.find((path) => path.toLowerCase().endsWith(".exe") && isExecutable(path));
+	if (exe) return exe;
+	const explicit = [env.BOOST_BIN, env.BOOST_EXE].filter((path): path is string => Boolean(path));
+	return explicit.find(isExecutable);
 }
 
 function realpath(path: string): string {

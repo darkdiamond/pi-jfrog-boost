@@ -162,7 +162,27 @@ test("on Windows a .exe anywhere beats an extensionless boost anywhere", () => {
 		home: "C:\\Users\\dev",
 		isExecutable: onDisk(script),
 	});
-	assert.equal(onlyScript, script, "with no .exe anywhere the script is still used");
+	assert.equal(onlyScript, script, "with no .exe anywhere an explicit BOOST_BIN is honoured");
+});
+
+test("on Windows an extensionless boost found by searching is not Boost: missing, not unrunnable", () => {
+	// The POSIX script Boost leaves for Git Bash, in both searched places.
+	const home = "C:\\Users\\dev";
+	const pathScript = join("/bin", "boost");
+	const resolved = resolveBoostBinary({
+		env: { PATH: "/bin" },
+		platform: "win32",
+		home,
+		isExecutable: onDisk(pathScript, localBin(home)),
+	});
+	assert.equal(resolved, undefined);
+	const viaAlias = resolveBoostBinary({
+		env: { BOOST_EXE: pathScript, PATH: "/bin" },
+		platform: "win32",
+		home,
+		isExecutable: onDisk(pathScript),
+	});
+	assert.equal(viaAlias, pathScript, "BOOST_EXE is explicit too");
 });
 
 test("a directory named boost is rejected, a regular executable file is accepted", () => {

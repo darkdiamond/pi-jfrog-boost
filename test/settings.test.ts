@@ -201,6 +201,23 @@ test("save is atomic, keeps unknown keys and the $schema, and rejects invalid va
 	assert.equal(JSON.parse(readFileSync(path, "utf8")).minBytes, 4096, "nothing written for an invalid save");
 });
 
+test("save refuses to overwrite a file it cannot parse, and leaves it untouched", () => {
+	const path = join(root, "broken", "jfrog-boost.json");
+	const broken = '{ "shell": "on", "minBytes": 4096, }';
+	const fs = memoryFs(new Map([[path, broken]]));
+	const store = createSettingsStore({ env: { PI_JFROG_BOOST_SETTINGS: path }, fs, home: () => home });
+	assert.throws(() => store.save({ footer: false }), /cannot save: .*unreadable.*fix or remove it first/);
+	assert.equal(fs.files.get(path), broken, "the hand-edited file is not replaced by the saved keys alone");
+	assert.deepEqual([...fs.files.keys()], [path], "and no temp file is left behind");
+	// A missing file is not an error: the first save creates it.
+	const fresh = join(root, "fresh", "jfrog-boost.json");
+	const freshFs = memoryFs(new Map());
+	createSettingsStore({ env: { PI_JFROG_BOOST_SETTINGS: fresh }, fs: freshFs, home: () => home }).save({
+		footer: false,
+	});
+	assert.equal(JSON.parse(freshFs.files.get(fresh) ?? "{}").footer, false);
+});
+
 test("a failed rename leaves the old file intact and no temp file behind", () => {
 	const path = join(root, "fail", "jfrog-boost.json");
 	const fs = memoryFs(new Map([[path, JSON.stringify({ shell: "off" })]]));

@@ -393,6 +393,13 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 			const path = pathOf();
 			// Re-read first so a key edited by hand since load() is not reverted.
 			const current = loadSettingsFile(path, fs);
+			// A file that exists but cannot be read or parsed (a stray comma, a
+			// permissions change) reads as `{}`. Saving over it would replace the
+			// user's mostly-correct file with just the keys being saved, so refuse
+			// and say why; the user fixes or removes it and saves again.
+			if (current.error !== undefined) {
+				throw new Error(`cannot save: ${path} is unreadable (${current.error}); fix or remove it first`);
+			}
 			const raw: Record<string, unknown> = { ...current.raw };
 			delete raw.$schema;
 			for (const key of SETTINGS_KEYS) {

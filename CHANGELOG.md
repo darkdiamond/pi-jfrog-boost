@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- When Boost's cached feature flags are older than their TTL (24 h, or your
+  own `BOOST_FEATURE_FLAGS_TTL`), pi's Boost calls no longer try to refresh
+  them: offline, each such call waited about 5 s for a refresh that could not
+  succeed. Flags are refreshed by the idle-time `boost sync` or by other
+  Boost integrations instead. With sync turned off (`sync: false`,
+  `PI_BOOST_SYNC=0`) and no other Boost agent on the machine, they are not
+  refreshed until you run Boost yourself.
+
 ## [0.3.0] - 2026-09-23
 
 ### Fixed

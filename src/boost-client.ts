@@ -28,6 +28,7 @@
  * Everything here fails open: every method resolves, never rejects, and a
  * result the caller cannot use means "keep the original".
  */
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { type ResolveOptions, resolveBoostBinary } from "./boost-binary.ts";
 import { type BoostConfig, CLI_FILTERING_FLAG, createConfigReader } from "./boost-config.ts";
@@ -191,6 +192,50 @@ const skippedCall = (skipped: SkipReason): BoostCall => ({
 	skipped,
 });
 
+/** The file's size in bytes, or 0 when it cannot be stat'ed (the call then fails open on its own). */
+function fileSize(path: string): number {
+	try {
+		return statSync(path).size;
+	} catch {
+		return 0;
+	}
+}
+
+const GO_DURATION_UNITS: Readonly<Record<string, number>> = {
+	ns: 1e-6,
+	us: 1e-3,
+	µs: 1e-3,
+	μs: 1e-3,
+	ms: 1,
+	s: 1_000,
+	m: 60_000,
+	h: 3_600_000,
+};
+
+/**
+ * A Go `time.ParseDuration` string (`24h`, `1h30m`, `90s`, `1.5h`, `0`) in
+ * milliseconds, or undefined when it is not one. Boost reads
+ * `BOOST_FEATURE_FLAGS_TTL` with Go's parser; this covers the same grammar
+ * except negative values, which no one sets as a cache lifetime. Like Go, it
+ * allows no whitespace.
+ */
+export function parseGoDuration(value: string): number | undefined {
+	const text = value.replace(/^\+/, "");
+	if (text === "0") return 0;
+	if (text === "") return undefined;
+	const part = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/y;
+	let total = 0;
+	let index = 0;
+	while (index < text.length) {
+		part.lastIndex = index;
+		const match = part.exec(text);
+		if (!match) return undefined;
+		total += Number(match[1]) * (GO_DURATION_UNITS[match[2] as string] ?? Number.NaN);
+		index = part.lastIndex;
+	}
+	return Number.isFinite(total) ? total : undefined;
+}
+
 function list(value: string | undefined): string[] {
 	return (value ?? "")
 		.split(",")
@@ -236,13 +281,20 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 	 *   a refresh (Probe 3). With no `last_updated_at` in config.toml at all —
 	 *   a fresh install — even the TTL does not help, and flag fetching is
 	 *   turned off for the call (F2: 5.28 s → 0.23 s).
-	 *   The same holds for metadata older than the 24 h TTL: offline, a refresh
-	 *   that cannot succeed still waits its full 5 s budget on every call and
-	 *   never updates the timestamp (no negative cache), so a laptop that was
-	 *   off the network for a weekend would pay 5 s per tool result. Fetching
-	 *   is turned off for those calls too; Boost then uses the persisted
-	 *   remote and user values, and the idle-time sync (below) is where flags
-	 *   get refreshed. A TTL the user set themselves is left to them.
+	 *   The same holds for metadata older than the TTL in effect (24 h, or the
+	 *   user's own `BOOST_FEATURE_FLAGS_TTL`): offline, a refresh that cannot
+	 *   succeed still waits its full 5 s budget on every call and never
+	 *   updates the timestamp (no negative cache), so a laptop that was off
+	 *   the network for a weekend would pay 5 s per tool result (measured:
+	 *   5.18 s, against 0.20 s with fetching off). Fetching is turned off for
+	 *   those calls too, and Boost uses the persisted remote and user values.
+	 *   This is a deliberate deviation from spec §8.3 as first written: pi's
+	 *   own hot-path calls then never refresh stale flags, online or not.
+	 *   They are refreshed by the idle-time `boost sync` (below), which runs
+	 *   without overrides and does attempt the refresh, or by any other Boost
+	 *   integration on the machine. With sync turned off (`sync: false`,
+	 *   `PI_BOOST_SYNC=0`) on a machine where pi is the only Boost user, they
+	 *   are not refreshed at all until the user runs Boost themselves.
 	 * - filter, convert, mcp, observe with `shell: "on"`: `boost-cli-filtering`
 	 *   appended to `BOOST_FEATURE_FLAGS_FORCE_ENABLED`. This is how "on"
 	 *   works without writing Boost's config: it applies to pi's own children
@@ -254,10 +306,16 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 	const flagsNeedRefresh = (): boolean => {
 		const updated = readConfig().flagsUpdatedAt;
 		if (!updated) return true;
-		if (env.BOOST_FEATURE_FLAGS_TTL) return false;
+		let ttlMs = FLAGS_TTL_MS;
+		if (env.BOOST_FEATURE_FLAGS_TTL) {
+			const parsed = parseGoDuration(env.BOOST_FEATURE_FLAGS_TTL);
+			// A TTL this parser does not understand is left to the user and Boost.
+			if (parsed === undefined) return false;
+			ttlMs = parsed;
+		}
 		const at = Date.parse(updated);
 		// Unparseable: Boost cannot use it either, so treat it as missing.
-		return Number.isNaN(at) || wallClock() - at >= FLAGS_TTL_MS;
+		return Number.isNaN(at) || wallClock() - at >= ttlMs;
 	};
 
 	const childEnv = (surface: Surface, meta?: HookMeta, toolInput?: unknown): NodeJS.ProcessEnv => {
@@ -360,8 +418,14 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 			});
 		},
 		convert(meta, path, options = {}) {
+			// The breaker's "too slow" budget scales with input size (§8.2), and a
+			// conversion's input is the file. Without it every conversion would
+			// be judged as 0 bytes against the 2.5 s floor, so three ordinary
+			// multi-second conversions of a large PDF would pause shell and MCP
+			// filtering too, although convert's own timeout is 20 s.
+			const sized = options.inputBytes === undefined ? { ...options, inputBytes: fileSize(path) } : options;
 			// `--` so a file named like a flag (`-v.pdf`) is read, not parsed.
-			return guarded("convert", ["read", "--", path], meta, undefined, options, {
+			return guarded("convert", ["read", "--", path], meta, undefined, sized, {
 				timeoutMs: timeouts.convert,
 				maxStdout: CONVERT_STDOUT_CAP,
 			});

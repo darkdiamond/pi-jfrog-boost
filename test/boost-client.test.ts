@@ -15,7 +15,7 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -26,7 +26,9 @@ import {
 	filterTimeoutMs,
 	type HookMeta,
 	MAX_INPUT_BYTES,
+	parseGoDuration,
 } from "../src/boost-client.ts";
+import type { ProcessRunner, RunResult } from "../src/boost-process.ts";
 import { createBreaker } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
 
@@ -269,12 +271,43 @@ test("flag fetching is also disabled when the metadata is older than the 24 h TT
 		undefined,
 		"a TTL the user set is theirs to manage",
 	);
+	// A shorter TTL of the user's own is honoured too: offline, `1h` against
+	// 2-hour-old metadata would otherwise stall ~5 s on every call.
+	assert.equal(
+		clientFor({ BOOST_FEATURE_FLAGS_TTL: "1h" }, { config: at(2) }).childEnv("filter", meta)
+			.BOOST_FEATURE_FLAGS_DISABLE,
+		"1",
+	);
+	assert.equal(
+		clientFor({ BOOST_FEATURE_FLAGS_TTL: "1h30m" }, { config: at(1) }).childEnv("filter", meta)
+			.BOOST_FEATURE_FLAGS_DISABLE,
+		undefined,
+	);
+	assert.equal(
+		clientFor({ BOOST_FEATURE_FLAGS_TTL: "a day" }, { config: at(48) }).childEnv("filter", meta)
+			.BOOST_FEATURE_FLAGS_DISABLE,
+		undefined,
+		"a TTL that cannot be parsed is left to the user and Boost",
+	);
 	const garbled = fixedConfig('[feature_flags._metadata]\nlast_updated_at = "yesterday"\n').read;
 	assert.equal(clientFor({}, { config: garbled }).childEnv("filter", meta).BOOST_FEATURE_FLAGS_DISABLE, "1");
 	assert.equal(
 		clientFor({}, { config: at(48) }).childEnv("sync", meta).BOOST_FEATURE_FLAGS_DISABLE,
 		undefined,
 	);
+});
+
+test("parseGoDuration reads Go duration strings, as Boost does", () => {
+	assert.equal(parseGoDuration("24h"), 86_400_000);
+	assert.equal(parseGoDuration("1h30m"), 5_400_000);
+	assert.equal(parseGoDuration("90s"), 90_000);
+	assert.equal(parseGoDuration("1.5h"), 5_400_000);
+	assert.equal(parseGoDuration("500ms"), 500);
+	assert.equal(parseGoDuration("2m3.5s"), 123_500);
+	assert.equal(parseGoDuration("0"), 0);
+	for (const bad of ["", "24", "1d", "h", " 1h", "-1h", "1h-", "a day"]) {
+		assert.equal(parseGoDuration(bad), undefined, bad);
+	}
 });
 
 test("shell: on forces boost-cli-filtering, comma-merged into the user's list (F1)", () => {
@@ -390,6 +423,46 @@ test("an open breaker pauses filter, convert and mcp without spawning", async ()
 	assert.equal(invocations(log).length, before);
 	now += 5 * 60_000;
 	assert.equal(breaker.state().kind, "half-open");
+});
+
+test("convert's slow budget scales with the file's size when the caller gives none (§8.2)", async () => {
+	// Three 3 s conversions: ordinary for a 2 MiB PDF (expected ~8.5 s), slow
+	// for a tiny file (floor 2.5 s). Only the latter may pause the surfaces.
+	const big = join(root, "big.pdf");
+	writeFileSync(big, Buffer.alloc(2 * 1024 * 1024));
+	const tiny = join(root, "tiny.pdf");
+	writeFileSync(tiny, "%PDF-1.7\n");
+	const runner: ProcessRunner = {
+		run: async (): Promise<RunResult> => ({
+			code: 0,
+			stdout: "text",
+			ms: 3_000,
+			timedOut: false,
+			aborted: false,
+		}),
+		detached: () => {},
+		active: () => 0,
+		killAll: () => {},
+	};
+	const bigBreaker = createBreaker();
+	const bigClient = clientFor({}, { runner, breaker: bigBreaker });
+	for (let i = 0; i < 3; i++) await bigClient.convert(meta, big);
+	assert.equal(bigBreaker.state().kind, "closed");
+
+	const tinyBreaker = createBreaker();
+	const tinyClient = clientFor({}, { runner, breaker: tinyBreaker });
+	for (let i = 0; i < 3; i++) await tinyClient.convert(meta, tiny);
+	assert.equal(tinyBreaker.state().kind, "open");
+
+	// An explicit inputBytes still wins, and a path that cannot be stat'ed counts as 0 bytes.
+	const explicit = createBreaker();
+	const explicitClient = clientFor({}, { runner, breaker: explicit });
+	for (let i = 0; i < 3; i++) await explicitClient.convert(meta, tiny, { inputBytes: 2 * 1024 * 1024 });
+	assert.equal(explicit.state().kind, "closed");
+	const gone = createBreaker();
+	const goneClient = clientFor({}, { runner, breaker: gone });
+	for (let i = 0; i < 3; i++) await goneClient.convert(meta, join(root, "no-such.pdf"));
+	assert.equal(gone.state().kind, "open");
 });
 
 test("the version probe is not paused by the breaker", async () => {

@@ -22,6 +22,7 @@ import {
 	createReadiness,
 	expectedMs,
 	MISSING_RECHECK_MS,
+	PROBE_BACKOFF_MS,
 	type ReadinessDeps,
 } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
@@ -74,7 +75,9 @@ test("probe outcomes: ready, too old, unknown version, not responding", () => {
 	assert.deepEqual(classifyProbe(banner("0.15.4")), { kind: "ready", version: [0, 15, 4] });
 	assert.deepEqual(classifyProbe(banner("0.12.1")), { kind: "too-old", version: [0, 12, 1] });
 	assert.deepEqual(classifyProbe(ran({ stdout: "boost dev build" })), { kind: "unknown-version" });
-	assert.deepEqual(classifyProbe(ran({ code: 1 })), { kind: "unknown-version" });
+	// A failed run with no banner is a failure that is retried, not a cached verdict.
+	assert.deepEqual(classifyProbe(ran({ code: 1 })), { kind: "not-responding" });
+	assert.deepEqual(classifyProbe(ran({ code: 2, stdout: "panic: boom" })), { kind: "not-responding" });
 	assert.deepEqual(classifyProbe(timeout), { kind: "not-responding" });
 	assert.deepEqual(classifyProbe(ran({ code: null, spawnError: true })), { kind: "not-responding" });
 });
@@ -270,6 +273,29 @@ test("a probe refused as busy is forgotten, not counted as a failure", async () 
 	assert.equal(readiness.state().kind, "probing");
 	readiness.check();
 	assert.equal(world.probes, 2, "probed again on the next check, no backoff");
+});
+
+test("a probe killed at shutdown (aborted) is forgotten, not counted as a failure", async () => {
+	const { readiness, world } = scripted([ran({ code: null, aborted: true })]);
+	readiness.start();
+	await settle();
+	assert.equal(readiness.state().kind, "probing");
+	readiness.check();
+	assert.equal(world.probes, 2, "probed again on the next check, no 30 s backoff");
+	await settle();
+	assert.equal(readiness.state().kind, "ready");
+});
+
+test("a transient non-zero probe exit backs off and recovers instead of sticking", async () => {
+	const { readiness, world } = scripted([ran({ code: 1 })]);
+	readiness.start();
+	await settle();
+	assert.equal(readiness.state().kind, "not-responding");
+	world.now = PROBE_BACKOFF_MS[0] as number;
+	readiness.check();
+	await settle();
+	assert.equal(world.probes, 2);
+	assert.equal(readiness.state().kind, "ready");
 });
 
 // ---------------------------------------------------------------------------
