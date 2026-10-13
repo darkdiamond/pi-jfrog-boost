@@ -17,6 +17,7 @@ import {
 	toolResult12,
 	toolResult86,
 } from "./helpers/harness.ts";
+import { fixedConfig, memorySettings, stubClient } from "./helpers/runtime.ts";
 import { takeViolations, violations } from "./helpers/spawn-spy.ts";
 
 test("the installed pi is one of the supported lines", () => {
@@ -122,19 +123,9 @@ test("the current extension loads on both stub lines", async () => {
 	for (const line of ["0.86", "1.2"] as const) {
 		const stub = createPiStub({ line, hasUI: false });
 		createBoostExtension(stub.pi, {
-			client: {
-				enabled: () => false,
-				observeEnabled: () => false,
-				binary: () => undefined,
-				refresh: () => {},
-				ready: async () => false,
-				filter: async () => undefined,
-				read: async () => undefined,
-				observe: async () => undefined,
-				observeDetached: () => {},
-				sync: () => {},
-				exec: async () => ({ code: null, stdout: "" }),
-			},
+			client: stubClient({ enabled: () => false, binary: () => undefined }),
+			settings: memorySettings(),
+			config: fixedConfig(),
 		});
 		assert.ok(stub.handlers.has("tool_result"), line);
 		assert.equal(

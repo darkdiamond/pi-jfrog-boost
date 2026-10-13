@@ -1,0 +1,3 @@
+# A fresh install: `boost init` never ran, flags were never fetched (spec F2).
+[measurement]
+boost_off_sessions = true

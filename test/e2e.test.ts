@@ -43,14 +43,15 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { createBoostClient } from "../src/boost-client.ts";
 import { createBoostExtension } from "../src/index.ts";
 import {
 	applyToolResultHandlers,
 	type Block,
+	beforeAgentStartEvent,
 	type Handler,
 	installedPiLine,
 	type PiLine,
+	sessionStartEvent,
 	textOfBlocks,
 	toolResultEvent,
 } from "./helpers/harness.ts";
@@ -154,10 +155,24 @@ before(async () => {
 			return { stdout: "", stderr: "", code: 0, killed: false };
 		},
 	} as unknown as ExtensionAPI;
-	// Created after `apply()`: the client reads HOME and the environment live
-	// from `process.env`, which now is the hermetic one.
-	createBoostExtension(pi, { client: createBoostClient() });
-	assert.equal(await createBoostClient().ready(), true, `Boost at ${hermetic.binary} is unusable or too old`);
+	// Created after `apply()`: the extension reads HOME and the environment
+	// live from `process.env`, which now is the hermetic one. Default deps, so
+	// the real wiring is under test: settings file, config reader, breaker and
+	// readiness all come from the hermetic HOME.
+	createBoostExtension(pi, { firstTurnWaitMs: 10_000 });
+	// Readiness is probed in the background from session_start and never
+	// awaited by a tool result (spec §8.1), so wait for it the way a session's
+	// first turn does — with a generous bound for a loaded machine. The
+	// awareness section is only set once Boost is ready.
+	for (const handler of handlers.get("session_start") ?? []) await handler(sessionStartEvent(), ctx());
+	const sections: Record<string, string> = {};
+	for (const handler of handlers.get("before_agent_start") ?? []) {
+		await handler(beforeAgentStartEvent(line, { sections }), ctx());
+	}
+	assert.ok(
+		sections["jfrog-boost"],
+		`Boost at ${hermetic.binary} did not become ready (unusable or too old)`,
+	);
 });
 
 after(() => {
@@ -165,13 +180,15 @@ after(() => {
 	hermetic?.dispose();
 });
 
-const ctx = () =>
-	({
+/** Hoisted (a declaration, not a const) because `before()` above uses it. */
+function ctx(): ExtensionContext {
+	return {
 		cwd: dir,
 		hasUI: false,
 		sessionManager: { getSessionId: () => "pi-jfrog-boost-e2e", getBranch: () => [], getEntries: () => [] },
 		ui: { notify: () => {}, setStatus: () => {} },
-	}) as unknown as ExtensionContext;
+	} as unknown as ExtensionContext;
+}
 
 /**
  * Run a real pi tool, then hand its result to the extension exactly as pi

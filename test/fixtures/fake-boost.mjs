@@ -14,6 +14,8 @@
  * Environment (all optional):
  *   FAKE_BOOST_VERSION   banner `boost version` prints (default `boost v0.15.4`);
  *                        `none` makes `version` exit 1 with no output
+ *   FAKE_BOOST_VERSION_SLEEP_MS  wait this long before answering `version`
+ *                        (a Boost stalled on a flag refresh, spec F2)
  *   FAKE_BOOST_MODE      what every other invocation does:
  *                          echo          print stdin back unchanged (default)
  *                          compact-to    print FAKE_BOOST_OUTPUT
@@ -23,6 +25,7 @@
  *                          read-advisory for `read`, print Boost's legacy-Office
  *                                        `[boost] …` advisory and exit 1
  *                          hook-reply    for `hook …`, print FAKE_BOOST_REPLY
+ *                          crash         die from SIGKILL sent to itself (not by the parent)
  *   FAKE_BOOST_OUTPUT    text for compact-to (and for `read` in any mode)
  *   FAKE_BOOST_REPLY     JSON text for hook-reply (default `{}`)
  *   FAKE_BOOST_BYTES     size for huge-output (default 5 MiB)
@@ -31,7 +34,7 @@
  *   FAKE_BOOST_NO_STDIN  `1`: exit at once without reading stdin, which is what
  *                        makes the parent's stdin write fail with EPIPE
  *   FAKE_BOOST_LOG       append one JSON line per invocation:
- *                        {argv, stdin, cwd, env: every BOOST_* variable}
+ *                        {argv, stdin, cwd, pid, env: every BOOST_* variable}
  */
 import { appendFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -47,7 +50,7 @@ function log(stdin) {
 	const boostEnv = Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith("BOOST_")));
 	appendFileSync(
 		env.FAKE_BOOST_LOG,
-		`${JSON.stringify({ argv, stdin, cwd: process.cwd(), env: boostEnv })}\n`,
+		`${JSON.stringify({ argv, stdin, cwd: process.cwd(), pid: process.pid, env: boostEnv })}\n`,
 	);
 }
 
@@ -71,6 +74,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
 	if (sub === "version") {
 		log("");
+		const stall = Number(env.FAKE_BOOST_VERSION_SLEEP_MS ?? "0");
+		if (stall > 0) await sleep(stall);
 		const banner = env.FAKE_BOOST_VERSION ?? "boost v0.15.4";
 		if (banner === "none") return reply("", 1);
 		return reply(`${banner}\n`, 0);
@@ -83,6 +88,11 @@ async function main() {
 
 	const stdin = await readStdin();
 	log(stdin);
+
+	if (mode === "crash") {
+		process.kill(process.pid, "SIGKILL");
+		return;
+	}
 
 	if (mode === "hang") {
 		// Keep the event loop alive forever; only a kill ends this.

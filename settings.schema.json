@@ -1,0 +1,92 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://raw.githubusercontent.com/darkdiamond/pi-jfrog-boost/main/settings.schema.json",
+	"title": "pi-jfrog-boost settings",
+	"description": "Settings for the pi-jfrog-boost extension, read from $PI_JFROG_BOOST_SETTINGS or <pi agent dir>/jfrog-boost.json. Global only: a repository cannot change them. An invalid value falls back to its default with a warning; unknown keys are ignored.",
+	"type": "object",
+	"properties": {
+		"$schema": {
+			"type": "string"
+		},
+		"enabled": {
+			"description": "Persisted master switch. DISABLE_BOOST/BOOST_DISABLED, --no-boost and /boost on|off take precedence.",
+			"type": "boolean",
+			"default": true
+		},
+		"shell": {
+			"description": "\"auto\" follows Boost's boost-cli-filtering flag; \"on\" forces it for pi's own Boost calls (environment only, Boost's config is never written); \"off\" never sends shell output. Env: PI_BOOST_SHELL.",
+			"enum": ["auto", "on", "off"],
+			"default": "auto"
+		},
+		"fullOutput": {
+			"description": "Re-filter pi's full output file when bash output was truncated.",
+			"type": "boolean",
+			"default": true
+		},
+		"minBytes": {
+			"description": "Skip shell and log output smaller than this many bytes.",
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 1048576,
+			"default": 2048
+		},
+		"documents": {
+			"description": "Convert PDF, Office and OpenDocument reads to text (needs Boost's Preview Agreement accepted). Env: PI_BOOST_DOCUMENTS.",
+			"type": "boolean",
+			"default": true
+		},
+		"notebooks": {
+			"description": "Convert whole reads of .ipynb files of 16 KiB or more.",
+			"type": "boolean",
+			"default": true
+		},
+		"readLogs": {
+			"description": "Compact whole reads of *.log and *.out files. Off by default: a lossy filter can misfire on generic logs.",
+			"type": "boolean",
+			"default": false
+		},
+		"mcp": {
+			"description": "Compact mcp__* tool results through Boost's MCP filters. Boost stores the full request and response bodies locally and sync uploads them. Env: PI_BOOST_MCP.",
+			"type": "boolean",
+			"default": true
+		},
+		"mcpExclude": {
+			"description": "Glob patterns of MCP tool names never sent to Boost, e.g. \"mcp__secrets__*\".",
+			"type": "array",
+			"items": { "type": "string", "minLength": 1 },
+			"default": []
+		},
+		"extraTools": {
+			"description": "More tool names whose output is routed like bash, e.g. \"fetch\".",
+			"type": "array",
+			"items": { "type": "string", "minLength": 1 },
+			"default": []
+		},
+		"footer": {
+			"description": "Show Boost's state and savings in pi's footer.",
+			"type": "boolean",
+			"default": true
+		},
+		"badges": {
+			"description": "Per-row transcript badge on results Boost changed (pi 1.0.1 or later).",
+			"type": "boolean",
+			"default": true
+		},
+		"awareness": {
+			"description": "Tell the model, in a system prompt section, which output Boost may shorten and how to recover it.",
+			"type": "boolean",
+			"default": true
+		},
+		"sync": {
+			"description": "Run `boost sync` when the agent settles, which uploads Boost's measurements to JFrog. Env: PI_BOOST_SYNC.",
+			"type": "boolean",
+			"default": true
+		},
+		"observe": {
+			"description": "Lifecycle telemetry to Boost, including tool input and output excerpts. Env: PI_BOOST_OBSERVE.",
+			"type": "boolean",
+			"default": false
+		}
+	},
+	"additionalProperties": true
+}

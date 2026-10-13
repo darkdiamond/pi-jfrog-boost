@@ -26,6 +26,7 @@
 	"files": [
 		"src",
 		"skills",
+		"settings.schema.json",
 		"README.md",
 		"LICENSE",
 		"CHANGELOG.md"

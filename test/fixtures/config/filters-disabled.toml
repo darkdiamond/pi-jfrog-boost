@@ -1,0 +1,13 @@
+accept_terms = 'yes'   # literal string, trailing comment
+
+[feature_flags._metadata]
+last_updated_at = 2026-10-13T05:06:56Z   # a bare TOML date-time
+
+# What Boost appends after repeated retrieves (research: boost-surfaces 1),
+# written here across lines with a comment and a trailing comma.
+[filters]
+disabled = [
+	"go",   # first
+	"node-test",
+	'npm',
+]
