@@ -877,6 +877,35 @@ test("a throwing client never throws to pi", async () => {
 	}
 });
 
+test("a stale context, whose getters throw, never throws to pi", async () => {
+	// pi 1.2 makes `ctx.sessionManager` and `ctx.cwd` getters that throw once
+	// the context is stale; building hook metadata reads both.
+	for (const line of ["0.86", "1.2"] as const) {
+		const { stub } = onStub(line);
+		const ctx = stub.ctx();
+		await stub.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+		for (const key of ["sessionManager", "cwd"]) {
+			Object.defineProperty(ctx, key, {
+				get() {
+					throw new Error("This extension ctx is stale");
+				},
+			});
+		}
+		await stub.fire("session_start", { type: "session_start", reason: "resume" }, ctx);
+		assert.equal(await stub.emitToolResult(failingBash(line), ctx), undefined, line);
+		await stub.fire(
+			"message_end",
+			{ message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+			ctx,
+		);
+		await stub.fire("agent_end", {}, ctx);
+		await stub.fire("session_before_compact", { reason: "manual" }, ctx);
+		await stub.fire("session_compact", {}, ctx);
+		await stub.fire("session_shutdown", { reason: "quit" }, ctx);
+		assert.deepEqual(stub.errors, [], `${line}: every handler kept the throw to itself`);
+	}
+});
+
 test("loading the extension twice in one process keeps the two apart (reload)", async () => {
 	const first = onStub("1.2");
 	const second = onStub("1.2");

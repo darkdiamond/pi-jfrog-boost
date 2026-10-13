@@ -98,10 +98,18 @@ export function splitNotices(text: string): { body: string; notices: string } {
  *   - the remaining `ESC` sequences: charset selection, keypad modes.
  * Boost's filters match plain text — a coloured `✔ ok 12` is not a passing
  * test to them (boost-surfaces 10) — so they are given stripped text.
+ *
+ * An OSC body may not contain ESC, BEL, ST or another OSC introducer. That is
+ * what keeps this linear: a lazy `[\s\S]*?` body rescans to the end of the
+ * text from every unterminated `ESC ]`, which is quadratic — 1 MiB of them
+ * (an extraTools fetch of a hostile page) blocked pi's main thread for two
+ * minutes. With the body class excluding every character that can start or
+ * end one, no two scans overlap. An OSC interrupted by another escape is no
+ * OSC a terminal would honour either; its introducer is left as text.
  */
 const ANSI =
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
-	/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c)|\u001b[()*+][0-9A-Za-z]|\u001b[@-Z\\^_=>78]/g;
+	/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|(?:\u001b\]|\u009d)[^\u0007\u001b\u009c\u009d]*(?:\u0007|\u001b\\|\u009c)|\u001b[()*+][0-9A-Za-z]|\u001b[@-Z\\^_=>78]/g;
 
 /** `text` without terminal escape sequences. */
 export function stripAnsi(text: string): string {
@@ -124,9 +132,14 @@ const HTML_DOCUMENT = /^(<!--[\s\S]*?-->\s*)*(<!doctype\s+html|<html[\s>])/i;
  * (NP1, NP2), so `cat index.html` would hand the model prose instead of the
  * source it is about to edit. The router lets such output through only for
  * web fetches, where readable text is the point.
+ *
+ * Terminal escapes are stripped first, because Boost is sent the stripped
+ * text (shell.ts): `pygmentize index.html` prints `ESC[38;5;12m<!DOCTYPE html>`,
+ * which the anchored pattern would miss while Boost, given the clean page,
+ * still converts it. The sniff must judge exactly what Boost will be given.
  */
 export function looksLikeHtmlDocument(text: string): boolean {
-	const head = text.slice(0, HTML_SNIFF_CHARS).replace(/^﻿/, "").trimStart();
+	const head = stripAnsi(text.slice(0, HTML_SNIFF_CHARS)).replace(/^﻿/, "").trimStart();
 	return HTML_DOCUMENT.test(head);
 }
 

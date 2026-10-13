@@ -143,10 +143,16 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			probe: () => client.version(),
 		});
 	const observeEnabled = () => !isOff() && settings.effective().observe;
-	/** Lifecycle telemetry goes only where the user opted in (`observe`, `PI_BOOST_OBSERVE`). */
-	const observe = (hookMeta: HookMeta, fields: Record<string, unknown>) => {
+	/**
+	 * Lifecycle telemetry goes only where the user opted in (`observe`,
+	 * `PI_BOOST_OBSERVE`). The hook metadata is taken lazily, inside the try:
+	 * building it reads `ctx.sessionManager` and `ctx.cwd`, which pi 1.2 turns
+	 * into getters that throw on a stale context, and such a throw must not
+	 * reach pi's handler-error path any more than a client's.
+	 */
+	const observe = (hookMeta: () => HookMeta, fields: Record<string, unknown>) => {
 		try {
-			if (observeEnabled()) client.observeDetached(hookMeta, fields);
+			if (observeEnabled()) client.observeDetached(hookMeta(), fields);
 		} catch {
 			/* fail open: telemetry is never worth an error in a pi handler */
 		}
@@ -205,6 +211,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		} catch {
 			/* defaults apply */
 		}
+		try {
+			startSession(ctx);
+		} catch {
+			/* fail open: the session runs without Boost until the next check */
+		}
+	});
+
+	function startSession(ctx: ExtensionContext): void {
 		if (isOff()) return;
 
 		// Not awaited (spec §8.1): resolving is a cheap stat, and the version
@@ -232,10 +246,22 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				"warning",
 			);
 		}
-		observe(meta(ctx), { hook_event_name: "sessionStart" });
-	});
+		observe(() => meta(ctx), { hook_event_name: "sessionStart" });
+	}
 
 	pi.on("before_agent_start", async (event) => {
+		try {
+			return await awarenessFor(event);
+		} catch {
+			/* fail open: this turn goes without the awareness section */
+			return;
+		}
+	});
+
+	async function awarenessFor(event: {
+		systemPrompt: string;
+		systemPromptOptions?: { sections?: Record<string, string> };
+	}): Promise<{ systemPrompt: string } | undefined> {
 		if (isOff()) return;
 		let state = readiness.check();
 		// Only the first turn waits, and at most a second: the probe started at
@@ -255,7 +281,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			return;
 		}
 		return { systemPrompt: withAwareness(event.systemPrompt) };
-	});
+	}
 
 	/** Count why a call to Boost produced nothing usable. */
 	const noteCall = (call: BoostCall) => {
@@ -281,9 +307,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			counters.skip("nested");
 			return;
 		}
-		const hookMeta = meta(ctx, event.toolCallId);
-		const text = textOf(event.content);
+		// Built inside the try: `ctx.sessionManager` and `ctx.cwd` throw on a
+		// stale pi 1.2 context, and `content` is the tool's to shape.
+		let text = "";
 		try {
+			const hookMeta = meta(ctx, event.toolCallId);
+			text = textOf(event.content);
 			// Gathered lazily, in the router's order: when off, readiness is not
 			// even checked; until ready, config.toml is not read.
 			const off = isOff();
@@ -339,7 +368,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		} catch {
 			/* fail open: keep the original result */
 		} finally {
-			reportToolResult(hookMeta, event, text);
+			reportToolResult(() => meta(ctx, event.toolCallId), event, text);
 		}
 		return;
 	});
@@ -383,64 +412,80 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	}
 
-	/** Lifecycle telemetry, only when the user opted in. See `observeEnabled`. */
+	/**
+	 * Lifecycle telemetry, only when the user opted in. See `observeEnabled`.
+	 * Runs from tool_result's `finally`, outside its catch, so it guards itself:
+	 * nothing here may turn a kept result into a handler error.
+	 */
 	function reportToolResult(
-		hookMeta: HookMeta,
+		hookMeta: () => HookMeta,
 		event: { toolCallId: string; toolName: string; input: Record<string, unknown>; isError: boolean },
 		text: string,
 	): void {
-		if (!observeEnabled()) return;
-		// No duration: the `tool_call` start map is gone with the handler.
-		// WP9 moves this to `tool_execution_end`, which carries `durationMs`.
-		const common = { tool_name: event.toolName, tool_input: event.input };
-		observe(
-			hookMeta,
-			event.isError
-				? {
-						...common,
-						hook_event_name: "PostToolUseFailure",
-						error_message: truncateForObserve(text) || "tool error",
-					}
-				: { ...common, hook_event_name: "PostToolUse", tool_output: truncateForObserve(text) },
-		);
+		try {
+			if (!observeEnabled()) return;
+			// No duration: the `tool_call` start map is gone with the handler.
+			// WP9 moves this to `tool_execution_end`, which carries `durationMs`.
+			const common = { tool_name: event.toolName, tool_input: event.input };
+			observe(
+				hookMeta,
+				event.isError
+					? {
+							...common,
+							hook_event_name: "PostToolUseFailure",
+							error_message: truncateForObserve(text) || "tool error",
+						}
+					: { ...common, hook_event_name: "PostToolUse", tool_output: truncateForObserve(text) },
+			);
+		} catch {
+			/* fail open: telemetry is never worth an error in a pi handler */
+		}
 	}
 
 	pi.on("message_end", (event) => {
-		if (event.message.role !== "assistant") return;
-		const text = textOf(event.message.content as ContentBlock[]).trim();
-		if (text) lastAssistantText = truncateForObserve(text);
+		try {
+			if (event.message.role !== "assistant") return;
+			const text = textOf(event.message.content as ContentBlock[]).trim();
+			if (text) lastAssistantText = truncateForObserve(text);
+		} catch {
+			/* fail open: only telemetry reads this */
+		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		const hookMeta = meta(ctx);
 		if (lastAssistantText) {
-			observe(hookMeta, {
-				hook_event_name: "afterAgentResponse",
-				text: lastAssistantText,
-			});
+			const text = lastAssistantText;
 			lastAssistantText = "";
+			observe(() => meta(ctx), { hook_event_name: "afterAgentResponse", text });
 		}
 		// Filtering is measured locally; `boost sync` is what gets those numbers
 		// into `boost report`. It uploads to JFrog, so it honours the opt-out.
-		if (!isOff() && settings.effective().sync) sync.schedule(hookMeta);
+		try {
+			if (!isOff() && settings.effective().sync) sync.schedule(meta(ctx));
+		} catch {
+			/* fail open: the next settle schedules it again */
+		}
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {
-		observe(meta(ctx), {
+		observe(() => meta(ctx), {
 			hook_event_name: "preCompact",
 			trigger: event.reason === "manual" ? "manual" : "auto",
 		});
 	});
 
 	pi.on("session_compact", (_event, ctx) => {
-		observe(meta(ctx), { hook_event_name: "postCompact" });
+		observe(() => meta(ctx), { hook_event_name: "postCompact" });
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		const hookMeta = meta(ctx);
 		// No `stop` observe: it records nothing measurable and reattributes the
 		// session to claude_code. `boost sync` leaves attribution alone.
-		if (!isOff() && settings.effective().sync) sync.flush(hookMeta);
+		try {
+			if (!isOff() && settings.effective().sync) sync.flush(meta(ctx));
+		} catch {
+			/* fail open: what was not uploaded goes with the next session's sync */
+		}
 		sync.dispose();
 		// A filter still running for an abandoned turn has nobody to answer.
 		try {

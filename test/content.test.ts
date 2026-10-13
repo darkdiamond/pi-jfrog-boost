@@ -165,6 +165,8 @@ test("an HTML document is recognised exactly as Boost recognises one", () => {
 		"\uFEFF<!doctype html>",
 		"  \n\t<!doctype html>",
 		"<!-- generated -->\n<!-- twice -->\n<!doctype html>",
+		"\u001b[38;5;12m<!DOCTYPE html>",
+		"\u001b]0;title\u0007\u001b[1m  <html>",
 		"<HTML>\n<body>",
 	]) {
 		assert.equal(looksLikeHtmlDocument(text), true, text);
@@ -220,4 +222,19 @@ test("details gain jfrogBoost only when they are a plain object or absent", () =
 	for (const details of [null, [1, 2], "text", 3, new Custom(), new Map()]) {
 		assert.equal(mergeDetails(details, boost), undefined, String(details));
 	}
+});
+
+test("escape stripping stays linear on unterminated OSC sequences", () => {
+	// A lazy OSC body rescans to the end from every `ESC ]`: 1 MiB of these
+	// took two minutes on pi's main thread. Generous bound for slow CI.
+	for (const unit of ["\u001b]a", "\u009da", "\u001b]\u001b]", "\u009d"]) {
+		const text = unit.repeat(Math.ceil((1024 * 1024) / unit.length));
+		const started = performance.now();
+		const out = stripAnsi(text);
+		const ms = performance.now() - started;
+		assert.ok(ms < 500, `${JSON.stringify(unit)}: ${ms.toFixed(0)} ms`);
+		assert.ok(out.length <= text.length);
+	}
+	// Terminated sequences are still removed, unterminated ones left as text.
+	assert.equal(stripAnsi("a\u001b]0;t\u0007b\u001b]8;;x"), "ab\u001b]8;;x");
 });

@@ -66,3 +66,26 @@ test("nothing is scheduled when Boost is disabled", async () => {
 	await delay(30);
 	assert.equal(calls.length, 0);
 });
+
+test("a throwing client fails open, from the timer and from flush", async () => {
+	const client = {
+		enabled: () => true,
+		sync: () => {
+			throw new Error("boost exploded");
+		},
+	} as unknown as BoostClient;
+	const uncaught: unknown[] = [];
+	const onUncaught = (error: unknown) => uncaught.push(error);
+	process.on("uncaughtException", onUncaught);
+	try {
+		const sync = createSyncScheduler(client, 10);
+		sync.schedule(meta);
+		await delay(30);
+		assert.deepEqual(uncaught, [], "the debounce timer kept the throw to itself");
+		sync.schedule(meta);
+		assert.doesNotThrow(() => sync.flush(meta));
+		sync.dispose();
+	} finally {
+		process.off("uncaughtException", onUncaught);
+	}
+});

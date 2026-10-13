@@ -100,13 +100,23 @@ const PLAIN_WRAPPERS: ReadonlySet<string> = new Set([
 	"nohup",
 	"export",
 	"builtin",
+	"xargs",
+	"stdbuf",
+	"ionice",
 ]);
-/** Flags of `env`, `sudo` and `nice` that take a separate argument. */
+/** Flags of the wrappers that take a separate argument (`sudo -u root`, `xargs -n 1`). */
 const FLAGS_WITH_ARGUMENT: Readonly<Record<string, ReadonlySet<string>>> = {
 	env: new Set(["-u", "-C", "-S", "--unset", "--chdir"]),
 	sudo: new Set(["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"]),
 	nice: new Set(["-n", "--adjustment"]),
+	timeout: new Set(["-s", "-k", "--signal", "--kill-after"]),
+	// Not `-i`, `-l` or `-e`: in GNU xargs their argument is optional and attached.
+	xargs: new Set(["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"]),
+	stdbuf: new Set(["-i", "-o", "-e"]),
+	ionice: new Set(["-c", "-n", "-p", "-P", "-u"]),
 };
+/** Wrappers with positional arguments before the command: `timeout 30 make`. */
+const POSITIONAL_ARGUMENTS: Readonly<Record<string, number>> = { timeout: 1 };
 
 /** A program name without directory or `.exe`, lower-cased: `C:\bin\Boost.EXE` → `boost`. */
 export function programName(word: string): string {
@@ -115,13 +125,14 @@ export function programName(word: string): string {
 }
 
 /**
- * The program a segment runs, after the prefixes that only set up how it
- * runs: `VAR=value` assignments, `export`, `env [-i] [-u NAME] [VAR=…]`,
- * `time`, `command`, `exec`, `nice [-n N]`, `nohup`, `sudo [-u user]`, and
- * PowerShell's `.` (dot-sourcing). Undefined when there is none
- * (`export FOO=1` alone).
+ * A segment's words from the program it runs onwards, after the prefixes that
+ * only set up how it runs: `VAR=value` assignments, `export`,
+ * `env [-i] [-u NAME] [VAR=…]`, `time`, `command`, `exec`, `nice [-n N]`,
+ * `nohup`, `sudo [-u user]`, `timeout [-s SIG] DURATION`, `xargs [-n N]`,
+ * `stdbuf -oL`, `ionice -c N`, and PowerShell's `.` (dot-sourcing). Empty
+ * when there is no program (`export FOO=1` alone).
  */
-export function programOf(segment: string): string | undefined {
+export function commandWords(segment: string): string[] {
 	const list = words(segment);
 	let i = 0;
 	while (i < list.length) {
@@ -140,11 +151,17 @@ export function programOf(segment: string): string | undefined {
 				i += withArgs?.has(flag) ? 2 : 1;
 				if (flag === "--") break;
 			}
+			i += POSITIONAL_ARGUMENTS[lower] ?? 0;
 			continue;
 		}
-		return word;
+		return list.slice(i);
 	}
-	return undefined;
+	return [];
+}
+
+/** The program a segment runs (see {@link commandWords}), or undefined when there is none. */
+export function programOf(segment: string): string | undefined {
+	return commandWords(segment)[0];
 }
 
 /** `DISABLE_BOOST=1`, `BOOST_DISABLED=true`: the per-command opt-outs, as a word. */
@@ -152,13 +169,55 @@ const OPT_OUT_WORD = /^(?:DISABLE_BOOST|BOOST_DISABLED)=(?:1|true)$/i;
 /** PowerShell's form, `$env:DISABLE_BOOST=1` or `$env:BOOST_DISABLED = "true"`. */
 const OPT_OUT_POWERSHELL = /\$env:(?:DISABLE_BOOST|BOOST_DISABLED)\s*=\s*(["']?)(?:1|true)\1(?![\w])/i;
 
+/** POSIX shells whose `-c` argument is a script: `bash -c 'boost retrieve 3'`, `sh -ec "…"`. */
+const POSIX_SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+/** Shells that run the rest of their arguments as a command: `pwsh -Command …`, `cmd /c …`. */
+const REST_SHELLS: ReadonlySet<string> = new Set(["pwsh", "powershell", "cmd"]);
+/** How deep scripts inside scripts are followed; real commands nest once or twice. */
+const MAX_NESTING = 4;
+
+/**
+ * The commands a segment hands to another shell, as text to parse again:
+ * the script after `bash -c` (or `-lc`, `-ec`…), or everything after
+ * PowerShell's `-c`/`-Command` or cmd's `/c`.
+ */
+function innerScripts(argv: readonly string[]): string[] {
+	const program = programName(argv[0] ?? "");
+	if (POSIX_SHELLS.has(program)) {
+		const at = argv.findIndex((word, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
+		return at > 0 && at + 1 < argv.length ? [argv[at + 1] as string] : [];
+	}
+	if (REST_SHELLS.has(program)) {
+		const at = argv.findIndex((word, i) => i > 0 && /^(?:-c|-command|\/c|\/k)$/i.test(word));
+		return at > 0 ? [argv.slice(at + 1).join(" ")] : [];
+	}
+	return [];
+}
+
+/**
+ * The bodies of command substitutions — `$(…)` and backticks — anywhere in
+ * the command, double quotes included: `echo "$(boost retrieve 3)"` runs
+ * boost even though the operators are quoted. Innermost `$(…)` first; single
+ * quotes are not honoured, which at worst makes a quoted `'$(boost …)'` a
+ * harmless false positive.
+ */
+function substitutions(command: string): string[] {
+	const bodies: string[] = [];
+	for (const match of command.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+		const body = match[1] ?? match[2];
+		if (body?.trim()) bodies.push(body);
+	}
+	return bodies;
+}
+
 /**
  * Whether a shell command's output must reach the model exactly as printed
  * (spec §6.1):
  *
  * - any simple command in it runs `boost` itself — `boost retrieve 147`,
  *   `~/.local/bin/boost retrieve 147`, `"C:\…\boost.exe" read x`,
- *   `env BOOST_DB_PATH=x boost …`, `… | boost`. Compacting a retrieve would
+ *   `env BOOST_DB_PATH=x boost …`, `… | boost`, `timeout 30 boost …`,
+ *   `bash -c 'boost …'`, `echo "$(boost …)"`. Compacting a retrieve would
  *   hand back another marker instead of the original, and the awareness text
  *   gives the model the full path when `boost` is not on PATH (our-code 6);
  * - or it sets `DISABLE_BOOST` / `BOOST_DISABLED` to `1` or `true` anywhere:
@@ -167,13 +226,17 @@ const OPT_OUT_POWERSHELL = /\$env:(?:DISABLE_BOOST|BOOST_DISABLED)\s*=\s*(["']?)
  * Commands that merely mention Boost (`grep -rn boost src`, `cat boost.toml`,
  * `./boosted`) are filtered as usual.
  */
-export function bypassesBoost(command: unknown): boolean {
+export function bypassesBoost(command: unknown, depth = 0): boolean {
 	if (typeof command !== "string" || !command) return false;
 	if (OPT_OUT_POWERSHELL.test(command)) return true;
+	const nested = depth < MAX_NESTING;
+	if (nested && substitutions(command).some((body) => bypassesBoost(body, depth + 1))) return true;
 	for (const segment of splitSegments(command)) {
 		if (words(segment).some((word) => OPT_OUT_WORD.test(word))) return true;
-		const program = programOf(segment);
-		if (program !== undefined && programName(program) === "boost") return true;
+		const argv = commandWords(segment);
+		if (argv.length === 0) continue;
+		if (programName(argv[0] as string) === "boost") return true;
+		if (nested && innerScripts(argv).some((script) => bypassesBoost(script, depth + 1))) return true;
 	}
 	return false;
 }

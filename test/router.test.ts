@@ -193,6 +193,7 @@ test("read: a log needs the size window, no HTML and the shell gate", () => {
 	assert.equal(reason(route(read({ text: "x".repeat(100), settings: logsOn }))), "small");
 	assert.equal(reason(route(read({ text: "x".repeat(MAX_ROUTE_BYTES + 1), settings: logsOn }))), "large");
 	assert.equal(reason(route(read({ text: HTML, settings: logsOn }))), "html");
+	assert.equal(reason(route(read({ text: `\u001b[2m${HTML}`, settings: logsOn }))), "html");
 	assert.equal(reason(route(read({ shellOn: false, settings: logsOn }))), "shell-off");
 	assert.equal(reason(route(read({ text: `${big()}\u0000`, settings: logsOn }))), "binary");
 });
@@ -216,4 +217,14 @@ test("grep, find, ls, edit, write and other tools are untouched", () => {
 
 test("MCP results are untouched until their route lands (WP5)", () => {
 	assert.equal(reason(route(input({ toolName: "mcp__slack__slack_get_users", input: {} }))), "untouched");
+});
+
+test("shell rows: a coloured HTML document is still an HTML document", () => {
+	// Boost is sent the text without escapes, so it would still see — and
+	// convert — the page behind `pygmentize`'s or `bat`'s colouring.
+	const coloured = `\u001b[38;5;12m${HTML}`;
+	for (const command of ["cat index.html", "pygmentize index.html", "bat --color=always index.html"]) {
+		assert.equal(reason(route(input({ text: coloured, input: { command } }))), "html", command);
+	}
+	assert.equal(reason(route(input({ text: coloured, input: { command: "curl https://x" } }))), "shell");
 });
