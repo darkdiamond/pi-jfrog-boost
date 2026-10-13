@@ -27,10 +27,12 @@ export const AGENT_TYPE = "pi";
  * asks for it, so lifecycle telemetry is opt-in — see `observeEnabled`.
  */
 const OBSERVE_DIALECT = "claude";
-const HOOK_TIMEOUT_MS = 15_000;
-const READ_TIMEOUT_MS = 30_000;
-const VERSION_TIMEOUT_MS = 5_000;
-const SYNC_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUTS: BoostTimeouts = {
+	hook: 15_000,
+	read: 30_000,
+	version: 5_000,
+	exec: 60_000,
+};
 /** Ceiling Boost's own OpenCode plugin uses before it stops filtering. */
 export const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
@@ -47,6 +49,27 @@ export interface RunResult {
 	/** Exit code, or null when the process was killed or never started. */
 	code: number | null;
 	stdout: string;
+	/** Wall time from spawn to settle, by the injected clock. Absent when nothing ran. */
+	ms?: number;
+}
+
+/**
+ * How a resolved binary path is turned into a process. The default runs the
+ * binary itself; tests map it to `node fake-boost.mjs`, which is what lets the
+ * real-process tests run on Windows, where a `#!/bin/sh` stand-in cannot.
+ */
+export type Launcher = (exe: string) => { file: string; args: string[] };
+
+/** Per-surface timeouts in milliseconds. Injected by tests to keep hangs short. */
+export interface BoostTimeouts {
+	/** The stdin filter and awaited `boost hook …` calls. */
+	hook: number;
+	/** `boost read`. */
+	read: number;
+	/** The `boost version` readiness probe. */
+	version: number;
+	/** `exec()` when the caller passes no timeout of its own. */
+	exec: number;
 }
 
 export interface BoostClientDeps {
@@ -56,6 +79,12 @@ export interface BoostClientDeps {
 	home?: string;
 	/** Injected by tests in place of a real filesystem search. */
 	resolveBinary?: (options: ResolveOptions) => string | undefined;
+	/** Injected by tests to run a Node stand-in; defaults to running the binary directly. */
+	launcher?: Launcher;
+	/** Injected by tests; unset keys keep their defaults. */
+	timeouts?: Partial<BoostTimeouts>;
+	/** Clock in milliseconds for {@link RunResult.ms}; defaults to `performance.now`. */
+	now?: () => number;
 }
 
 export interface BoostClient {
@@ -84,6 +113,8 @@ export interface BoostClient {
 }
 
 interface RunOptions {
+	launcher: Launcher;
+	now: () => number;
 	cwd: string;
 	env: NodeJS.ProcessEnv;
 	timeoutMs: number;
@@ -95,8 +126,10 @@ const EMPTY: RunResult = { code: null, stdout: "" };
 function run(spawnFn: typeof spawn, exe: string, args: string[], options: RunOptions): Promise<RunResult> {
 	return new Promise((resolve) => {
 		let child: ReturnType<typeof spawn>;
+		const started = options.now();
 		try {
-			child = spawnFn(exe, args, {
+			const launch = options.launcher(exe);
+			child = spawnFn(launch.file, [...launch.args, ...args], {
 				cwd: options.cwd,
 				env: options.env,
 				stdio: ["pipe", "pipe", "ignore"],
@@ -119,7 +152,7 @@ function run(spawnFn: typeof spawn, exe: string, args: string[], options: RunOpt
 		};
 		const abandon = () => {
 			child.kill("SIGKILL");
-			finish(EMPTY);
+			finish({ ...EMPTY, ms: options.now() - started });
 		};
 
 		timer = setTimeout(abandon, options.timeoutMs);
@@ -130,8 +163,8 @@ function run(spawnFn: typeof spawn, exe: string, args: string[], options: RunOpt
 			if (bytes > MAX_PAYLOAD_BYTES) return abandon();
 			stdout += chunk;
 		});
-		child.on("error", () => finish(EMPTY));
-		child.on("close", (code) => finish({ code, stdout }));
+		child.on("error", () => finish({ ...EMPTY, ms: options.now() - started }));
+		child.on("close", (code) => finish({ code, stdout, ms: options.now() - started }));
 
 		// A missing executable or an early exit closes stdin before we finish
 		// writing. Without this listener that EPIPE is an unhandled stream
@@ -164,6 +197,10 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 	const platform = deps.platform ?? process.platform;
 	const home = deps.home ?? homedir();
 	const resolve = deps.resolveBinary ?? resolveBoostBinary;
+	const launcher: Launcher = deps.launcher ?? ((exe) => ({ file: exe, args: [] }));
+	const timeouts: BoostTimeouts = { ...DEFAULT_TIMEOUTS, ...deps.timeouts };
+	// Monotonic, so a wall-clock adjustment mid-call cannot produce a negative or huge duration.
+	const now = deps.now ?? (() => performance.now());
 
 	let binary: string | undefined | null = null;
 	let readiness: Promise<boolean> | undefined;
@@ -194,11 +231,13 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		meta: HookMeta,
 		fields: HookPayload,
 		input: string,
-		timeoutMs = HOOK_TIMEOUT_MS,
+		timeoutMs = timeouts.hook,
 	): Promise<RunResult> => {
 		const exe = resolveBinaryOnce();
 		if (!exe || !enabled()) return EMPTY;
 		return run(spawnFn, exe, args, {
+			launcher,
+			now,
 			cwd: meta.cwd,
 			env: childEnv(meta, fields),
 			timeoutMs,
@@ -216,7 +255,8 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		const exe = resolveBinaryOnce();
 		if (!exe || !enabled()) return;
 		try {
-			const child = spawnFn(exe, args, {
+			const launch = launcher(exe);
+			const child = spawnFn(launch.file, [...launch.args, ...args], {
 				cwd: meta.cwd,
 				env: childEnv(meta, fields),
 				stdio: [input === undefined ? "ignore" : "pipe", "ignore", "ignore"],
@@ -245,9 +285,11 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 			const exe = resolveBinaryOnce();
 			if (!exe) return false;
 			const result = await run(spawnFn, exe, ["version"], {
+				launcher,
+				now,
 				cwd: home,
 				env,
-				timeoutMs: VERSION_TIMEOUT_MS,
+				timeoutMs: timeouts.version,
 			});
 			return result.code === 0 && isSupportedVersion(parseBoostVersion(result.stdout));
 		})();
@@ -265,7 +307,7 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		},
 		async read(meta, path) {
 			if (!(await ready())) return undefined;
-			const result = await invoke(["read", path], meta, {}, "", READ_TIMEOUT_MS);
+			const result = await invoke(["read", path], meta, {}, "", timeouts.read);
 			if (result.code !== 0) return undefined;
 			return result.stdout.trim() ? result.stdout : undefined;
 		},
@@ -288,10 +330,10 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		sync(meta) {
 			fireAndForget(["sync"], meta, { hook_event_name: "stop" });
 		},
-		async exec(args, cwd, timeoutMs = SYNC_TIMEOUT_MS) {
+		async exec(args, cwd, timeoutMs = timeouts.exec) {
 			const exe = resolveBinaryOnce();
 			if (!exe) return EMPTY;
-			return run(spawnFn, exe, args, { cwd, env, timeoutMs });
+			return run(spawnFn, exe, args, { launcher, now, cwd, env, timeoutMs });
 		},
 	};
 }

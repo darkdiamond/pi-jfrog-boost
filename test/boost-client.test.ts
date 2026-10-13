@@ -4,71 +4,101 @@
  * one that prints something other than JSON — are process behaviours, and a
  * stub would only prove the stub works.
  *
- * That makes them POSIX-only: the stand-in binaries are `#!/bin/sh` scripts.
- * The logic they cover is platform-independent, so skipping them on Windows
- * loses nothing that the other suites do not already assert.
+ * The stand-in is `test/fixtures/fake-boost.mjs`, run as
+ * `node fake-boost.mjs <args>` through the client's injectable launcher and
+ * scripted per test through `FAKE_BOOST_*` variables. Being Node rather than
+ * `#!/bin/sh`, it runs on Windows too, so this suite runs on every OS in CI.
  */
+import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test as nodeTest, type TestContext } from "node:test";
-import { createBoostClient, isFilterable, MAX_PAYLOAD_BYTES } from "../src/boost-client.ts";
+import { after, test } from "node:test";
+import {
+	type BoostClientDeps,
+	createBoostClient,
+	isFilterable,
+	MAX_PAYLOAD_BYTES,
+} from "../src/boost-client.ts";
 
-const posixOnly =
-	process.platform === "win32" ? { skip: "POSIX-only: uses shell scripts as stand-in binaries" } : {};
-
-const test = (name: string, fn: (t: TestContext) => void | Promise<void>) => nodeTest(name, posixOnly, fn);
+const FAKE = join(import.meta.dirname, "fixtures", "fake-boost.mjs");
+const launcher = (exe: string) => ({ file: process.execPath, args: [exe] });
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
-const VERSION_REPLY = `if [ "$1" = "version" ]; then echo "boost v0.13.24"; exit 0; fi`;
-
-/** Write an executable stand-in for the boost binary and return its path. */
-let created = 0;
-function fakeBoost(body: string): string {
-	const path = join(root, `boost-${created++}`);
-	writeFileSync(path, `#!/bin/sh\n${body}\n`, "utf8");
-	chmodSync(path, 0o755);
-	return path;
+let logs = 0;
+/** A fresh invocation log for one test. */
+function logFile(): string {
+	return join(root, `log-${logs++}.jsonl`);
 }
 
-function clientFor(binary: string | undefined, env: NodeJS.ProcessEnv = {}) {
+interface Invocation {
+	argv: string[];
+	stdin: string | null;
+	cwd: string;
+	env: Record<string, string>;
+}
+
+function invocations(log: string): Invocation[] {
+	if (!existsSync(log)) return [];
+	return readFileSync(log, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as Invocation);
+}
+
+/**
+ * A client whose binary is the Node stand-in, unless `extra.binary` says
+ * otherwise. `env` is both the client's environment and therefore the
+ * child's, which is how each test scripts the stand-in.
+ */
+function clientFor(
+	env: NodeJS.ProcessEnv = {},
+	extra: Partial<BoostClientDeps> & { binary?: string | undefined } = {},
+) {
+	// `in`, not a destructuring default: an explicit `binary: undefined` means
+	// "Boost is not installed" and must not fall back to the stand-in.
+	const { binary: _binary, ...deps } = extra;
+	const binary = "binary" in extra ? extra.binary : FAKE;
 	return createBoostClient({
-		env: { PATH: process.env.PATH ?? "", ...env },
+		env: { PATH: process.env.PATH ?? "", SYSTEMROOT: process.env.SYSTEMROOT, ...env },
 		platform: "linux",
 		home: root,
 		resolveBinary: () => binary,
+		launcher,
+		...deps,
 	});
 }
 
 const meta = { session_id: "s1", cwd: root };
 
 test("the filter returns compacted text", async () => {
-	const binary = fakeBoost(`${VERSION_REPLY}\ncat >/dev/null\necho 'compacted'`);
-	assert.equal(await clientFor(binary).filter(meta, {}, "long\noutput"), "compacted\n");
+	const client = clientFor({ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "compacted\n" });
+	assert.equal(await client.filter(meta, {}, "long\noutput"), "compacted\n");
 });
 
 test("text Boost leaves unchanged is reported as unchanged", async () => {
-	const binary = fakeBoost(`${VERSION_REPLY}\ncat`);
-	assert.equal(await clientFor(binary).filter(meta, {}, "unchanged"), undefined);
+	assert.equal(await clientFor({ FAKE_BOOST_MODE: "echo" }).filter(meta, {}, "unchanged"), undefined);
 });
 
-test("the output actually reaches boost on stdin", async () => {
-	const seen = join(root, "stdin.txt");
-	const binary = fakeBoost(`${VERSION_REPLY}\ncat > ${seen}\necho compacted`);
-	await clientFor(binary).filter(meta, {}, "the original output");
-	assert.equal(readFileSync(seen, "utf8"), "the original output");
+test("the output actually reaches boost on stdin, with no arguments", async () => {
+	const log = logFile();
+	const client = clientFor({ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "c", FAKE_BOOST_LOG: log });
+	await client.filter(meta, {}, "the original output");
+	const filter = invocations(log).find((call) => call.argv[0] !== "version");
+	assert.deepEqual(filter?.argv, []);
+	assert.equal(filter?.stdin, "the original output");
 });
 
 test("BOOST_HOOK_META identifies the session as pi, which is how Boost attributes it", async () => {
-	const seen = join(root, "meta.json");
-	const binary = fakeBoost(
-		`${VERSION_REPLY}\ncat >/dev/null\nprintf '%s' "$BOOST_HOOK_META" > ${seen}\necho compacted`,
-	);
-	await clientFor(binary).filter({ ...meta, tool_use_id: "call-7" }, { command: "ls" }, "output");
-	const parsed = JSON.parse(readFileSync(seen, "utf8"));
+	const log = logFile();
+	const client = clientFor({ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "c", FAKE_BOOST_LOG: log });
+	await client.filter({ ...meta, tool_use_id: "call-7" }, { command: "ls" }, "output");
+	const filter = invocations(log).find((call) => call.argv[0] !== "version");
+	assert.equal(filter?.env.BOOST_AGENT_TYPE, "pi");
+	const parsed = JSON.parse(filter?.env.BOOST_HOOK_META ?? "{}");
 	assert.equal(parsed.agent_type, "pi");
 	assert.equal(parsed.session_id, "s1");
 	assert.equal(parsed.tool_use_id, "call-7");
@@ -78,81 +108,132 @@ test("BOOST_HOOK_META identifies the session as pi, which is how Boost attribute
 test("a boost that exits before reading stdin does not crash the process", async () => {
 	// Reproduces the EPIPE on child.stdin that an unguarded `end()` turns into
 	// an unhandled stream error, which would take pi down with it.
-	const binary = fakeBoost(`${VERSION_REPLY}\nexit 0`);
-	assert.equal(await clientFor(binary).filter(meta, {}, "x".repeat(2 * 1024 * 1024)), undefined);
+	const client = clientFor({ FAKE_BOOST_NO_STDIN: "1" });
+	assert.equal(await client.filter(meta, {}, "x".repeat(2 * 1024 * 1024)), undefined);
 });
 
 test("a non-zero exit is a pass-through, not an error", async () => {
-	const binary = fakeBoost(`${VERSION_REPLY}\ncat >/dev/null\necho compacted\nexit 3`);
-	assert.equal(await clientFor(binary).filter(meta, {}, "output"), undefined);
+	const client = clientFor({
+		FAKE_BOOST_MODE: "compact-to",
+		FAKE_BOOST_OUTPUT: "compacted",
+		FAKE_BOOST_EXIT: "3",
+	});
+	assert.equal(await client.filter(meta, {}, "output"), undefined);
+});
+
+test("a hung boost is abandoned at the timeout and the original kept", async () => {
+	const client = clientFor({ FAKE_BOOST_MODE: "hang" }, { timeouts: { hook: 300 } });
+	const started = Date.now();
+	assert.equal(await client.filter(meta, {}, "output"), undefined);
+	// Generous bound: node start-up on a loaded Windows runner is slow, but a
+	// hang that is never killed would hold this test until the runner's timeout.
+	assert.ok(Date.now() - started < 5_000, "the hung child was not abandoned");
+});
+
+test("a slow boost inside its timeout still counts", async () => {
+	const client = clientFor(
+		{ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "compacted", FAKE_BOOST_SLEEP_MS: "200" },
+		{ timeouts: { hook: 10_000 } },
+	);
+	assert.equal(await client.filter(meta, {}, "output"), "compacted");
+});
+
+test("a reply over the payload ceiling is abandoned as a malfunction", async () => {
+	const client = clientFor({
+		FAKE_BOOST_MODE: "huge-output",
+		FAKE_BOOST_BYTES: String(MAX_PAYLOAD_BYTES + 1024),
+	});
+	assert.equal(await client.filter(meta, {}, "output"), undefined);
 });
 
 test("boost read returns extracted text, and nothing when there is none", async () => {
-	const extracting = fakeBoost(`${VERSION_REPLY}\nif [ "$1" = "read" ]; then echo "# Heading"; fi`);
-	assert.equal(await clientFor(extracting).read(meta, "/a/report.pdf"), "# Heading\n");
+	const log = logFile();
+	const extracting = clientFor({ FAKE_BOOST_OUTPUT: "# Heading\n", FAKE_BOOST_LOG: log });
+	assert.equal(await extracting.read(meta, "/a/report.pdf"), "# Heading\n");
+	assert.deepEqual(invocations(log).at(-1)?.argv, ["read", "/a/report.pdf"]);
 
-	const empty = fakeBoost(`${VERSION_REPLY}\nprintf '   '`);
-	assert.equal(await clientFor(empty).read(meta, "/a/report.pdf"), undefined);
+	assert.equal(await clientFor({ FAKE_BOOST_OUTPUT: "   " }).read(meta, "/a/report.pdf"), undefined);
+	assert.equal(await clientFor({ FAKE_BOOST_EXIT: "1" }).read(meta, "/a/report.pdf"), undefined);
+});
 
-	const failing = fakeBoost(`${VERSION_REPLY}\nexit 1`);
-	assert.equal(await clientFor(failing).read(meta, "/a/report.pdf"), undefined);
+test("Boost's legacy-Office advisory (exit 1) is a pass-through", async () => {
+	const client = clientFor({ FAKE_BOOST_MODE: "read-advisory" });
+	assert.equal(await client.read(meta, "/a/old.doc"), undefined);
 });
 
 test("a Boost older than the documented protocol is never called", async () => {
-	const probed = join(root, "probed.txt");
-	const binary = fakeBoost(
-		`echo "$1" >> ${probed}\nif [ "$1" = "version" ]; then echo "boost v0.13.12"; exit 0; fi\ncat >/dev/null\necho compacted`,
-	);
-	const client = clientFor(binary);
+	const log = logFile();
+	const client = clientFor({
+		FAKE_BOOST_VERSION: "boost v0.13.12",
+		FAKE_BOOST_MODE: "compact-to",
+		FAKE_BOOST_OUTPUT: "compacted",
+		FAKE_BOOST_LOG: log,
+	});
 	assert.equal(await client.filter(meta, {}, "output"), undefined);
 	assert.equal(await client.read(meta, "/a.pdf"), undefined);
-	assert.equal(readFileSync(probed, "utf8").trim(), "version");
+	assert.deepEqual(
+		invocations(log).map((call) => call.argv),
+		[["version"]],
+	);
+});
+
+test("a Boost whose version cannot be read is never called", async () => {
+	const client = clientFor({ FAKE_BOOST_VERSION: "none", FAKE_BOOST_MODE: "compact-to" });
+	assert.equal(await client.ready(), false);
 });
 
 test("the version probe runs once, however many calls follow", async () => {
-	const probed = join(root, "probe-count.txt");
-	const binary = fakeBoost(
-		`if [ "$1" = "version" ]; then echo x >> ${probed}; echo "boost v0.13.24"; exit 0; fi\ncat >/dev/null\necho compacted`,
-	);
-	const client = clientFor(binary);
+	const log = logFile();
+	const client = clientFor({ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "c", FAKE_BOOST_LOG: log });
 	await Promise.all([
 		client.filter(meta, {}, "a"),
 		client.filter(meta, {}, "b"),
 		client.filter(meta, {}, "c"),
 	]);
-	assert.equal(readFileSync(probed, "utf8").trim().split("\n").length, 1);
+	const calls = invocations(log);
+	assert.equal(calls.filter((call) => call.argv[0] === "version").length, 1);
+	assert.equal(calls.filter((call) => call.argv[0] !== "version").length, 3);
 });
 
 test("DISABLE_BOOST=1 stops every call without touching the binary", async () => {
-	const ran = join(root, "should-not-exist.txt");
-	const binary = fakeBoost(`touch ${ran}\necho compacted`);
-	const client = clientFor(binary, { DISABLE_BOOST: "1", PI_BOOST_OBSERVE: "1" });
+	const log = logFile();
+	const client = clientFor({ DISABLE_BOOST: "1", PI_BOOST_OBSERVE: "1", FAKE_BOOST_LOG: log });
 	assert.equal(client.enabled(), false);
 	assert.equal(client.observeEnabled(), false);
 	assert.equal(await client.filter(meta, {}, "output"), undefined);
 	assert.equal(await client.read(meta, "/a.pdf"), undefined);
 	client.observeDetached(meta, {});
 	client.sync(meta);
-	assert.equal(existsSync(ran), false);
+	assert.deepEqual(invocations(log), []);
 });
 
 test("lifecycle telemetry is off unless the user opts in", async () => {
-	const ran = join(root, "observe-ran.txt");
-	const binary = fakeBoost(`${VERSION_REPLY}\ntouch ${ran}\ncat >/dev/null\necho '{}'`);
-
-	const off = clientFor(binary);
+	const log = logFile();
+	const off = clientFor({ FAKE_BOOST_MODE: "hook-reply", FAKE_BOOST_LOG: log });
 	assert.equal(off.observeEnabled(), false);
 	assert.equal(await off.observe(meta, {}), undefined);
 	off.observeDetached(meta, {});
-	assert.equal(existsSync(ran), false);
+	assert.deepEqual(
+		invocations(log).filter((call) => call.argv[0] === "hook"),
+		[],
+	);
 
-	const on = clientFor(binary, { PI_BOOST_OBSERVE: "1" });
+	const on = clientFor({ PI_BOOST_OBSERVE: "1", FAKE_BOOST_MODE: "hook-reply", FAKE_BOOST_REPLY: "{}" });
 	assert.equal(on.observeEnabled(), true);
 	assert.deepEqual(await on.observe(meta, { hook_event_name: "sessionStart" }), {});
 });
 
+test("a hook reply that is not JSON is ignored", async () => {
+	const client = clientFor({
+		PI_BOOST_OBSERVE: "1",
+		FAKE_BOOST_MODE: "hook-reply",
+		FAKE_BOOST_REPLY: "nope",
+	});
+	assert.equal(await client.observe(meta, { hook_event_name: "sessionStart" }), undefined);
+});
+
 test("with Boost not installed everything is a no-op", async () => {
-	const client = clientFor(undefined, { PI_BOOST_OBSERVE: "1" });
+	const client = clientFor({ PI_BOOST_OBSERVE: "1" }, { binary: undefined });
 	assert.equal(client.binary(), undefined);
 	assert.equal(await client.ready(), false);
 	assert.equal(await client.filter(meta, {}, "output"), undefined);
@@ -160,22 +241,68 @@ test("with Boost not installed everything is a no-op", async () => {
 	assert.equal(await client.observe(meta, {}), undefined);
 	client.observeDetached(meta, {});
 	client.sync(meta);
+	assert.deepEqual(await client.exec(["version"], root), { code: null, stdout: "" });
 });
 
 test("refresh re-resolves the binary after an install", async () => {
 	let binary: string | undefined;
 	const client = createBoostClient({
-		env: { PATH: "" },
+		env: { PATH: "", FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "compacted\n" },
 		platform: "linux",
 		home: root,
 		resolveBinary: () => binary,
+		launcher,
 	});
 	assert.equal(client.binary(), undefined);
-	binary = fakeBoost(`${VERSION_REPLY}\ncat >/dev/null\necho compacted`);
+	binary = FAKE;
 	assert.equal(client.binary(), undefined, "resolution is cached until refresh");
 	client.refresh();
 	assert.equal(client.binary(), binary);
 	assert.equal(await client.filter(meta, {}, "output"), "compacted\n");
+});
+
+test("the launcher decides how the resolved binary is started", async () => {
+	const seen: string[] = [];
+	const client = clientFor(
+		{ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "compacted" },
+		{
+			launcher: (exe) => {
+				seen.push(exe);
+				return { file: process.execPath, args: [exe] };
+			},
+		},
+	);
+	assert.equal(await client.filter(meta, {}, "output"), "compacted");
+	assert.deepEqual(seen, [FAKE, FAKE], "once for the version probe, once for the filter");
+});
+
+test("a launcher that throws fails open", async () => {
+	const client = clientFor(
+		{},
+		{
+			launcher: () => {
+				throw new Error("no such interpreter");
+			},
+		},
+	);
+	assert.equal(await client.ready(), false);
+	assert.deepEqual(await client.exec(["version"], root), { code: null, stdout: "" });
+});
+
+test("exec reports the exit code, stdout and the injected clock's elapsed time", async () => {
+	let tick = 1_000;
+	const client = clientFor({}, { now: () => (tick += 250) });
+	const result = await client.exec(["version"], root);
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout, "boost v0.15.4\n");
+	assert.equal(result.ms, 250);
+});
+
+test("exec honours its timeout", async () => {
+	const client = clientFor({ FAKE_BOOST_MODE: "hang" }, { timeouts: { exec: 300 } });
+	const result = await client.exec(["doctor"], root);
+	assert.equal(result.code, null);
+	assert.equal(result.stdout, "");
 });
 
 test("isFilterable rejects empty, binary, and oversized text", () => {
@@ -187,8 +314,8 @@ test("isFilterable rejects empty, binary, and oversized text", () => {
 });
 
 test("oversized output is passed through instead of piped to Boost", async () => {
-	const ran = join(root, "filter-ran.txt");
-	const binary = fakeBoost(`${VERSION_REPLY}\ntouch ${ran}\ncat >/dev/null\necho compacted`);
-	assert.equal(await clientFor(binary).filter(meta, {}, "x".repeat(MAX_PAYLOAD_BYTES + 1)), undefined);
-	assert.equal(existsSync(ran), false);
+	const log = logFile();
+	const client = clientFor({ FAKE_BOOST_MODE: "compact-to", FAKE_BOOST_OUTPUT: "c", FAKE_BOOST_LOG: log });
+	assert.equal(await client.filter(meta, {}, "x".repeat(MAX_PAYLOAD_BYTES + 1)), undefined);
+	assert.deepEqual(invocations(log), []);
 });
