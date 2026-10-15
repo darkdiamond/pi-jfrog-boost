@@ -396,12 +396,29 @@ export function createBoostCommand(host: CommandHost) {
 	}
 
 	async function settingsLoop(ctx: ExtensionCommandContext, args: string[]): Promise<void> {
+		const arg = args[0];
+		// "reset" is the only argument; anything else is named, not silently
+		// taken as a plain "/boost settings".
+		const unknownArg =
+			arg !== undefined && arg !== "reset"
+				? `Unknown /boost settings argument "${arg}"; the only one is reset.`
+				: undefined;
 		if (!ctx.hasUI) {
+			// The reset asks for confirmation, so without a UI it is not done;
+			// say so before the listing rather than let it read as done.
+			if (arg === "reset") {
+				say(
+					ctx,
+					`Not reset: /boost settings reset asks for confirmation and needs pi's interactive UI. Delete or edit ${host.settings.path()} to reset.`,
+					"warning",
+				);
+			} else if (unknownArg) say(ctx, unknownArg, "warning");
 			say(ctx, settingsListing(host.settings));
 			return;
 		}
+		if (unknownArg) say(ctx, unknownArg, "warning");
 		let saved = false;
-		if (args[0] === "reset") {
+		if (arg === "reset") {
 			if (await reset(ctx)) say(ctx, `Settings saved to ${host.settings.path()}`);
 			return;
 		}

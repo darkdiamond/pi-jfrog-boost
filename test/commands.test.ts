@@ -523,6 +523,30 @@ test("settings without a UI print the effective values and their sources", async
 	assert.equal(s.rec.ops.filter((op) => op.startsWith("write")).length, 0, "printing saves nothing");
 });
 
+test("settings reset without a UI says it was not done and leaves the file alone", async () => {
+	const s = setup({ file: { shell: "off" } });
+	await s.run("settings reset", s.noUi());
+	assert.equal(
+		s.printed[0],
+		`Not reset: /boost settings reset asks for confirmation and needs pi's interactive UI. Delete or edit ${SETTINGS} to reset.`,
+	);
+	assert.match(s.printed[1] ?? "", /shell\s+"off"\s+\(file\)/);
+	assert.equal(s.rec.file().shell, "off");
+	assert.equal(s.rec.ops.filter((op) => op.startsWith("write")).length, 0, "nothing saved");
+});
+
+test("an unknown settings argument is named, with or without a UI", async () => {
+	const s = setup();
+	await s.run("settings rest", s.noUi());
+	assert.equal(s.printed[0], 'Unknown /boost settings argument "rest"; the only one is reset.');
+	assert.match(s.printed[1] ?? "", /^pi-jfrog-boost settings/);
+
+	const ui = setup({ ui: { select: [undefined] } });
+	await ui.run("settings rest");
+	assert.ok(ui.notices().includes('Unknown /boost settings argument "rest"; the only one is reset.'));
+	assert.equal(ui.stub.ui.selects.length, 1, "the settings list still opens");
+});
+
 test("a settings file that cannot be parsed is not overwritten by a save", async () => {
 	const s = setup({ ui: { select: ["Enabled: on", "Done"] } });
 	s.rec.files.set(SETTINGS, "{ not json");
