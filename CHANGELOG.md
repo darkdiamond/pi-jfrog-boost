@@ -101,6 +101,10 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 - MCP compaction: `mcp__*` results go through Boost's MCP filters (Slack,
   GitHub, browser snapshots and more), keeping images and
   `structuredContent`. `mcpExclude` keeps chosen servers away from Boost.
+  On pi 1.x this applies only to tools the model calls directly
+  (`"exposure": "direct"` or `"deferred"`); under pi's default `codemode`
+  exposure the calls are nested and their output is left alone. The README
+  says how to set it.
 - Full-output re-filter: when pi truncated `bash` output, Boost filters pi's
   full output file, so early failures in a long run reach the model.
 - Notebook conversion for whole reads of `.ipynb` files of 16 KiB or more

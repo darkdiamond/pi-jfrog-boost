@@ -10,7 +10,8 @@ you Boost's shorter version. The `jfrog-boost` section of your system prompt say
 what is active in this session. At most:
 
 - `bash` / `powershell` output, when Boost's shell filtering is on;
-- MCP tool results (`mcp__<server>__<tool>`), when Boost has a filter for the tool;
+- MCP tool results (`mcp__<server>__<tool>`) you call directly, when Boost has a
+  filter for the tool (calls made from inside `codemode` are never changed);
 - `read` of PDF, Word, Excel, PowerPoint and OpenDocument files, and of large
   notebooks read whole, which arrive as converted text.
 

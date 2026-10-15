@@ -35,7 +35,7 @@ gives the model Boost's shorter version. Measured on Boost v0.15.4, 2026-10-13:
 | `node --test` spec reporter | 10,335 B | 3,927 B |
 | Jupyter notebook, read whole | 120,366 B | 5,718 B |
 | PDF (3 pages) | binary | 4,529 B text |
-| Slack MCP user list | 19,063 B | 8,237 B |
+| Slack MCP user list | 19,058 B | 10,438 B |
 | Playwright MCP browser snapshot | 209,690 B | 3,939 B |
 
 Left alone, because Boost has nothing to take out or because it must stay exact:
@@ -116,7 +116,7 @@ PATH, the model is given its full path.
 | `read` of a `.ipynb` of 16 KiB or more, whole | Converted to Markdown. A read with `offset=1` returns the raw JSON. |
 | `read` of legacy `.doc .xls .ppt` | Boost cannot convert these; the model gets a clear error asking for a modern or text export, instead of binary noise. |
 | `read` of `*.log` / `*.out`, whole | Compacted only if you turn on `readLogs` (off by default: a generic log can trip the wrong filter). |
-| `mcp__<server>__<tool>` results | Compacted by Boost's MCP filters (Slack, GitHub, GitLab, Atlassian, Linear, Notion, Sentry, browser snapshots and more). Images and `structuredContent` are kept. |
+| `mcp__<server>__<tool>` results | Compacted by Boost's MCP filters (Slack, GitHub, GitLab, Atlassian, Linear, Notion, Sentry, browser snapshots and more) **when the model calls the tool directly**: on pi 1.x that means `"exposure": "direct"` or `"deferred"` (see [MCP exposure](#mcp-exposure)). Images and `structuredContent` are kept. |
 | everything else | Never touched. |
 
 **Never changed:** `read` of text files (source, JSON, Markdown, HTML, CSV,
@@ -127,6 +127,32 @@ changed: output under 2 KiB, HTML pages printed by anything but a web fetch
 (`curl`, `wget`, …), commands that run `boost` themselves, commands prefixed
 with `DISABLE_BOOST=1`, a reply that saves less than 256 bytes or 5%, and tool
 calls made from inside another tool (codemode).
+
+### MCP exposure
+
+pi 1.x gives an MCP server `"exposure": "codemode"` by default. Its tools are
+then not declared to the model and are only called from inside a `codemode`
+script, and those nested calls are never changed (see above). The script's
+result reaches the model as it is, so **with the default exposure no MCP
+output is compacted**. To have Boost compact a server's results, let the model
+call its tools directly, in `~/.pi/agent/mcp.json` or `.pi/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "command": "npx",
+      "args": ["-y", "<your-slack-mcp-server>"],
+      "exposure": "direct"
+    }
+  }
+}
+```
+
+`"deferred"` works too (the model calls the tool after `tool_search` loads
+it), and `toolExposure` sets it for single tools, e.g.
+`"toolExposure": { "browser_snapshot": "direct" }`. `/mcp` in pi changes
+exposure interactively.
 
 The extension also adds a short `jfrog-boost` section to the system prompt,
 naming only what is active this session and how to recover dropped detail,
@@ -282,6 +308,9 @@ binary on that pi version, Node version and OS (22 of 22 on pi 1.2.0; 21 of 22 o
 has no nested tool calls to test). Some features depend on the versions:
 
 - **MCP** needs pi ≥ 0.99 (built-in MCP) and Boost ≥ 0.15.3 (MCP filters).
+  On pi 1.x only tools with `direct` or `deferred` exposure are compacted;
+  the default `codemode` exposure leaves MCP output untouched (see
+  [MCP exposure](#mcp-exposure)).
 - **Badges** need pi ≥ 1.0.1 (`registerToolRenderer`).
 - **Documents** need the Preview Agreement accepted.
 
