@@ -56,10 +56,11 @@ class TomlError extends Error {}
 /**
  * Parse the TOML subset described above. Statements that fail to parse are
  * skipped to the end of their line; the rest of the document still parses.
+ * A leading UTF-8 byte order mark is skipped, as Boost's Go decoder does.
  */
 export function parseToml(text: string): TomlDocument {
 	const doc: TomlDocument = new Map();
-	let pos = 0;
+	let pos = text.charCodeAt(0) === 0xfeff ? 1 : 0;
 	let section: string[] = [];
 
 	const peek = (offset = 0) => text[pos + offset] ?? "";

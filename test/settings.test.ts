@@ -4,9 +4,20 @@
  * schema staying in step with the code.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { after, test } from "node:test";
 import {
 	agentDir,
@@ -17,6 +28,8 @@ import {
 	flagIsOn,
 	parseEnvBoolean,
 	parseSettings,
+	restoreSessionToggle,
+	SESSION_TOGGLE_ENTRY,
 	SETTINGS_KEYS,
 	SETTINGS_SCHEMA_URL,
 	settingsPath,
@@ -38,6 +51,51 @@ test("the file is $PI_JFROG_BOOST_SETTINGS, else <agentDir>/jfrog-boost.json", (
 		settingsPath({ PI_JFROG_BOOST_SETTINGS: "~/boost.json", PI_CODING_AGENT_DIR: "/x" }, home),
 		join(home, "boost.json"),
 	);
+});
+
+test("configured paths are normalised as pi's getAgentDir() does: Windows shell drives, file:// URLs", () => {
+	const winHome = "C:\\Users\\me";
+	for (const dir of [
+		"/c/Users/me/.pi-agent",
+		"/mnt/c/Users/me/.pi-agent",
+		"/cygdrive/c/Users/me/.pi-agent",
+	]) {
+		assert.equal(agentDir({ PI_CODING_AGENT_DIR: dir }, winHome, "win32"), "C:\\Users\\me\\.pi-agent", dir);
+	}
+	assert.equal(
+		settingsPath({ PI_CODING_AGENT_DIR: "/c/Users/me/.pi-agent" }, winHome, "win32"),
+		win32.join("C:\\Users\\me\\.pi-agent", "jfrog-boost.json"),
+	);
+	assert.equal(
+		settingsPath({ PI_JFROG_BOOST_SETTINGS: "/d/dotfiles/boost.json" }, winHome, "win32"),
+		"D:\\dotfiles\\boost.json",
+	);
+	assert.equal(agentDir({ PI_CODING_AGENT_DIR: "~\\agent" }, winHome, "win32"), "C:\\Users\\me\\agent");
+	assert.equal(agentDir({ PI_CODING_AGENT_DIR: "file:///C:/pi/agent" }, winHome, "win32"), "C:\\pi\\agent");
+	assert.equal(agentDir({ PI_CODING_AGENT_DIR: "//server/share/pi" }, winHome, "win32"), "//server/share/pi");
+	// Elsewhere a drive-like path is just a path; a file:// URL is still one.
+	assert.equal(agentDir({ PI_CODING_AGENT_DIR: "/c/agents" }, home, "linux"), "/c/agents");
+	assert.equal(agentDir({ PI_CODING_AGENT_DIR: "file:///opt/pi%20agent" }, home, "linux"), "/opt/pi agent");
+	assert.equal(
+		settingsPath({ PI_JFROG_BOOST_SETTINGS: "file:///etc/boost.json" }, home, "darwin"),
+		"/etc/boost.json",
+	);
+});
+
+test("a UTF-8 byte order mark does not make the file unreadable", () => {
+	const path = "/fake/home/.pi/agent/jfrog-boost.json";
+	const fs = memoryFs(new Map([[path, '\ufeff{"sync":false,"mcp":false}']]));
+	const store = createSettingsStore({ env: {}, home: () => "/fake/home", fs });
+	assert.deepEqual(store.load(), [], "no 'could not read' warning");
+	assert.equal(store.effective().sync, false, "the privacy opt-outs apply");
+	assert.equal(store.effective().mcp, false);
+	store.save({ footer: false });
+	assert.deepEqual(JSON.parse(fs.files.get(path) ?? "{}"), {
+		$schema: SETTINGS_SCHEMA_URL,
+		sync: false,
+		mcp: false,
+		footer: false,
+	});
 });
 
 test("no file: every default", () => {
@@ -217,6 +275,29 @@ test("save is atomic, keeps unknown keys and the $schema, and rejects invalid va
 	assert.equal(JSON.parse(readFileSync(path, "utf8")).minBytes, 4096, "nothing written for an invalid save");
 });
 
+test("save writes through a symlinked file and keeps its permission bits", () => {
+	const dotfiles = join(root, "dotfiles");
+	const agent = join(root, "linked-agent");
+	mkdirSync(dotfiles, { recursive: true });
+	mkdirSync(agent, { recursive: true });
+	const real = join(dotfiles, "jfrog-boost.json");
+	const link = join(agent, "jfrog-boost.json");
+	writeFileSync(real, JSON.stringify({ shell: "off" }), { mode: 0o600 });
+	symlinkSync(real, link);
+	const store = createSettingsStore({ env: { PI_JFROG_BOOST_SETTINGS: link }, home: () => home });
+	store.load();
+	store.save({ footer: false });
+	assert.ok(lstatSync(link).isSymbolicLink(), "the link is still a link");
+	assert.deepEqual(JSON.parse(readFileSync(real, "utf8")), {
+		$schema: SETTINGS_SCHEMA_URL,
+		shell: "off",
+		footer: false,
+	});
+	assert.equal(statSync(real).mode & 0o777, 0o600, "a 0600 file stays 0600");
+	assert.deepEqual(readdirSync(dotfiles), ["jfrog-boost.json"], "no temp file left behind");
+	assert.deepEqual(readdirSync(agent), ["jfrog-boost.json"]);
+});
+
 test("save refuses to overwrite a file it cannot parse, and leaves it untouched", () => {
 	const path = join(root, "broken", "jfrog-boost.json");
 	const broken = '{ "shell": "on", "minBytes": 4096, }';
@@ -263,4 +344,40 @@ test("settings.schema.json mirrors the settings: same keys, same defaults", () =
 	assert.deepEqual(schema.properties.shell?.enum, ["auto", "on", "off"]);
 	// Every default passes the code's own validation.
 	assert.deepEqual(parseSettings({ ...DEFAULT_SETTINGS }).invalid, []);
+});
+
+test("the session toggle is restored from the branch's last entry", () => {
+	const toggle = (enabled: unknown) => ({
+		type: "custom",
+		customType: SESSION_TOGGLE_ENTRY,
+		data: { enabled },
+	});
+	assert.equal(restoreSessionToggle(undefined), undefined);
+	assert.equal(restoreSessionToggle({ getBranch: () => [] }), undefined, "a new session has none");
+	assert.equal(restoreSessionToggle({ getBranch: () => [toggle(false), { type: "message" }] }), false);
+	assert.equal(
+		restoreSessionToggle({ getBranch: () => [toggle(false), toggle(true)] }),
+		true,
+		"the last wins",
+	);
+	assert.equal(
+		restoreSessionToggle({ getBranch: () => [toggle(false), toggle("no")] }),
+		false,
+		"junk skipped",
+	);
+	assert.equal(
+		restoreSessionToggle({ getBranch: () => [], getEntries: () => [toggle(false)] }),
+		undefined,
+		"a sibling branch's toggle does not leak in",
+	);
+	assert.equal(
+		restoreSessionToggle({
+			getBranch: () => {
+				throw new Error("stale");
+			},
+			getEntries: () => [toggle(false)],
+		}),
+		false,
+		"entries only when the branch cannot be read",
+	);
 });

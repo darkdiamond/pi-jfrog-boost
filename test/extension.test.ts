@@ -28,6 +28,7 @@ import {
 	TERMS_NOTICE,
 } from "../src/index.ts";
 import type { SettingsStore } from "../src/settings.ts";
+import { SESSION_TOGGLE_ENTRY } from "../src/settings.ts";
 import { STATS_ENTRY, type StatsSnapshot } from "../src/stats.ts";
 import {
 	filtersDisabledNotice,
@@ -1858,4 +1859,38 @@ test("an idle extension writes no stats entry: Boost off, missing, or a nested c
 	await working.stub.emitToolResult(bash());
 	await settle(working.stub);
 	assert.equal(statsEntries(working.stub).length, 1);
+});
+
+test("/boost off survives a reload, resume and fork of the session; a new session starts clean", async () => {
+	const first = uiExtension();
+	await start(first.stub);
+	await first.stub.command("boost", "off");
+	assert.equal(first.statusTexts().at(-1), "boost: off");
+	const toggles = first.stub.appended.filter((a) => a.customType === SESSION_TOGGLE_ENTRY);
+	assert.deepEqual(
+		toggles.map((a) => a.data),
+		[{ enabled: false }],
+	);
+	const branch = [
+		{ type: "message", id: "m1" },
+		...toggles.map((a, i) => ({ type: "custom", id: `t${i}`, customType: a.customType, data: a.data })),
+	];
+
+	for (const reason of ["reload", "resume", "fork"]) {
+		// pi rebuilds the extension, settings store and all, for each of these.
+		const again = uiExtension({ branch });
+		await start(again.stub, reason);
+		assert.equal(again.statusTexts().at(-1), "boost: off", reason);
+		assert.deepEqual(again.settings.off(), { by: "session" }, reason);
+		const patch = await again.stub.emitToolResult(failingBash("1.2"));
+		assert.equal(patch, undefined, `${reason}: nothing reaches Boost`);
+	}
+
+	// Same process, same store: a new session clears the previous toggle.
+	await start(first.stub, "new");
+	assert.equal(first.settings.off(), undefined, "a new session has no toggle on its branch");
+
+	const fresh = uiExtension({ branch: [], entries: branch });
+	await start(fresh.stub, "new");
+	assert.equal(fresh.statusTexts().at(-1), "boost ✓");
 });

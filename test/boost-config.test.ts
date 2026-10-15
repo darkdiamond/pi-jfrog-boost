@@ -37,6 +37,14 @@ test("a v0.15.4 config: terms, metadata, remote flags, measurement", () => {
 	assert.equal(config.boostOffSessions, false);
 });
 
+test("a UTF-8 byte order mark before the first key is skipped, as Boost's Go decoder does", () => {
+	assert.equal(parseBoostConfig('\ufeffaccept_terms = "yes"\n').termsAccepted, true);
+	assert.equal(
+		parseBoostConfig(`\ufeff${fixture("v0.15.4.toml")}`).flagsUpdatedAt,
+		"2026-10-13T05:06:56.458022Z",
+	);
+});
+
 test("a fresh install has no metadata and no terms", () => {
 	const config = parseBoostConfig(fixture("no-metadata.toml"));
 	assert.equal(config.termsAccepted, false);

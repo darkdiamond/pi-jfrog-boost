@@ -88,7 +88,13 @@ import { compactMcpResult, isMcpTool } from "./mcp.ts";
 import { createObserver } from "./observe.ts";
 import { registerBadges } from "./render.ts";
 import { htmlAllowed, route } from "./router.ts";
-import { createSettingsStore, excludedBy, type SettingsStore } from "./settings.ts";
+import {
+	createSettingsStore,
+	excludedBy,
+	restoreSessionToggle,
+	SESSION_TOGGLE_ENTRY,
+	type SettingsStore,
+} from "./settings.ts";
 import {
 	type Compaction,
 	compactFullOutput,
@@ -409,6 +415,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			stats.restore(restoreSnapshot(ctx.sessionManager));
 		} catch {
 			stats.restore();
+		}
+		// `/boost off` is for the session, and pi rebuilds this extension for
+		// `/reload`, `/resume` and `/fork`: the branch says whether it was used.
+		// A new session has none, so a toggle from the one before is cleared.
+		try {
+			settings.setSession(restoreSessionToggle(ctx.sessionManager));
+		} catch {
+			settings.setSession(undefined);
 		}
 		try {
 			pendingWarnings.push(...settings.load());
@@ -1008,6 +1022,13 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		},
 		setSession(enabled) {
 			settings.setSession(enabled);
+			// Persisted so a rebuilt runtime (`/reload`, `/resume`, `/fork`)
+			// keeps it; the in-memory toggle above holds either way.
+			try {
+				if (typeof pi.appendEntry === "function") pi.appendEntry(SESSION_TOGGLE_ENTRY, { enabled });
+			} catch {
+				/* fail open: this runtime still has the toggle */
+			}
 			if (enabled) {
 				// `/boost on` is also how a user un-pauses Boost (§8.2), and a
 				// session that started off never probed: start one, not awaited.

@@ -4,7 +4,8 @@
  *
  * The file is `$PI_JFROG_BOOST_SETTINGS`, or `<agentDir>/jfrog-boost.json`
  * where agentDir mirrors pi's `getAgentDir()` (`$PI_CODING_AGENT_DIR`, else
- * `~/.pi/agent`) without importing a value from pi. It is deliberately
+ * `~/.pi/agent`, normalised as pi's `normalizePath` does) without importing
+ * a value from pi. It is deliberately
  * global only: a repository must not be able to change what leaves the
  * machine (sync, observe, MCP bodies) or point the extension at a binary.
  * `pi.getSettings()` is not used — it is missing on 0.86.1 and read-only.
@@ -21,9 +22,10 @@
  *   5. the file
  *   6. defaults
  */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, posix, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const SETTINGS_SCHEMA_URL =
 	"https://raw.githubusercontent.com/darkdiamond/pi-jfrog-boost/main/settings.schema.json";
@@ -118,22 +120,58 @@ export function isValidSetting<K extends SettingsKey>(key: K, value: unknown): v
 // ---------------------------------------------------------------------------
 // Paths
 
-function expandTilde(path: string, home: string): string {
+/**
+ * Git Bash, MSYS, Cygwin and WSL drive paths (`/c/Users/me`, `/mnt/c/…`,
+ * `/cygdrive/c/…`) as native Windows paths, as pi's
+ * `normalizeWindowsShellPath` does; anything else unchanged.
+ */
+function windowsShellPath(path: string): string {
+	if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return path;
+	const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+	if (!match) return path;
+	return `${(match[1] ?? "").toUpperCase()}:\\${match[2]?.replaceAll("/", "\\") ?? ""}`;
+}
+
+/**
+ * A configured path normalised the way pi 1.2's `normalizePath` treats
+ * `$PI_CODING_AGENT_DIR` (shell drive paths on Windows, `~`, `file://`), so
+ * this reads and saves the file in the directory pi itself uses.
+ */
+function normalizeConfiguredPath(input: string, home: string, platform: NodeJS.Platform): string {
+	const windows = platform === "win32";
+	const path = windows ? windowsShellPath(input) : input;
 	if (path === "~") return home;
-	if (path.startsWith("~/") || path.startsWith("~\\")) return join(home, path.slice(2));
+	if (path.startsWith("~/") || path.startsWith("~\\")) return joinFor(platform)(home, path.slice(2));
+	if (path.startsWith("file://")) return fileURLToPath(path, { windows });
 	return path;
 }
 
+function joinFor(platform: NodeJS.Platform): (...parts: string[]) => string {
+	return platform === "win32" ? win32.join : posix.join;
+}
+
 /** pi's agent directory, as `getAgentDir()` computes it. */
-export function agentDir(env: NodeJS.ProcessEnv, home: string): string {
+export function agentDir(
+	env: NodeJS.ProcessEnv,
+	home: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
 	const configured = env.PI_CODING_AGENT_DIR;
-	return configured ? expandTilde(configured, home) : join(home, ".pi", "agent");
+	return configured
+		? normalizeConfiguredPath(configured, home, platform)
+		: joinFor(platform)(home, ".pi", "agent");
 }
 
 /** Where the settings file is read from and saved to. */
-export function settingsPath(env: NodeJS.ProcessEnv, home: string): string {
+export function settingsPath(
+	env: NodeJS.ProcessEnv,
+	home: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
 	const explicit = env.PI_JFROG_BOOST_SETTINGS;
-	return explicit ? expandTilde(explicit, home) : join(agentDir(env, home), SETTINGS_FILE_NAME);
+	return explicit
+		? normalizeConfiguredPath(explicit, home, platform)
+		: joinFor(platform)(agentDir(env, home, platform), SETTINGS_FILE_NAME);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +219,26 @@ export interface SettingsFs {
 	renameSync(from: string, to: string): void;
 	mkdirSync(path: string, options: { recursive: true; mode: number }): unknown;
 	rmSync(path: string, options: { force: true }): void;
+	/** Absent in a test double: the path is then taken as it is. */
+	realpathSync?(path: string): string;
+	/** Absent in a test double: a new file's mode is used. */
+	statSync?(path: string): { mode: number };
 }
 
-const realFs: SettingsFs = { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync };
+const realFs: SettingsFs = {
+	readFileSync,
+	writeFileSync,
+	renameSync,
+	mkdirSync,
+	rmSync,
+	realpathSync: (path) => realpathSync(path),
+	statSync: (path) => statSync(path),
+};
+
+/** A leading UTF-8 byte order mark (PowerShell 5, older Notepad), as pi drops it from its own settings. */
+function stripBom(text: string): string {
+	return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
 
 /** Read and validate the file. A missing file is not an error: it means defaults. */
 export function loadSettingsFile(path: string, fs: SettingsFs = realFs): FileSettings {
@@ -197,7 +252,7 @@ export function loadSettingsFile(path: string, fs: SettingsFs = realFs): FileSet
 		return { values: {}, invalid: [], unknown: [], error: (error as Error).message, raw: {} };
 	}
 	try {
-		return parseSettings(JSON.parse(text));
+		return parseSettings(JSON.parse(stripBom(text)));
 	} catch (error) {
 		return { values: {}, invalid: [], unknown: [], error: (error as Error).message, raw: {} };
 	}
@@ -207,14 +262,31 @@ export function loadSettingsFile(path: string, fs: SettingsFs = realFs): FileSet
  * Write the file atomically: a temp file next to it, then a rename over it,
  * so pi exiting mid-save (or a second pi saving at once) never leaves a
  * truncated file that would reset every setting to its default.
+ *
+ * A symlinked file (a dotfiles repo under stow or chezmoi) is written
+ * through: the rename lands on the link's target, so the link stays a link.
+ * An existing file keeps its permission bits (a user's 0600 stays 0600).
  */
 export function saveSettingsFile(path: string, raw: Record<string, unknown>, fs: SettingsFs = realFs): void {
-	fs.mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
-	const tmp = `${path}.tmp-${process.pid}`;
+	let target = path;
+	try {
+		if (fs.realpathSync) target = fs.realpathSync(path);
+	} catch {
+		// Not there yet (ENOENT) or not resolvable: write the path as given.
+		target = path;
+	}
+	let mode = 0o644;
+	try {
+		if (fs.statSync) mode = fs.statSync(target).mode & 0o777;
+	} catch {
+		/* a new file */
+	}
+	fs.mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
+	const tmp = `${target}.tmp-${process.pid}`;
 	const body = `${JSON.stringify({ $schema: SETTINGS_SCHEMA_URL, ...raw }, null, "\t")}\n`;
 	try {
-		fs.writeFileSync(tmp, body, { encoding: "utf8", mode: 0o644 });
-		fs.renameSync(tmp, path);
+		fs.writeFileSync(tmp, body, { encoding: "utf8", mode });
+		fs.renameSync(tmp, target);
 	} catch (error) {
 		try {
 			fs.rmSync(tmp, { force: true });
@@ -517,4 +589,54 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 			file = parseSettings(raw);
 		},
 	};
+}
+
+// ---------------------------------------------------------------------------
+// The session toggle across a rebuilt runtime
+
+/** Custom session entry holding the last `/boost on|off` (`{ enabled }`). */
+export const SESSION_TOGGLE_ENTRY = "jfrog-boost-session";
+
+/** The parts of pi's session manager this reads; both exist from 0.86.1 on. */
+export interface SessionToggleEntries {
+	getBranch?: () => unknown;
+	getEntries?: () => unknown;
+}
+
+function lastToggle(entries: unknown): boolean | undefined {
+	if (!Array.isArray(entries)) return undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
+		if (entry && entry.type === "custom" && entry.customType === SESSION_TOGGLE_ENTRY) {
+			const enabled = (entry.data as { enabled?: unknown } | null)?.enabled;
+			if (typeof enabled === "boolean") return enabled;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The last `/boost on|off` on the current branch, or undefined for a session
+ * where neither was used. pi rebuilds the extension (and with it the
+ * settings store) for `/reload`, `/resume` and `/fork`, so a toggle held only
+ * in memory would silently turn Boost back on; it is persisted as a session
+ * entry and restored at `session_start`, as the savings are. The branch, not
+ * every entry, so a toggle on a sibling branch does not leak in;
+ * `getEntries()` only when the branch cannot be read at all.
+ */
+export function restoreSessionToggle(sessionManager: SessionToggleEntries | undefined): boolean | undefined {
+	if (!sessionManager) return undefined;
+	let branch: unknown;
+	try {
+		if (typeof sessionManager.getBranch === "function") branch = sessionManager.getBranch();
+	} catch {
+		branch = undefined;
+	}
+	if (Array.isArray(branch)) return lastToggle(branch);
+	try {
+		if (typeof sessionManager.getEntries === "function") return lastToggle(sessionManager.getEntries());
+	} catch {
+		/* nothing to restore from */
+	}
+	return undefined;
 }
