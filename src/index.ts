@@ -1081,6 +1081,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			}
 			return statusReport({
 				readiness: uiState(),
+				lastKnown: readiness.lastKnown(),
 				off: settings.off(),
 				breaker: breaker.state(),
 				binary,

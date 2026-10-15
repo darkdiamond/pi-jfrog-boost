@@ -243,7 +243,15 @@ export function flagsFreshness(
 // The /boost status report (§10.2)
 
 export interface StatusView {
+	/** As the UI reports it: `disabled` whenever an off switch is active. */
 	readiness: ReadinessState;
+	/**
+	 * What the last real look found, off switches aside (Readiness.lastKnown).
+	 * `readiness` hides it behind `disabled` while Boost is off, so this is
+	 * the only way the report can tell "found missing, then turned off" from
+	 * "never looked".
+	 */
+	lastKnown?: ReadinessState | undefined;
 	off?: OffReason | undefined;
 	breaker: BreakerState;
 	binary?: string | undefined;
@@ -324,10 +332,13 @@ function binaryLine(view: StatusView): string {
 	// While Boost is off nothing is resolved or probed (health.ts), so a
 	// missing path usually means "not looked for", not "not installed". But a
 	// session where the probe already found no binary and the user then ran
-	// `/boost off` was checked: keep the install hint there, because hiding it
-	// would make a missing binary look like a deliberate off.
+	// `/boost off` was checked (`lastKnown`, since `readiness` is `disabled`
+	// by then): keep the install hint there, because hiding it would make a
+	// missing binary look like a deliberate off.
 	if (!view.binary) {
-		if (view.readiness.kind === "missing") return "not installed (/boost install)";
+		if (view.readiness.kind === "missing" || view.lastKnown?.kind === "missing") {
+			return "not installed (/boost install)";
+		}
 		return view.off || view.readiness.kind === "disabled" || view.readiness.kind === "probing"
 			? "not checked while Boost is off"
 			: "not installed (/boost install)";

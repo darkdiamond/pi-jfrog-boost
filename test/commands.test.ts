@@ -63,6 +63,8 @@ interface Options extends PiStubOptions {
 	/** What `boost <args>` (report, doctor) answers. */
 	boostExec?: (args: string[], cwd: string, timeoutMs: number) => Promise<BoostCall>;
 	readiness?: Readiness;
+	/** Let the extension build its own readiness (the production path) over the stub client. */
+	realReadiness?: boolean;
 	breaker?: Breaker;
 	config?: string;
 }
@@ -94,7 +96,7 @@ function setup(options: Options = {}) {
 		env,
 		settings,
 		config: fixedConfig(options.config ?? CLI_OFF),
-		readiness,
+		...(options.realReadiness ? {} : { readiness }),
 		...(options.breaker ? { breaker: options.breaker } : {}),
 		notices: createNotices(),
 		print: (_ctx, text) => printed.push(text),
@@ -202,6 +204,27 @@ test("/boost off and on toggle the session, repaint the footer and reset the bre
 	assert.equal(resets, 1);
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off");
 	assert.equal(s.notices().at(-1), "JFrog Boost is on for this session.");
+});
+
+test("/boost off after the probe found Boost missing keeps the install hint in /boost status", async () => {
+	// The production readiness, not a fixed one: while Boost is off the
+	// extension reports `disabled`, and only what the last real look found can
+	// tell "missing, then turned off" from "never looked".
+	const s = setup({ realReadiness: true, binary: undefined });
+	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: not installed (/boost install)");
+	await s.run("off");
+	await s.run("status", s.noUi());
+	assert.match(
+		s.printed.at(-1) ?? "",
+		/^JFrog Boost — off \(\/boost off\)\n {2}binary {4}not installed \(\/boost install\)\n/,
+	);
+
+	// Off from the start: nothing was looked for, so nothing is claimed.
+	const never = setup({ realReadiness: true, binary: undefined, env: { DISABLE_BOOST: "1" } });
+	await never.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	await never.run("status", never.noUi());
+	assert.match(never.printed.at(-1) ?? "", /\n {2}binary {4}not checked while Boost is off\n/);
 });
 
 test("/boost on names the kill switch that keeps Boost off", async () => {
@@ -489,6 +512,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 			state: () => state,
 			check: () => state,
 			wait: async () => state,
+			lastKnown: () => state,
 			retry() {
 				state = binary() ? { kind: "ready", version: [0, 15, 4] } : { kind: "missing" };
 			},

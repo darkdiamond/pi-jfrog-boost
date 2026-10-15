@@ -299,8 +299,16 @@ test("the title, binary and breaker lines follow the state", () => {
 		/\n {2}binary {4}not checked while Boost is off\n/,
 	);
 	// Checked and found missing, then `/boost off`: the install hint stays.
+	// (The extension reports `disabled` while off; `lastKnown` keeps the find.)
 	assert.match(
-		statusReport(view({ off: { by: "session" }, readiness: { kind: "missing" }, binary: undefined })),
+		statusReport(
+			view({
+				off: { by: "session" },
+				readiness: { kind: "disabled" },
+				lastKnown: { kind: "missing" },
+				binary: undefined,
+			}),
+		),
 		/\n {2}binary {4}not installed \(\/boost install\)\n/,
 	);
 	assert.match(

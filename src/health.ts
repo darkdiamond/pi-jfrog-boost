@@ -76,6 +76,14 @@ export interface Readiness {
 	wait(ms: number): Promise<ReadinessState>;
 	/** `/boost status → retry`, or after an install: forget everything and re-resolve. */
 	retry(): void;
+	/**
+	 * What the last real look found, whatever the off switches say now:
+	 * `missing` once a resolve came back empty, `probing` if nothing was ever
+	 * looked for. Never `disabled`. Only `/boost status` reads it, so that a
+	 * binary found missing before `/boost off` still gets its install hint
+	 * instead of reading as "not checked".
+	 */
+	lastKnown(): ReadinessState;
 	/** The resolved binary, if any. */
 	binary(): string | undefined;
 	/** The version the last successful probe reported. */
@@ -184,11 +192,12 @@ export function createReadiness(deps: ReadinessDeps): Readiness {
 		// too-old and unknown-version stay cached until the stamp changes or retry().
 	};
 
-	const state = (): ReadinessState => {
-		if (!deps.enabled()) return { kind: "disabled" };
+	/** What was found, ignoring the off switches (see lastKnown). */
+	const found = (): ReadinessState => {
 		if (!path) return memo || missingSince !== undefined ? { kind: "missing" } : { kind: "probing" };
 		return memo?.outcome ?? { kind: "probing" };
 	};
+	const state = (): ReadinessState => (deps.enabled() ? found() : { kind: "disabled" });
 
 	return {
 		state,
@@ -221,6 +230,7 @@ export function createReadiness(deps: ReadinessDeps): Readiness {
 			missingSince = undefined;
 			advance(true);
 		},
+		lastKnown: found,
 		binary: () => path,
 		version() {
 			const outcome = memo?.outcome;

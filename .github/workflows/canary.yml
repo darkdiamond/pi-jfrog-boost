@@ -45,8 +45,16 @@ jobs:
       # Swaps in today's pi without touching the lockfile, and with no install
       # scripts, as CI's min leg does.
       - run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@latest # zizmor: ignore[adhoc-packages] testing the unpinned release is this workflow's purpose
+      # Read from disk, not require(): pi's `exports` map does not expose
+      # package.json, so require() throws ERR_PACKAGE_PATH_NOT_EXPORTED, and
+      # inside `$(...)` that failure would not stop the step. Assigned first
+      # and tested, so an empty version fails here instead of reaching the
+      # issue as "unknown".
       - id: pi
-        run: echo "version=$(node -p 'require("@earendil-works/pi-coding-agent/package.json").version')" >> "$GITHUB_OUTPUT"
+        run: |
+          v="$(node -p 'JSON.parse(require("node:fs").readFileSync("node_modules/@earendil-works/pi-coding-agent/package.json", "utf8")).version')"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - run: npm run typecheck
       - run: npm test
 

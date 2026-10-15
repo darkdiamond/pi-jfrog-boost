@@ -66,7 +66,7 @@ jobs:
       # Swaps the oldest supported pi in without touching the lockfile. No
       # install scripts, as in `npm ci`.
       - if: matrix.pi == 'min'
-        run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.86.1
+        run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 # zizmor: ignore[adhoc-packages] an exact pin, no scripts; testing the floor is this leg's purpose
       - run: npm run typecheck
       # Unit tests use a Node stand-in for Boost (test/fixtures/fake-boost.mjs),
       # so the real-process tests run on every OS. The e2e suite skips here:

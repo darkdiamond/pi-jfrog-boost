@@ -66,6 +66,7 @@ export function fixedReadiness(
 		},
 		wait: async () => state,
 		retry() {},
+		lastKnown: () => state,
 		binary: () => binary,
 		version: () => ("version" in state ? state.version : undefined),
 	};

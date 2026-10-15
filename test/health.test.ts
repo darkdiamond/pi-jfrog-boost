@@ -239,6 +239,18 @@ test("disabled: nothing is resolved or probed", () => {
 	assert.equal(world.resolves + world.probes, 0);
 });
 
+test("lastKnown keeps what the last look found once Boost is turned off", () => {
+	const never = scripted([], { enabled: false, path: undefined });
+	never.readiness.start();
+	assert.deepEqual(never.readiness.lastKnown(), { kind: "probing" }, "never looked: not claimed missing");
+
+	const { readiness, world } = scripted([], { path: undefined });
+	readiness.start();
+	world.enabled = false;
+	assert.deepEqual(readiness.state(), { kind: "disabled" });
+	assert.deepEqual(readiness.lastKnown(), { kind: "missing" });
+});
+
 test("wait() is bounded and resolves at once when nothing is running", async () => {
 	let release: ((r: RunResult) => void) | undefined;
 	const readiness = createReadiness({
