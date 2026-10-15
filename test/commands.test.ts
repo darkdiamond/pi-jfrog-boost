@@ -17,6 +17,7 @@ import { type Breaker, createBreaker, type Readiness, type ReadinessState } from
 import { createBoostExtension, createNotices } from "../src/index.ts";
 import { INSTALL_OPTIONS } from "../src/install.ts";
 import { createSettingsStore, type SettingsFs, settingsPath } from "../src/settings.ts";
+import { MISSING_NOTICE, SHELL_OFF_NOTICE } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memoryFs, stubClient } from "./helpers/runtime.ts";
 
@@ -169,7 +170,9 @@ test("/boost without a UI, and /boost status, print the status report and spawn 
 test("/boost status with a UI notifies the report; a stuck state offers a retry", async () => {
 	const ready = setup({ ui: { select: ["Retry now"] } });
 	await ready.run("status");
-	assert.match(ready.notices()[0] ?? "", /^JFrog Boost — ready/);
+	// The first command of a session that never saw session_start wakes it,
+	// so the shell-off notice may come first.
+	assert.match(ready.notices().at(-1) ?? "", /^JFrog Boost — ready/);
 	assert.equal(ready.stub.ui.selects.length, 0, "nothing to retry when ready");
 
 	let retries = 0;
@@ -204,6 +207,55 @@ test("/boost off and on toggle the session, repaint the footer and reset the bre
 	assert.equal(resets, 1);
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off");
 	assert.equal(s.notices().at(-1), "JFrog Boost is on for this session.");
+});
+
+test("/boost on in a session that started off wakes it: footer after the probe, notices, honest reply", async () => {
+	// The probe settles only when waited for, as a real one ~150 ms later.
+	const ready: ReadinessState = { kind: "ready", version: [0, 15, 4] };
+	let state: ReadinessState = { kind: "probing" };
+	let starts = 0;
+	const readiness: Readiness = {
+		...fixedReadiness(),
+		state: () => state,
+		check: () => state,
+		start: () => {
+			starts++;
+		},
+		wait: async () => {
+			state = ready;
+			return state;
+		},
+	};
+	const s = setup({ readiness, file: { enabled: false } });
+	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: off");
+	assert.equal(starts, 0, "an off session never probes");
+	await s.run("on");
+	assert.ok(starts >= 1, "turning on starts the probe");
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "painted once the probe settled");
+	assert.ok(s.notices().includes(SHELL_OFF_NOTICE), "the startup notice it missed");
+	assert.equal(s.notices().at(-1), "JFrog Boost is on for this session.");
+
+	// Not installed: said so, not "on".
+	const missing = setup({ binary: undefined, state: { kind: "missing" }, file: { enabled: false } });
+	await missing.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	await missing.run("on");
+	assert.ok(missing.notices().includes(MISSING_NOTICE));
+	assert.match(
+		missing.notices().at(-1) ?? "",
+		/^JFrog Boost is on for this session, but not working \(boost: not installed/,
+	);
+	assert.equal(missing.stub.ui.notices.at(-1)?.level, "warning");
+});
+
+test("turning Enabled on in /boost settings wakes a session that started off", async () => {
+	const s = setup({ file: { enabled: false }, ui: { select: ["Enabled: off", "Done"] } });
+	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: off");
+	await s.run("settings");
+	assert.equal(s.settings.off(), undefined);
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off");
+	assert.ok(s.notices().includes(SHELL_OFF_NOTICE));
 });
 
 test("/boost off after the probe found Boost missing keeps the install hint in /boost status", async () => {

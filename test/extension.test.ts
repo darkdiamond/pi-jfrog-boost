@@ -1145,6 +1145,24 @@ test("sync honours its opt-out: PI_BOOST_SYNC=0 or sync: false", async () => {
 	}
 });
 
+test("no sync through a Boost that is too old, unreadable or not responding", async () => {
+	const states: ReadinessState[] = [
+		{ kind: "too-old", version: [0, 12, 1] },
+		{ kind: "unknown-version" },
+		{ kind: "not-responding" },
+		{ kind: "missing" },
+	];
+	for (const state of states) {
+		const h = harness({ readiness: fixedReadiness(state) });
+		await h.fire("session_start", { reason: "startup" });
+		await h.fire("agent_settled", agentSettledEvent("1.2"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		await h.fire("agent_settled", agentSettledEvent("1.2"));
+		await h.fire("session_shutdown", { reason: "quit" });
+		assert.equal(h.calls.filter((c) => c.kind === "sync").length, 0, state.kind);
+	}
+});
+
 test("an invalid settings key is reported once, as a warning naming the key", async () => {
 	const h = harness({ file: { minBytes: "lots" } });
 	await h.fire("session_start", { reason: "startup" });
@@ -1676,7 +1694,7 @@ test("a missing Boost is announced once per process, across reloads", async () =
 	assert.deepEqual([...a.noticeTexts(), ...b.noticeTexts()], [MISSING_NOTICE]);
 });
 
-test("when the breaker opens: the paused notice once, and the footer says paused", async () => {
+test("when the breaker opens: the paused notice once per opening, and the footer says paused", async () => {
 	let state: BreakerState = { kind: "closed" };
 	const breaker: Breaker = { allow: () => true, record: () => {}, reset: () => {}, state: () => state };
 	const { stub, statusTexts, noticeTexts } = uiExtension({ breaker });
@@ -1692,8 +1710,10 @@ test("when the breaker opens: the paused notice once, and the footer says paused
 	assert.equal(statusTexts().at(-1), "boost ✓");
 	state = { kind: "open", until: Date.now() + 10 * 60_000, reason: "slow" };
 	await stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
+	await stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
 	assert.equal(statusTexts().at(-1), "boost: paused (slow)");
-	assert.equal(noticeTexts().length, 1);
+	// A new opening (a failed trial, or a new pause) is announced too, once.
+	assert.deepEqual(noticeTexts(), [pausedNotice("timeout", 5), pausedNotice("slow", 10)]);
 });
 
 /** The `jfrog-boost-stats` entries appended so far, as session entries. */
@@ -1755,6 +1775,56 @@ test("stats survive a resume and a fork, and a new session starts from zero", as
 	const fresh = uiExtension({ branch: [], entries: branch });
 	await start(fresh.stub, "new");
 	assert.equal(fresh.statusTexts().at(-1), "boost ✓", "an empty branch is a session with nothing saved");
+});
+
+test("/tree: unsaved stats land on the branch left, and the branch arrived at brings its own", async () => {
+	const { stub, statusTexts } = uiExtension();
+	await start(stub);
+	await stub.emitToolResult(failingBash("1.2"));
+	assert.match(statusTexts().at(-1) ?? "", /saved/);
+	// Not settled yet: the before-tree handler writes it to the old branch.
+	await stub.fire("session_before_tree", { type: "session_before_tree" });
+	assert.equal(statsEntries(stub).length, 1);
+
+	// Back to a point before any of it: nothing saved there.
+	const earlier = stub.ctx({ sessionManager: { getSessionId: () => "sess-1", getBranch: () => [] } });
+	await stub.fire("session_tree", { type: "session_tree", newLeafId: "m0", oldLeafId: "m9" }, earlier);
+	assert.equal(statusTexts().at(-1), "boost ✓");
+	await settle(stub);
+	assert.equal(statsEntries(stub).length, 1, "the old branch's numbers are not written to the new one");
+
+	// And to a branch that has its own.
+	const saved = [{ type: "message", id: "m1" }, ...statsEntries(stub)];
+	const other = stub.ctx({ sessionManager: { getSessionId: () => "sess-1", getBranch: () => saved } });
+	await stub.fire("session_tree", { type: "session_tree", newLeafId: "m1", oldLeafId: "m0" }, other);
+	assert.match(statusTexts().at(-1) ?? "", /saved/);
+});
+
+test("two copies in one runner: the second leaves a result the first changed alone", async () => {
+	const stub = createPiStub({ line: "1.2" });
+	const filters = [0, 0];
+	for (const i of [0, 1]) {
+		createBoostExtension(stub.pi, {
+			client: stubClient({
+				filter: async () => {
+					filters[i] = (filters[i] ?? 0) + 1;
+					// Still long enough to be worth another call, and a new id.
+					return call(`${NOISY.slice(0, 3000)}\n[Boost compressed ~50%. boost retrieve ${i + 1}]`);
+				},
+			}),
+			env: {},
+			settings: memorySettings({ file: { minBytes: 100 } }),
+			config: fixedConfig(CLI_ON),
+			readiness: fixedReadiness(),
+			notices: createNotices(),
+		});
+	}
+	await start(stub);
+	const patch = await stub.emitToolResult(failingBash("1.2"));
+	assert.deepEqual(filters, [1, 0], "Boost ran once for one result");
+	assert.match(textOfBlocks(patch?.content), /boost retrieve 1\b/, "the first copy's retrieve id stands");
+	const details = patch?.details as { jfrogBoost?: { retrieveId?: number } } | undefined;
+	assert.equal(details?.jfrogBoost?.retrieveId, 1);
 });
 
 test("a compacted result gets a badge through the registered renderer", async () => {

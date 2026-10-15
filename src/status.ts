@@ -145,7 +145,7 @@ export function createFooterPainter(): FooterPainter {
 // ---------------------------------------------------------------------------
 // Notices (§10.4)
 
-export type NoticeId = "missing" | "too-old" | "shell-off" | "terms" | "paused" | "filters-disabled";
+export type NoticeId = "missing" | "too-old" | "shell-off" | "terms" | "filters-disabled";
 export type NoticeLevel = "info" | "warning" | "error";
 
 export const MISSING_NOTICE =

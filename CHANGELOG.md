@@ -59,6 +59,12 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 - A reply that differed only in whitespace or ANSI colour was applied as a
   "compaction". A reply must now save at least 256 bytes and 5%, and when it
   does not, the original bytes, colour included, are kept.
+- With two copies of the extension loaded into one pi (a global install plus
+  a local path, or `pi -e` while developing), the second sent the first's
+  compacted output through Boost again and could drop its `boost retrieve`
+  marker. A result already changed by pi-jfrog-boost is now left alone.
+- Moving to another point with `/tree` kept the previous branch's savings in
+  the footer and wrote them onto the new branch.
 
 ### Changed
 

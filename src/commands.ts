@@ -269,12 +269,29 @@ export function createBoostCommand(host: CommandHost) {
 		say(ctx, host.statusReport());
 	}
 
-	function toggle(ctx: ExtensionCommandContext, enabled: boolean): void {
+	async function toggle(ctx: ExtensionCommandContext, enabled: boolean): Promise<void> {
 		const blocking = host.setSession(enabled);
 		host.refreshUi(ctx);
 		if (enabled) {
-			if (blocking) say(ctx, `JFrog Boost stays off: ${describeOff(blocking)}.`, "warning");
-			else say(ctx, "JFrog Boost is on for this session.");
+			if (blocking) {
+				say(ctx, `JFrog Boost stays off: ${describeOff(blocking)}.`, "warning");
+				return;
+			}
+			// On, but not necessarily working: a session that started off has
+			// only now begun its probe. Wait for it briefly, as `/boost status`
+			// does, so a missing or too-old Boost is not reported as on.
+			await host.settle();
+			host.refreshUi(ctx);
+			const state = host.state();
+			if (state.kind === "ready" || state.kind === "probing") {
+				say(ctx, "JFrog Boost is on for this session.");
+				return;
+			}
+			say(
+				ctx,
+				`JFrog Boost is on for this session, but not working (${host.headline()}). /boost status for details.`,
+				"warning",
+			);
 			return;
 		}
 		say(
@@ -461,7 +478,7 @@ export function createBoostCommand(host: CommandHost) {
 				return;
 			case "on":
 			case "off":
-				toggle(ctx, sub === "on");
+				await toggle(ctx, sub === "on");
 				return;
 			case "settings":
 				await settingsLoop(ctx, rest);

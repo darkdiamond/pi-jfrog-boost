@@ -294,14 +294,23 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	});
 	// Filtering is measured locally; `boost sync` is what gets those numbers
 	// to JFrog. It uploads, so it honours the opt-out (and every off switch).
+	// And only through a Boost known to work: a too-old, unreadable or hung
+	// one is reported as leaving the extension idle (§10.4), so nothing —
+	// an upload least of all — is sent through it. Cached state, never a probe.
 	const sync = createSyncScheduler({
 		client,
-		enabled: () => !isOff() && settings.effective().sync,
+		enabled: () => !isOff() && settings.effective().sync && readiness.state().kind === "ready",
 		...(deps.syncDelayMs !== undefined ? { delayMs: deps.syncDelayMs } : {}),
 	});
 	const firstTurnWaitMs = deps.firstTurnWaitMs ?? FIRST_TURN_WAIT_MS;
 	/** The breaker opening last seen, so each opening is noticed once. */
 	let seenOpenUntil: number | undefined;
+	/**
+	 * Whether this session's readiness probe was started and its notices
+	 * scheduled (`wake`). False while off, so turning Boost on mid-session —
+	 * `/boost on`, or `enabled` in `/boost settings` — wakes it.
+	 */
+	let awake = false;
 	/**
 	 * Converted documents, shared by every session of this process: a file is
 	 * keyed by path, mtime and size, so a stale entry can never be served.
@@ -373,7 +382,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				seenOpenUntil = b.until;
 				// Rounded as `/boost status`'s breaker line rounds it, so the two agree.
 				const minutes = Math.max(1, Math.ceil((b.until - Date.now()) / 60_000));
-				notices.show(ctx, "paused", pausedNotice(b.reason, minutes), "warning");
+				// Once per opening (§8.2), not once per process: a failed trial
+				// re-opens for longer, and the user should hear for how long.
+				notify(ctx, pausedNotice(b.reason, minutes), "warning");
 			}
 		} catch {
 			/* fail open: the footer is never worth an error */
@@ -450,8 +461,23 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	});
 
 	function startSession(ctx: ExtensionContext): void {
+		awake = false;
 		if (isOff()) return;
+		// Without a binary there is nothing else to do this session.
+		if (!wake(ctx)) return;
+		// Detached, opt-in. No warning about attribution any more: observe
+		// keeps the span's `pi` (Probe 1, observe.ts).
+		observer.sessionStart(() => meta(ctx));
+	}
 
+	/**
+	 * Start the readiness probe and schedule what depends on it: the footer
+	 * it settles on and the notices of §10.4. Run at session start, and when
+	 * Boost is turned on in a session that started off. Returns whether a
+	 * binary was found.
+	 */
+	function wake(ctx: ExtensionContext): boolean {
+		awake = true;
 		// Not awaited (spec §8.1): resolving is a cheap stat, and the version
 		// probe settles in the background. A tool result that arrives first
 		// passes through unchanged rather than waiting for it.
@@ -461,7 +487,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// one, so this returns whether or not the notice has already been shown.
 		if (!readiness.binary()) {
 			notices.show(ctx, "missing", MISSING_NOTICE, "info");
-			return;
+			return false;
 		}
 
 		// Paint what the probe settles on, and give the notices that depend on
@@ -478,10 +504,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			.catch(() => {
 				/* fail open */
 			});
-
-		// Detached, opt-in. No warning about attribution any more: observe
-		// keeps the span's `pi` (Probe 1, observe.ts).
-		observer.sessionStart(() => meta(ctx));
+		return true;
 	}
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -665,6 +688,20 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		if (parentToolCallId(event)) {
 			tally.skip("nested");
 			return;
+		}
+		// Already changed by another copy of this extension loaded into the same
+		// runner (a global npm install plus a local path, or `pi -e` while
+		// developing): pi chains tool_result handlers, so this one would see the
+		// compacted text, send it through Boost again, possibly drop the first
+		// copy's retrieve marker (invariant 1) and overwrite its badge. Done is
+		// done.
+		try {
+			if (isPlainObject(event.details) && "jfrogBoost" in event.details) {
+				tally.skip("already");
+				return;
+			}
+		} catch {
+			/* fail open: a details object that throws on reads is not ours */
 		}
 		// Built inside the try: `ctx.sessionManager` and `ctx.cwd` throw on a
 		// stale pi 1.2 context, and `content` is the tool's to shape.
@@ -936,6 +973,23 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		refreshUi(ctx);
 	});
 
+	// `/tree` moves to another point of the session without a session_start.
+	// What was saved so far belongs to the branch being left, so it is written
+	// there first; the branch arrived at then says what it has saved (§10.5).
+	// Neither handler returns anything: session_before_tree may cancel.
+	pi.on("session_before_tree", () => {
+		saveStats();
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		try {
+			stats.restore(restoreSnapshot(ctx.sessionManager));
+		} catch {
+			stats.restore();
+		}
+		refreshUi(ctx);
+	});
+
 	pi.on("session_before_compact", (event, ctx) => {
 		observer.preCompact(event, () => meta(ctx));
 	});
@@ -1057,7 +1111,19 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		},
 		exec: (args, cwd, timeoutMs) => client.exec(args, cwd, timeoutMs),
 		install,
-		refreshUi: (ctx) => refreshUi(ctx),
+		refreshUi(ctx) {
+			// Every command that can turn Boost on (`/boost on`, `enabled` in
+			// `/boost settings`) repaints through here: a session that was off
+			// until now never probed, so wake it, or the footer would stay blank
+			// until the next tool result and the startup notices never come.
+			try {
+				if (isOff()) awake = false;
+				else if (!awake) wake(ctx);
+			} catch {
+				/* fail open */
+			}
+			refreshUi(ctx);
+		},
 		print,
 	};
 	const boostCommand = createBoostCommand(host);

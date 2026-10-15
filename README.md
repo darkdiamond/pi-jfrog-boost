@@ -226,7 +226,8 @@ What leaves your machine, and how to stop it:
 - **`boost sync`** runs 8 s after the agent settles and on shutdown
   (`boost sync --max-batches 20`, detached, killed after 120 s). It uploads
   Boost's local measurements to JFrog, as every Boost integration does, then
-  prunes the synced rows locally. Turn it off with `sync: false` or
+  prunes the synced rows locally. It never runs while Boost is too old, not
+  responding or otherwise not ready. Turn it off with `sync: false` or
   `PI_BOOST_SYNC=0`.
 - **MCP bodies.** For every MCP call it filters, Boost stores the full request
   and response in its local database, and sync uploads them. Keep a server
