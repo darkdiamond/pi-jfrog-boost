@@ -11,9 +11,13 @@
  *
  * - **Honest** (invariant 6). The text names only the surfaces that are
  *   actually active in this session: shell output only when Boost's shell
- *   gate is on and a shell tool is visible, MCP only when the route can run
- *   and an `mcp__*` tool is visible, documents only when `read` is visible
- *   and the Preview Agreement is accepted. 0.3.0 claimed `read`, `grep`,
+ *   gate is on and a shell tool (or an `extraTools` tool, routed like one)
+ *   is visible, whole reads of logs only when `readLogs` is on as well, MCP
+ *   only when the route can run and an `mcp__*` tool is visible, documents
+ *   only when `read` is visible and the Preview Agreement is accepted. And
+ *   it never calls a surface exact that is not: with `readLogs` on, `read`
+ *   of a text file is no longer always exact, so the text stops saying so.
+ *   0.3.0 claimed `read`, `grep`,
  *   `find` and `ls` were compacted, which on Boost v0.15.4 they never were;
  *   nothing here claims anything about them now. With no surface active
  *   there is no section at all — a model told "output may be shortened"
@@ -26,9 +30,13 @@
  *   never from the breaker, a busy semaphore or the savings, which change
  *   from one tool result to the next.
  * - **Short.** It is paid for on every turn: under 1,200 characters with
- *   every surface active.
+ *   every surface active, Boost off PATH at a 100-character install path
+ *   (longer than a Windows `%LOCALAPPDATA%\boost\bin\boost.exe` with a long
+ *   user name) and a short `extraTools` name. The `extraTools` names are the
+ *   one input the user can make arbitrarily long; each is named once.
  */
 import { atLeast, type BoostVersion, MCP_MIN_VERSION } from "./boost-binary.ts";
+import { isShellLike } from "./router.ts";
 import { excludedBy } from "./settings.ts";
 
 /** The system prompt section name; pi wraps the body as `<jfrog-boost>…</jfrog-boost>`. */
@@ -49,6 +57,10 @@ export const DEFAULT_LOADOUT: readonly string[] = ["read", "bash", "edit", "writ
 export interface AwarenessView {
 	/** Visible shell tools whose output Boost filters: a subset of bash/powershell. */
 	shellTools: readonly string[];
+	/** Visible `extraTools` tools, routed like bash, whose output Boost filters. */
+	extraTools: readonly string[];
+	/** Whole `read`s of *.log / *.out go through Boost's filter (`readLogs`). */
+	logs: boolean;
 	/** MCP results go through Boost's MCP filters, and an `mcp__*` tool is visible. */
 	mcp: boolean;
 	/** `read` is visible, `documents` is on and the Preview Agreement is accepted. */
@@ -59,6 +71,12 @@ export interface AwarenessView {
 	boostCmd: string;
 	/** Whether `boost` typed in the model's shell finds this binary. */
 	onPath: boolean;
+	/**
+	 * Off PATH on win32 with both `bash` and `powershell` visible: the
+	 * double-quoted path runs in bash but needs PowerShell's `&` call
+	 * operator, so the text says so (see {@link boostCommand}).
+	 */
+	callOperator: boolean;
 }
 
 /** The inputs a view is derived from; gathered by index.ts without spawning. */
@@ -69,7 +87,14 @@ export interface AwarenessInputs {
 	awareness: boolean;
 	/** The shell gate (spec §8.4): Boost's stdin filter will filter shell output. */
 	shellOn: boolean;
-	settings: { mcp: boolean; mcpExclude: readonly string[]; documents: boolean; notebooks: boolean };
+	settings: {
+		mcp: boolean;
+		mcpExclude: readonly string[];
+		documents: boolean;
+		notebooks: boolean;
+		readLogs: boolean;
+		extraTools: readonly string[];
+	};
 	/** The running Boost's version (the MCP route needs ≥ 0.15.3). */
 	boostVersion: BoostVersion | undefined;
 	/** `boost-mcp-filtering` as resolved from env and config. */
@@ -94,6 +119,35 @@ export function quoteCommand(path: string, platform: NodeJS.Platform): string {
 	return `'${path.replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * How the model should spell Boost in its shell, and whether the text must
+ * add that PowerShell needs `&` in front of it.
+ *
+ * On PATH it is just `boost`. Off PATH it is the quoted absolute path
+ * (spec §12) — except that PowerShell parses a leading quoted string as an
+ * expression, so `"C:\…\boost.exe" retrieve 147` is a parse error there
+ * ("Unexpected token 'retrieve'"); only `& "C:\…\boost.exe" retrieve 147`
+ * runs. With PowerShell the only visible shell, the command carries the `&`
+ * itself. With bash visible too, it cannot — `&` at the start of a bash
+ * command is a syntax error — so the path stays bare and the off-PATH line
+ * names the operator instead. The shells counted are the visible ones,
+ * gate or not: the model runs `retrieve` in whichever shell it has.
+ */
+export function boostCommand(
+	binary: string,
+	onPath: boolean,
+	platform: NodeJS.Platform,
+	visibleShells: readonly string[],
+): { boostCmd: string; callOperator: boolean } {
+	if (onPath) return { boostCmd: "boost", callOperator: false };
+	const quoted = quoteCommand(binary, platform);
+	if (platform !== "win32" || !visibleShells.includes("powershell")) {
+		return { boostCmd: quoted, callOperator: false };
+	}
+	if (visibleShells.includes("bash")) return { boostCmd: quoted, callOperator: true };
+	return { boostCmd: `& ${quoted}`, callOperator: false };
+}
+
 /** The tools the model can see: `selected − hidden`, or pi's default loadout. */
 export function visibleTools(loadout: AwarenessInputs["loadout"]): string[] {
 	const hidden = new Set(loadout.hidden ?? []);
@@ -107,7 +161,23 @@ export function visibleTools(loadout: AwarenessInputs["loadout"]): string[] {
 export function awarenessView(r: AwarenessInputs): AwarenessView | undefined {
 	if (!r.ready || !r.awareness || !r.binary) return undefined;
 	const visible = visibleTools(r.loadout);
-	const shellTools = r.shellOn ? SHELL_TOOLS.filter((name) => visible.includes(name)) : [];
+	const visibleShells = SHELL_TOOLS.filter((name) => visible.includes(name));
+	const shellTools = r.shellOn ? visibleShells : [];
+	// The rest of the shell route (router.ts `isShellLike`): a user's
+	// `extraTools` entry, e.g. an extension's `fetch`, is filtered like bash
+	// whenever the gate is on, so it is named like bash. In the order the
+	// user listed them, which is as stable as the settings file.
+	const extraTools = r.shellOn
+		? [...new Set(r.settings.extraTools)].filter(
+				(name) =>
+					visible.includes(name) &&
+					!SHELL_TOOLS.some((shell) => shell === name) &&
+					isShellLike(name, r.settings.extraTools),
+			)
+		: [];
+	// The log row of the read route: whole reads of *.log/*.out, through the
+	// same stdin filter and so behind the same gate.
+	const logs = r.shellOn && r.settings.readLogs && visible.includes("read");
 	// The route's own static conditions (router.ts / mcp.ts `mcpSkip`): an
 	// explicit `boost-mcp-filtering = false`, a Boost before 0.15.3, or every
 	// visible MCP tool excluded means no MCP result will ever be shortened.
@@ -117,13 +187,15 @@ export function awarenessView(r: AwarenessInputs): AwarenessView | undefined {
 		visible.some((name) => name.startsWith("mcp__") && excludedBy(name, r.settings.mcpExclude) === undefined);
 	const documents = visible.includes("read") && r.settings.documents && r.termsAccepted;
 	const notebooks = documents && r.settings.notebooks;
-	if (shellTools.length === 0 && !mcp && !documents) return undefined;
+	if (shellTools.length === 0 && extraTools.length === 0 && !logs && !mcp && !documents) return undefined;
 	return {
 		shellTools,
+		extraTools,
+		logs,
 		mcp,
 		documents,
 		notebooks,
-		boostCmd: r.onPath ? "boost" : quoteCommand(r.binary, r.platform),
+		...boostCommand(r.binary, r.onPath, r.platform, visibleShells),
 		onPath: r.onPath,
 	};
 }
@@ -141,35 +213,47 @@ function joinList(items: readonly string[]): string {
 export function buildAwareness(view: AwarenessView | undefined): string | undefined {
 	if (!view) return undefined;
 	const surfaces: string[] = [];
-	if (view.shellTools.length > 0) surfaces.push(`${joinList(view.shellTools.map((t) => `\`${t}\``))} output`);
+	const filtered = [...view.shellTools, ...view.extraTools];
+	if (filtered.length > 0) surfaces.push(`${joinList(filtered.map((t) => `\`${t}\``))} output`);
+	if (view.logs) surfaces.push("whole `read`s of *.log/*.out");
 	if (view.mcp) surfaces.push("MCP tool results (`mcp__*`)");
 	if (view.documents) surfaces.push("PDF and Office files you `read`");
 	if (surfaces.length === 0) return undefined;
 
-	// The §12 template, tightened by a few words per line: verbatim it came
-	// to ~1,375 characters with every surface active and Boost off PATH
-	// (~1,260 on PATH), over §12's own 1,200 budget. Every instruction and
+	// The §12 template, tightened: verbatim it came to ~1,385 characters with
+	// every surface active and Boost off PATH, over §12's own 1,200 budget,
+	// before a long Windows install path or the log and extraTools surfaces
+	// (which §12's template predates) were counted. Every instruction and
 	// every conditional line is kept; only phrasing went, and the second
 	// full `retrieve` command became `(or --lines 40-80)`, so a long
 	// absolute path is paid for once.
 	const b = view.boostCmd;
+	// With `readLogs` on, a `read` of a text file is not always exact any
+	// more (invariant 6): the first line must not say it is.
+	const exact = view.logs ? "other `read`s" : "`read` of text files";
 	const lines = [
-		`JFrog Boost shortens some tool output before you see it: ${joinList(surfaces)}. Everything else, including \`read\` of text files, \`edit\` and \`write\`, is exact.`,
+		`JFrog Boost shortens some tool output before you see it: ${joinList(surfaces)}. Everything else (${exact}, \`edit\`, \`write\`, …) is exact.`,
 		"- Shortened output is intentional and usually enough; prefer it.",
-		`- If a shortened result ends with \`[Boost compressed ~85%. … boost retrieve 147]\` and you need a dropped detail, run \`${b} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) instead of re-running the tool. Retrieve narrowly: repeated retrieves switch that filter off on this machine for every agent.`,
+		`- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${b} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.`,
 	];
 	if (view.shellTools.length > 0) {
 		lines.push(
-			"- For one command's exact output, prefix it with `DISABLE_BOOST=1`. Never pipe commands into `boost` yourself. curl/wget pages may arrive as readable text; `DISABLE_BOOST=1 curl …` gives raw HTML.",
+			"- Prefix a command with `DISABLE_BOOST=1` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into `boost` yourself.",
 		);
 	}
 	if (view.documents) {
 		const nb = view.notebooks;
 		lines.push(
-			`- PDF and Office files${nb ? ", and notebooks read whole," : ""} that you \`read\` arrive as converted text, paged like any read (use offset to continue). Line numbers are not file lines; never \`edit\` from them.${nb ? " Read a notebook with offset=1 for its raw JSON." : ""}`,
+			`- Documents${nb ? ", and notebooks read whole," : ""} arrive as converted text, paged like any read. Line numbers are not file lines; never \`edit\` from them.${nb ? " offset=1 gives a notebook's raw JSON." : ""}`,
 		);
 	}
-	if (!view.onPath) lines.push("- `boost` is not on PATH; use the full path above.");
+	if (!view.onPath) {
+		lines.push(
+			view.callOperator
+				? "- `boost` is not on PATH; use the full path above (in `powershell`, after `&`)."
+				: "- `boost` is not on PATH; use the full path above.",
+		);
+	}
 	lines.push("- Boost's secret redaction is best effort, not a security boundary.");
 	return lines.join("\n");
 }

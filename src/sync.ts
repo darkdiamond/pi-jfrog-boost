@@ -33,7 +33,15 @@
  *   timer fires, not only when it was set.
  * - **Shutdown.** A pending upload is sent at once rather than lost with the
  *   process. One already running is left to finish; what it does not cover
- *   goes with the next session's sync.
+ *   goes with the next session's sync. That includes the one gap in "flushed
+ *   on shutdown" (§14): when pi shuts down while a sync runs *and* a later
+ *   settle is still inside its delay, that last turn's rows are not uploaded
+ *   now — the delay is cancelled and no re-run is queued. Deliberately: a
+ *   second sync alongside the running one could upload the same rows twice
+ *   or race its prune, and a queued re-run would have to fire from the
+ *   running child's exit, which pi exiting means never comes. Boost keeps
+ *   the rows in its local DB, so the next sync (any session, any agent)
+ *   sends them; nothing is lost, only later.
  *
  * pi asks extensions not to start timers from the extension factory, so
  * nothing here runs until the first `schedule()` call.
@@ -144,6 +152,8 @@ export function createSyncScheduler(options: SyncSchedulerOptions): SyncSchedule
 		},
 		flush(meta) {
 			const wasPending = timer !== undefined;
+			// With a sync running, the pending one is dropped, not queued: see
+			// "Shutdown" above.
 			cancel();
 			if (!wasPending || flight !== undefined) return;
 			start(meta);

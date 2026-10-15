@@ -33,12 +33,24 @@
  * nothing measurable), and nothing for nested calls — a codemode script's
  * inner calls are its business, not a turn the model took.
  *
+ * Not sent either: anything about a tool the user listed in `mcpExclude`.
+ * That setting is the user's say over which MCP bodies Boost stores and
+ * `boost sync` uploads (spec §7.2); an observe event carrying the same
+ * arguments and a 16k excerpt of the same output would quietly undo it. Both
+ * halves are skipped, so Boost never sees a PreToolUse row it cannot close.
+ *
+ * Sizes: the output excerpt is capped at 16k characters (OBSERVE_TEXT_LIMIT)
+ * and so are the arguments, which are sent twice (Pre and Post) and can be
+ * as large as the output — a `write` carries the whole file.
+ * {@link capToolInput} keeps small arguments as they are and shortens large
+ * ones.
+ *
  * Everything is fail-open: no method throws, and an observe that cannot be
  * sent is simply not sent.
  */
 import type { HookMeta, HookPayload } from "./boost-client.ts";
 import { aborted, durationMs, parentToolCallId } from "./compat.ts";
-import { type ContentBlock, textOf, truncateForObserve } from "./content.ts";
+import { type ContentBlock, OBSERVE_TEXT_LIMIT, textOf, truncateForObserve } from "./content.ts";
 
 /**
  * Start times kept for the fallback timer at most. A start whose end never
@@ -51,6 +63,11 @@ export const MAX_PENDING_STARTS = 256;
 export interface ObserverDeps {
 	/** Whether observe is on right now: the setting, env and every off switch. */
 	enabled(): boolean;
+	/**
+	 * Whether a tool's calls must not be observed at all: an `mcp__*` tool
+	 * matched by `mcpExclude`, read live so a settings save applies at once.
+	 */
+	excluded?: (toolName: string) => boolean;
 	/** Send one event, detached (client.observeDetached). */
 	send(meta: HookMeta, fields: HookPayload): void;
 	/** Monotonic clock in ms for the fallback timer; defaults to `performance.now`. */
@@ -80,6 +97,40 @@ type Bag = Record<string, unknown>;
 const bag = (value: unknown): Bag | undefined =>
 	typeof value === "object" && value !== null ? (value as Bag) : undefined;
 
+/** How long one string in oversized arguments may stay. */
+export const OBSERVE_ARG_STRING_LIMIT = 2_000;
+
+/**
+ * A tool's arguments as observe sends them: unchanged when they serialise to
+ * at most OBSERVE_TEXT_LIMIT characters, which is nearly every call. Larger
+ * ones keep their shape — Boost records `tool_input` as an object, and the
+ * small fields (a path, a command) are the useful part — with every long
+ * string cut to OBSERVE_ARG_STRING_LIMIT. If that is still too large (very
+ * many fields), only a truncated JSON excerpt is sent.
+ */
+export function capToolInput(args: Bag): Bag {
+	let json: string;
+	try {
+		json = JSON.stringify(args) ?? "{}";
+	} catch {
+		return {};
+	}
+	if (json.length <= OBSERVE_TEXT_LIMIT) return args;
+	const shorten = (value: unknown, depth: number): unknown => {
+		if (typeof value === "string") {
+			return value.length > OBSERVE_ARG_STRING_LIMIT
+				? `${value.slice(0, OBSERVE_ARG_STRING_LIMIT)}\n…[truncated]`
+				: value;
+		}
+		if (typeof value !== "object" || value === null || depth >= 8) return value;
+		if (Array.isArray(value)) return value.map((item) => shorten(item, depth + 1));
+		return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shorten(v, depth + 1)]));
+	};
+	const shortened = shorten(args, 0) as Bag;
+	if ((JSON.stringify(shortened) ?? "").length <= OBSERVE_TEXT_LIMIT) return shortened;
+	return { truncated_input: truncateForObserve(json) };
+}
+
 /** The text of a content array, tolerating anything a tool might put there. */
 function textOfAny(content: unknown): string {
 	return Array.isArray(content) ? textOf(content as ContentBlock[]) : "";
@@ -94,6 +145,15 @@ export function createObserver(deps: ObserverDeps): Observer {
 	 */
 	const starts = new Map<string, { at: number; args: Bag }>();
 	let lastAssistantText = "";
+
+	const isExcluded = (toolName: string): boolean => {
+		try {
+			return deps.excluded?.(toolName) ?? false;
+		} catch {
+			// Unsure means private: a dropped event costs nothing.
+			return true;
+		}
+	};
 
 	const send = (meta: MetaOf, toolCallId: string | undefined, fields: HookPayload) => {
 		try {
@@ -116,8 +176,10 @@ export function createObserver(deps: ObserverDeps): Observer {
 			try {
 				if (!deps.enabled() || parentToolCallId(event)) return;
 				const e = bag(event);
+				const toolName = String(e?.toolName ?? "");
+				if (isExcluded(toolName)) return;
 				const id = typeof e?.toolCallId === "string" ? e.toolCallId : undefined;
-				const args = bag(e?.args) ?? {};
+				const args = capToolInput(bag(e?.args) ?? {});
 				if (id) {
 					starts.delete(id);
 					starts.set(id, { at: now(), args });
@@ -128,7 +190,7 @@ export function createObserver(deps: ObserverDeps): Observer {
 				}
 				send(meta, id, {
 					hook_event_name: "PreToolUse",
-					tool_name: String(e?.toolName ?? ""),
+					tool_name: toolName,
 					tool_input: args,
 				});
 			} catch {
@@ -143,6 +205,8 @@ export function createObserver(deps: ObserverDeps): Observer {
 				const started = id === undefined ? undefined : starts.get(id);
 				if (id !== undefined) starts.delete(id);
 				if (!deps.enabled()) return;
+				const toolName = String(e?.toolName ?? "");
+				if (isExcluded(toolName)) return;
 				// pi's own measure when it has one (≥ 1.1); else our timer, if
 				// the start was seen.
 				const measured = durationMs(event);
@@ -150,7 +214,7 @@ export function createObserver(deps: ObserverDeps): Observer {
 					measured ?? (started === undefined ? undefined : Math.max(0, Math.round(now() - started.at)));
 				const text = truncateForObserve(textOfAny(bag(e?.result)?.content));
 				const common = {
-					tool_name: String(e?.toolName ?? ""),
+					tool_name: toolName,
 					// tool_execution_end carries no args: the start's are sent again,
 					// as Boost's own integrations do. Boost closes the PreToolUse row
 					// by tool_use_id, which the meta supplies.

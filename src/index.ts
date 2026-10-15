@@ -88,7 +88,7 @@ import { compactMcpResult, isMcpTool } from "./mcp.ts";
 import { createObserver } from "./observe.ts";
 import { registerBadges } from "./render.ts";
 import { htmlAllowed, route } from "./router.ts";
-import { createSettingsStore, type SettingsStore } from "./settings.ts";
+import { createSettingsStore, excludedBy, type SettingsStore } from "./settings.ts";
 import {
 	type Compaction,
 	compactFullOutput,
@@ -269,6 +269,10 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 */
 	const observer = createObserver({
 		enabled: () => !isOff() && settings.effective().observe,
+		// `mcpExclude` is the user's say over which MCP bodies Boost keeps and
+		// uploads (spec §7.2); observe honours it like the MCP route does.
+		excluded: (toolName) =>
+			isMcpTool(toolName) && excludedBy(toolName, settings.effective().mcpExclude) !== undefined,
 		send: (hookMeta, fields) => client.observeDetached(hookMeta, fields),
 	});
 	// Filtering is measured locally; `boost sync` is what gets those numbers

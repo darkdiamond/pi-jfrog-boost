@@ -10,16 +10,25 @@ import {
 	withAwareness,
 } from "../src/awareness.ts";
 
-/** A binary-only install that is not on PATH: the longest command the text carries in practice. */
+/** A binary-only install that is not on PATH, on macOS. */
 const OFF_PATH = "'/Users/someone/.local/bin/boost'";
+/**
+ * Boost's Windows default (`%LOCALAPPDATA%\\boost\\bin\\boost.exe`) for a
+ * long user name, padded to 100 characters: longer than the command the text
+ * carries in practice, which is what the 1,200 budget is measured against.
+ */
+const LONG_WIN_PATH = `C:\\Users\\${"a".repeat(57)}\\AppData\\Local\\boost\\bin\\boost.exe`;
 
 const view = (over: Partial<AwarenessView> = {}): AwarenessView => ({
 	shellTools: [],
+	extraTools: [],
+	logs: false,
 	mcp: false,
 	documents: false,
 	notebooks: false,
 	boostCmd: "boost",
 	onPath: true,
+	callOperator: false,
 	...over,
 });
 
@@ -27,7 +36,7 @@ const inputs = (over: Partial<AwarenessInputs> = {}): AwarenessInputs => ({
 	ready: true,
 	awareness: true,
 	shellOn: true,
-	settings: { mcp: true, mcpExclude: [], documents: true, notebooks: true },
+	settings: { mcp: true, mcpExclude: [], documents: true, notebooks: true, readLogs: false, extraTools: [] },
 	boostVersion: [0, 15, 4],
 	mcpFlag: "unknown",
 	termsAccepted: true,
@@ -41,21 +50,21 @@ const inputs = (over: Partial<AwarenessInputs> = {}): AwarenessInputs => ({
 // ---------------------------------------------------------------------------
 // The text (spec §12)
 
-const SHELL_ONLY = `JFrog Boost shortens some tool output before you see it: \`bash\` output. Everything else, including \`read\` of text files, \`edit\` and \`write\`, is exact.
+const SHELL_ONLY = `JFrog Boost shortens some tool output before you see it: \`bash\` output. Everything else (\`read\` of text files, \`edit\`, \`write\`, …) is exact.
 - Shortened output is intentional and usually enough; prefer it.
-- If a shortened result ends with \`[Boost compressed ~85%. … boost retrieve 147]\` and you need a dropped detail, run \`boost retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) instead of re-running the tool. Retrieve narrowly: repeated retrieves switch that filter off on this machine for every agent.
-- For one command's exact output, prefix it with \`DISABLE_BOOST=1\`. Never pipe commands into \`boost\` yourself. curl/wget pages may arrive as readable text; \`DISABLE_BOOST=1 curl …\` gives raw HTML.
+- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`boost retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.
+- Prefix a command with \`DISABLE_BOOST=1\` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\` yourself.
 - Boost's secret redaction is best effort, not a security boundary.`;
 
 test("the shell-only text, exactly", () => {
 	assert.equal(buildAwareness(view({ shellTools: ["bash"] })), SHELL_ONLY);
 });
 
-const EVERYTHING_OFF_PATH = `JFrog Boost shortens some tool output before you see it: \`bash\` and \`powershell\` output, MCP tool results (\`mcp__*\`), and PDF and Office files you \`read\`. Everything else, including \`read\` of text files, \`edit\` and \`write\`, is exact.
+const EVERYTHING_OFF_PATH = `JFrog Boost shortens some tool output before you see it: \`bash\`, \`powershell\`, and \`fetch\` output, whole \`read\`s of *.log/*.out, MCP tool results (\`mcp__*\`), and PDF and Office files you \`read\`. Everything else (other \`read\`s, \`edit\`, \`write\`, …) is exact.
 - Shortened output is intentional and usually enough; prefer it.
-- If a shortened result ends with \`[Boost compressed ~85%. … boost retrieve 147]\` and you need a dropped detail, run \`${OFF_PATH} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) instead of re-running the tool. Retrieve narrowly: repeated retrieves switch that filter off on this machine for every agent.
-- For one command's exact output, prefix it with \`DISABLE_BOOST=1\`. Never pipe commands into \`boost\` yourself. curl/wget pages may arrive as readable text; \`DISABLE_BOOST=1 curl …\` gives raw HTML.
-- PDF and Office files, and notebooks read whole, that you \`read\` arrive as converted text, paged like any read (use offset to continue). Line numbers are not file lines; never \`edit\` from them. Read a notebook with offset=1 for its raw JSON.
+- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${OFF_PATH} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.
+- Prefix a command with \`DISABLE_BOOST=1\` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\` yourself.
+- Documents, and notebooks read whole, arrive as converted text, paged like any read. Line numbers are not file lines; never \`edit\` from them. offset=1 gives a notebook's raw JSON.
 - \`boost\` is not on PATH; use the full path above.
 - Boost's secret redaction is best effort, not a security boundary.`;
 
@@ -63,6 +72,8 @@ test("everything active, off PATH: the full text, exactly", () => {
 	const text = buildAwareness(
 		view({
 			shellTools: ["bash", "powershell"],
+			extraTools: ["fetch"],
+			logs: true,
 			mcp: true,
 			documents: true,
 			notebooks: true,
@@ -73,26 +84,60 @@ test("everything active, off PATH: the full text, exactly", () => {
 	assert.equal(text, EVERYTHING_OFF_PATH);
 });
 
+test("a 100-character Windows install path with every surface stays under 1,200 characters", () => {
+	assert.equal(LONG_WIN_PATH.length, 100);
+	const visible = ["read", "bash", "powershell", "fetch", "mcp__slack__slack_get_users"];
+	for (const loadout of [visible, visible.filter((t) => t !== "bash")]) {
+		const v = awarenessView(
+			inputs({
+				onPath: false,
+				binary: LONG_WIN_PATH,
+				platform: "win32",
+				loadout: { selected: loadout },
+				settings: { ...inputs().settings, readLogs: true, extraTools: ["fetch"] },
+			}),
+		);
+		const text = buildAwareness(v);
+		assert.ok(text, loadout.join());
+		assert.ok(text.length < 1200, `${loadout.join()}: ${text.length} characters`);
+	}
+});
+
 /** Every combination of surfaces, on and off PATH. */
 function* combinations(): Generator<[string, AwarenessView]> {
 	const shells: (readonly string[])[] = [[], ["bash"], ["powershell"], ["bash", "powershell"]];
 	for (const shellTools of shells) {
-		for (const mcp of [false, true]) {
-			for (const [documents, notebooks] of [
-				[false, false],
-				[true, false],
-				[true, true],
-			] as const) {
-				for (const onPath of [true, false]) {
-					const v = view({
-						shellTools,
-						mcp,
-						documents,
-						notebooks,
-						onPath,
-						boostCmd: onPath ? "boost" : OFF_PATH,
-					});
-					yield [JSON.stringify(v), v];
+		for (const [extraTools, logs] of [
+			[[], false],
+			[["fetch"], false],
+			[[], true],
+			[["fetch"], true],
+		] as const) {
+			for (const mcp of [false, true]) {
+				for (const [documents, notebooks] of [
+					[false, false],
+					[true, false],
+					[true, true],
+				] as const) {
+					for (const [onPath, boostCmd, callOperator] of [
+						[true, "boost", false],
+						[false, OFF_PATH, false],
+						[false, `"${LONG_WIN_PATH}"`, true],
+						[false, `& "${LONG_WIN_PATH}"`, false],
+					] as const) {
+						const v = view({
+							shellTools,
+							extraTools,
+							logs,
+							mcp,
+							documents,
+							notebooks,
+							onPath,
+							boostCmd,
+							callOperator,
+						});
+						yield [JSON.stringify(v), v];
+					}
 				}
 			}
 		}
@@ -102,7 +147,7 @@ function* combinations(): Generator<[string, AwarenessView]> {
 test("every surface combination is under 1,200 characters and deterministic", () => {
 	for (const [label, v] of combinations()) {
 		const text = buildAwareness(v);
-		const none = v.shellTools.length === 0 && !v.mcp && !v.documents;
+		const none = v.shellTools.length === 0 && v.extraTools.length === 0 && !v.logs && !v.mcp && !v.documents;
 		if (none) {
 			assert.equal(text, undefined, label);
 			continue;
@@ -119,6 +164,10 @@ test("each conditional line appears exactly when its surface is active", () => {
 		if (!text) continue;
 		assert.equal(text.includes("DISABLE_BOOST=1"), v.shellTools.length > 0, label);
 		assert.equal(text.includes("MCP tool results (`mcp__*`)"), v.mcp, label);
+		assert.equal(text.includes("`fetch`"), v.extraTools.length > 0, label);
+		assert.equal(text.includes("*.log/*.out"), v.logs, label);
+		assert.equal(text.includes("`read` of text files"), !v.logs, label);
+		assert.equal(text.includes("after `&`"), v.callOperator && !v.onPath, label);
 		assert.equal(text.includes("arrive as converted text"), v.documents, label);
 		assert.equal(text.includes("notebooks read whole"), v.notebooks, label);
 		assert.equal(text.includes("offset=1"), v.notebooks, label);
@@ -155,7 +204,7 @@ test("no claim that read, grep, find or ls output is compacted", () => {
 			if (!line.includes("`read`")) continue;
 			assert.match(
 				line,
-				/`read` of text files|files you `read`|that you `read` arrive as converted text/,
+				/`read` of text files|files you `read`|`read`s of \*\.log\/\*\.out|other `read`s/,
 				label,
 			);
 		}
@@ -248,6 +297,77 @@ test("off PATH, the model is given the quoted absolute path", () => {
 	const text = buildAwareness(awarenessView(inputs({ onPath: false })));
 	assert.ok(text?.includes("`'/usr/local/bin/boost' retrieve <id> --query"));
 	assert.ok(text?.includes("not on PATH"));
+});
+
+test("readLogs names whole log reads and stops calling text reads exact, behind the shell gate", () => {
+	const s = { ...inputs().settings, readLogs: true };
+	const v = awarenessView(inputs({ settings: s }));
+	assert.equal(v?.logs, true);
+	const first = buildAwareness(v)?.split("\n")[0] ?? "";
+	assert.match(first, /whole `read`s of \*\.log\/\*\.out/);
+	assert.match(first, /Everything else \(other `read`s,/);
+	assert.doesNotMatch(first, /`read` of text files/);
+	assert.equal(awarenessView(inputs({ settings: s, shellOn: false }))?.logs, false, "the gate is off");
+	assert.equal(
+		awarenessView(inputs({ settings: s, loadout: { selected: ["bash", "read"], hidden: ["read"] } }))?.logs,
+		false,
+		"read is not visible",
+	);
+	assert.equal(awarenessView(inputs())?.logs, false, "readLogs off");
+	// Logs alone are a surface: a session with only `read` visible still gets the section.
+	const only = awarenessView(
+		inputs({ settings: s, termsAccepted: false, loadout: { selected: ["read", "edit", "write"] } }),
+	);
+	assert.deepEqual([only?.logs, only?.shellTools, only?.documents], [true, [], false]);
+});
+
+test("a visible extraTools tool is named like bash when the gate is on, and is a surface on its own", () => {
+	const s = { ...inputs().settings, extraTools: ["fetch", "edit", "hidden_tool"] };
+	const loadout = { selected: ["read", "bash", "fetch", "edit"] };
+	const v = awarenessView(inputs({ settings: s, loadout }));
+	assert.deepEqual(v?.extraTools, ["fetch"], "not edit (never routed), not an invisible tool");
+	assert.match(buildAwareness(v) ?? "", /see it: `bash` and `fetch` output/);
+	assert.deepEqual(awarenessView(inputs({ settings: s, loadout, shellOn: false }))?.extraTools ?? [], []);
+	// Only fetch visible and nothing else active: still a section, but no DISABLE_BOOST line,
+	// which is about shell commands.
+	const only = awarenessView(
+		inputs({ settings: s, termsAccepted: false, loadout: { selected: ["read", "fetch"] } }),
+	);
+	assert.deepEqual(only?.extraTools, ["fetch"]);
+	const text = buildAwareness(only) ?? "";
+	assert.match(text, /see it: `fetch` output\./);
+	assert.doesNotMatch(text, /DISABLE_BOOST/);
+});
+
+test("on win32 off PATH, PowerShell gets the & call operator it needs", () => {
+	const win = { onPath: false, binary: "C:\\b\\boost.exe", platform: "win32" as const };
+	const ps = awarenessView(inputs({ ...win, loadout: { selected: ["read", "powershell"] } }));
+	assert.equal(ps?.boostCmd, '& "C:\\b\\boost.exe"');
+	assert.equal(ps?.callOperator, false);
+	assert.ok(buildAwareness(ps)?.includes('`& "C:\\b\\boost.exe" retrieve <id>'));
+	// bash and powershell: `&` would break bash, so the line names it instead.
+	const both = awarenessView(inputs({ ...win, loadout: { selected: ["read", "bash", "powershell"] } }));
+	assert.equal(both?.boostCmd, '"C:\\b\\boost.exe"');
+	assert.equal(both?.callOperator, true);
+	assert.match(
+		buildAwareness(both) ?? "",
+		/not on PATH; use the full path above \(in `powershell`, after `&`\)\./,
+	);
+	// bash only, POSIX, or on PATH: no operator.
+	assert.equal(awarenessView(inputs(win))?.boostCmd, '"C:\\b\\boost.exe"');
+	assert.equal(awarenessView(inputs(win))?.callOperator, false);
+	const posix = awarenessView(inputs({ onPath: false, loadout: { selected: ["powershell"] } }));
+	assert.equal(posix?.boostCmd, "'/usr/local/bin/boost'");
+	assert.equal(
+		awarenessView(inputs({ ...win, onPath: true, loadout: { selected: ["powershell"] } }))?.boostCmd,
+		"boost",
+	);
+	// Visible shells count whether or not the gate is on: retrieve runs in whatever shell there is.
+	assert.equal(
+		awarenessView(inputs({ ...win, shellOn: false, loadout: { selected: ["powershell", "mcp__a__b"] } }))
+			?.boostCmd,
+		'& "C:\\b\\boost.exe"',
+	);
 });
 
 test("POSIX quoting survives a quote and a space in the path", () => {

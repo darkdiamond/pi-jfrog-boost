@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HookMeta, HookPayload } from "../src/boost-client.ts";
 import { OBSERVE_TEXT_LIMIT } from "../src/content.ts";
-import { createObserver, MAX_PENDING_STARTS } from "../src/observe.ts";
+import {
+	capToolInput,
+	createObserver,
+	MAX_PENDING_STARTS,
+	OBSERVE_ARG_STRING_LIMIT,
+} from "../src/observe.ts";
 import {
 	agentSettledEvent,
 	messageEndEvent,
@@ -16,10 +21,13 @@ interface Sent {
 	fields: HookPayload;
 }
 
-function observer(options: { enabled?: () => boolean; now?: () => number } = {}) {
+function observer(
+	options: { enabled?: () => boolean; now?: () => number; excluded?: (toolName: string) => boolean } = {},
+) {
 	const sent: Sent[] = [];
 	const o = createObserver({
 		enabled: options.enabled ?? (() => true),
+		...(options.excluded ? { excluded: options.excluded } : {}),
 		send: (meta, fields) => sent.push({ meta, fields }),
 		...(options.now ? { now: options.now } : {}),
 	});
@@ -244,4 +252,60 @@ test("nothing throws: a throwing sender, a stale context's meta, malformed event
 		o.preCompact(undefined, stale);
 		o.postCompact(stale);
 	});
+});
+
+// ---------------------------------------------------------------------------
+// Privacy and size: mcpExclude, and capped arguments
+
+for (const line of ["0.86", "1.2"] as PiLine[]) {
+	test(`${line}: a tool matched by mcpExclude is not observed at all, Pre or Post`, () => {
+		const { o, sent, meta } = observer({ excluded: (name) => name.startsWith("mcp__secrets__") });
+		const secret = { toolName: "mcp__secrets__get", toolCallId: "s1", args: { name: "prod-db" } };
+		o.toolStart(toolExecutionStartEvent(line, secret), meta);
+		o.toolEnd(toolExecutionEndEvent(line, { ...secret, result: output("hunter2") }), meta);
+		assert.deepEqual(sent, []);
+		// Other tools still are.
+		o.toolStart(toolExecutionStartEvent(line, { toolName: "mcp__slack__post", toolCallId: "s2" }), meta);
+		assert.equal(sent.length, 1);
+	});
+}
+
+test("an exclusion check that throws drops the event rather than sending it", () => {
+	const { o, sent, meta } = observer({
+		excluded: () => {
+			throw new Error("boom");
+		},
+	});
+	assert.doesNotThrow(() =>
+		o.toolStart(toolExecutionStartEvent("1.2", { toolName: "mcp__x__y", toolCallId: "e1" }), meta),
+	);
+	assert.deepEqual(sent, []);
+});
+
+test("large arguments are capped in PreToolUse and PostToolUse alike; small ones pass unchanged", () => {
+	const { o, sent, meta } = observer();
+	const content = "x".repeat(200_000);
+	const args = { path: "/work/big.txt", content };
+	o.toolStart(toolExecutionStartEvent("1.2", { toolName: "write", toolCallId: "w1", args }), meta);
+	o.toolEnd(
+		toolExecutionEndEvent("1.2", { toolName: "write", toolCallId: "w1", result: output("ok") }),
+		meta,
+	);
+	for (const s of sent) {
+		const input = s.fields.tool_input as Record<string, unknown>;
+		assert.equal(input.path, "/work/big.txt", "the small fields survive");
+		assert.ok(typeof input.content === "string" && input.content.length < OBSERVE_ARG_STRING_LIMIT + 20);
+		assert.ok(JSON.stringify(input).length <= OBSERVE_TEXT_LIMIT, String(s.fields.hook_event_name));
+	}
+	assert.equal(args.content.length, 200_000, "the tool's own arguments are not mutated");
+	const small = { command: "ls -la" };
+	assert.equal(capToolInput(small), small);
+});
+
+test("arguments too large even with every string cut become one JSON excerpt", () => {
+	const many = Object.fromEntries(Array.from({ length: 5_000 }, (_, i) => [`k${i}`, "v".repeat(10)]));
+	const capped = capToolInput(many);
+	assert.deepEqual(Object.keys(capped), ["truncated_input"]);
+	assert.ok(String(capped.truncated_input).length <= OBSERVE_TEXT_LIMIT + 20);
+	assert.ok(String(capped.truncated_input).endsWith("…[truncated]"));
 });

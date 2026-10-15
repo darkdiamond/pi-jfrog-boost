@@ -808,6 +808,27 @@ test("tool telemetry is reported from the run itself, when opted in", async () =
 	assert.ok(calls.indexOf(pre as Recorded) < calls.indexOf(post as Recorded), "PreToolUse comes first");
 });
 
+test("observe skips MCP tools the user excluded with mcpExclude, and only those", async () => {
+	const { fire, calls } = harness({ file: { mcpExclude: ["mcp__secrets__*"] } });
+	// The settings file is read at session start, as in pi.
+	await fire("session_start", { reason: "startup" });
+	for (const toolName of ["mcp__secrets__get", "mcp__slack__post", "secrets_tool"]) {
+		await fire("tool_execution_start", toolExecutionStartEvent("1.2", { toolName, toolCallId: toolName }));
+		await fire(
+			"tool_execution_end",
+			toolExecutionEndEvent("1.2", {
+				toolName,
+				toolCallId: toolName,
+				result: { content: [{ type: "text", text: "body" }] },
+			}),
+		);
+	}
+	const names = calls
+		.filter((c) => c.kind === "observe" && c.fields.tool_name !== undefined)
+		.map((c) => c.fields.tool_name);
+	assert.deepEqual(names, ["mcp__slack__post", "mcp__slack__post", "secrets_tool", "secrets_tool"]);
+});
+
 test("a tool result is not observed from tool_result any more", async () => {
 	const { fire, calls } = harness();
 	await fire("tool_result", result("ls"));
