@@ -45,7 +45,16 @@ function run(command, args, cwd, env = process.env) {
 const work = mkdtempSync(join(tmpdir(), "pi-boost-min-"));
 let failed = false;
 try {
-	for (const entry of ["package.json", "package-lock.json", ".npmrc", "tsconfig.json", "src", "test"]) {
+	for (const entry of [
+		"package.json",
+		"package-lock.json",
+		".npmrc",
+		"tsconfig.json",
+		"settings.schema.json",
+		"src",
+		"skills",
+		"test",
+	]) {
 		if (existsSync(join(repo, entry))) cpSync(join(repo, entry), join(work, entry), { recursive: true });
 	}
 	run(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], work);
