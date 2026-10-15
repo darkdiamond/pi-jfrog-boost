@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import {
 	atLeast,
@@ -142,6 +143,68 @@ test("BOOST_EXE is an alias that comes right after BOOST_BIN", () => {
 		isExecutable: onDisk(exe, localBin("/home/dev")),
 	});
 	assert.equal(alias, exe, "the alias beats the default install location");
+});
+
+test("a relative or ~/ BOOST_BIN/BOOST_EXE is made absolute, so a spawn with another cwd finds the same file", () => {
+	// Every spawn runs with its own cwd (the probe uses home, filtering the
+	// session's cwd): a relative path checked against pi's cwd would be ENOENT
+	// there, and a bare name would be looked up on PATH instead.
+	const home = join(root, "tilde-home");
+	const relative = resolveBoostBinary({
+		env: { BOOST_BIN: join("bin", "boost") },
+		platform: "linux",
+		home,
+		isExecutable: onDisk(resolve("bin", "boost")),
+	});
+	assert.equal(relative, resolve("bin", "boost"));
+	assert.ok(isAbsolute(relative ?? ""), "the resolved path is absolute");
+	const bare = resolveBoostBinary({
+		env: { BOOST_EXE: "boost" },
+		platform: "linux",
+		home,
+		isExecutable: onDisk(resolve("boost")),
+	});
+	assert.equal(bare, resolve("boost"), "a bare name is the file that was checked, not a PATH lookup");
+	const tilde = resolveBoostBinary({
+		env: { BOOST_BIN: "~/tools/boost" },
+		platform: "linux",
+		home,
+		isExecutable: onDisk(join(home, "tools", "boost")),
+	});
+	assert.equal(tilde, join(home, "tools", "boost"));
+	const windowsFallback = resolveBoostBinary({
+		env: { BOOST_BIN: join("tools", "boost") },
+		platform: "win32",
+		home,
+		isExecutable: onDisk(resolve("tools", "boost")),
+	});
+	assert.equal(windowsFallback, resolve("tools", "boost"), "the Windows explicit fallback is absolute too");
+});
+
+test("a relative BOOST_BIN really runs from a different cwd", {
+	skip: process.platform === "win32" && "POSIX shell script fixture",
+}, () => {
+	const dir = mkdtempSync(join(root, "rel-"));
+	mkdirSync(join(dir, "bin"));
+	writeFileSync(join(dir, "bin", "boost"), "#!/bin/sh\necho boost v0.15.4\n");
+	chmodSync(join(dir, "bin", "boost"), 0o755);
+	const elsewhere = mkdtempSync(join(root, "cwd-"));
+	const before = process.cwd();
+	process.chdir(dir);
+	let binary: string | undefined;
+	try {
+		binary = resolveBoostBinary({
+			env: { BOOST_BIN: join("bin", "boost") },
+			platform: process.platform,
+			home: "",
+		});
+	} finally {
+		process.chdir(before);
+	}
+	assert.ok(binary);
+	const out = spawnSync(binary, ["version"], { cwd: elsewhere, encoding: "utf8" });
+	assert.equal(out.error, undefined);
+	assert.equal(out.stdout.trim(), "boost v0.15.4");
 });
 
 test("on Windows a .exe anywhere beats an extensionless boost anywhere", () => {

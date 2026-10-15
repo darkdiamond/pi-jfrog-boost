@@ -8,7 +8,7 @@
  * `boost.exe` under `%LOCALAPPDATA%\boost\bin`.
  */
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 
 export type BoostVersion = [number, number, number];
 
@@ -51,15 +51,31 @@ export function isExecutableFile(path: string): boolean {
 }
 
 /**
+ * `BOOST_BIN`, then its `BOOST_EXE` alias, made absolute. The check runs
+ * against pi's cwd but every spawn runs with its own (`home` for the probe,
+ * the session's cwd for filtering), so a relative `bin/boost` validated here
+ * would be ENOENT there — and a bare `boost` would be checked as `./boost`
+ * but spawned through a PATH lookup. A leading `~/` is the user's home: an
+ * env var set in quotes reaches us unexpanded.
+ */
+function explicitPaths(env: NodeJS.ProcessEnv, home: string): string[] {
+	const list: string[] = [];
+	for (const value of [env.BOOST_BIN, env.BOOST_EXE]) {
+		if (!value) continue;
+		const expanded = home && /^~[/\\]/.test(value) ? join(home, value.slice(2)) : value;
+		list.push(isAbsolute(expanded) ? expanded : resolve(expanded));
+	}
+	return list;
+}
+
+/**
  * Every place Boost may be, best first: `BOOST_BIN`, then its `BOOST_EXE`
  * alias (the name Boost's own hooks read), the default install directory,
  * the Windows install directory, then PATH.
  */
 function candidates(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home: string): string[] {
 	const names = platform === "win32" ? ["boost.exe", "boost"] : ["boost"];
-	const list: string[] = [];
-	if (env.BOOST_BIN) list.push(env.BOOST_BIN);
-	if (env.BOOST_EXE) list.push(env.BOOST_EXE);
+	const list = explicitPaths(env, home);
 	if (home) for (const name of names) list.push(join(home, ".local", "bin", name));
 	if (env.LOCALAPPDATA) list.push(join(env.LOCALAPPDATA, "boost", "bin", "boost.exe"));
 	for (const dir of pathDirs(env)) for (const name of names) list.push(join(dir, name));
@@ -94,8 +110,7 @@ export function resolveBoostBinary(options: ResolveOptions): string | undefined 
 	if (platform !== "win32") return list.find(isExecutable);
 	const exe = list.find((path) => path.toLowerCase().endsWith(".exe") && isExecutable(path));
 	if (exe) return exe;
-	const explicit = [env.BOOST_BIN, env.BOOST_EXE].filter((path): path is string => Boolean(path));
-	return explicit.find(isExecutable);
+	return explicitPaths(env, home).find(isExecutable);
 }
 
 function realpath(path: string): string {
