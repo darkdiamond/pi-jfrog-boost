@@ -71,10 +71,24 @@ test("the program is found behind assignments and wrappers", () => {
 		["stdbuf -oL make", "make"],
 		["stdbuf -o L make", "make"],
 		["ionice -c 3 make", "make"],
+		["do make", "make"],
+		["if make", "make"],
+		["then make", "make"],
+		["elif make", "make"],
+		["else make", "make"],
+		["while make", "make"],
+		["until make", "make"],
+		["! make", "make"],
+		["{ make", "make"],
+		["if ! FOO=1 make", "make"],
+		["do time make", "make"],
+		["if [ -f x ]", "["],
 	] as const) {
 		assert.equal(programOf(segment), program, segment);
 	}
 	assert.equal(programOf("export FOO=1"), undefined);
+	for (const closer of ["}", "fi", "done", "esac", "done < ids"])
+		assert.equal(programOf(closer), undefined, closer);
 });
 
 // ---------------------------------------------------------------------------
@@ -128,6 +142,19 @@ test("commands that run boost bypass it, however boost is named", () => {
 		"`boost retrieve 3`",
 		'echo "`boost retrieve 3`"',
 		"echo $(cat $(boost retrieve 3))",
+		"for i in 4; do boost retrieve $i; done",
+		"if boost retrieve 3; then :; fi",
+		"if true; then boost retrieve 3; fi",
+		"if false; then :; elif boost retrieve 3; then :; fi",
+		"if false; then :; else boost retrieve 3; fi",
+		"while boost retrieve 3; do :; done",
+		"until boost retrieve 3; do :; done",
+		"{ boost retrieve 3; }",
+		"! boost retrieve 3",
+		"case x in x) boost retrieve 3;; esac",
+		"eval boost retrieve 3",
+		"eval 'boost retrieve 3'",
+		'eval "cd x && boost retrieve 3"',
 	]) {
 		assert.equal(bypassesBoost(command), true, command);
 	}
@@ -179,6 +206,10 @@ test("commands that merely mention boost are filtered as usual", () => {
 		'echo "$(git log --grep=boost)"',
 		"echo `cat boost.toml`",
 		"pwsh -File boost.ps1",
+		"for f in boost*; do cat $f; done",
+		"if grep -q boost x; then echo boost; fi",
+		"{ echo boost; }",
+		"eval echo boost",
 		"",
 		undefined,
 		42,

@@ -134,6 +134,24 @@ const FLAGS_WITH_ARGUMENT: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 /** Wrappers with positional arguments before the command: `timeout 30 make`. */
 const POSITIONAL_ARGUMENTS: Readonly<Record<string, number>> = { timeout: 1 };
+/**
+ * Shell reserved words that come before a command in the same segment:
+ * `do boost retrieve $i`, `if boost …`, `then …`, `{ boost …`, `! boost …`.
+ * Unlike wrappers they take no flags of their own.
+ */
+const RESERVED_PREFIXES: ReadonlySet<string> = new Set([
+	"if",
+	"then",
+	"elif",
+	"else",
+	"do",
+	"while",
+	"until",
+	"!",
+	"{",
+]);
+/** Reserved words that close a compound command and run nothing: `}`, `fi`, `done`, `esac`. */
+const RESERVED_CLOSERS: ReadonlySet<string> = new Set(["}", "fi", "done", "esac"]);
 
 /** A program name without directory or `.exe`, lower-cased: `C:\bin\Boost.EXE` → `boost`. */
 export function programName(word: string): string {
@@ -146,8 +164,9 @@ export function programName(word: string): string {
  * only set up how it runs: `VAR=value` assignments, `export`,
  * `env [-i] [-u NAME] [VAR=…]`, `time`, `command`, `exec`, `nice [-n N]`,
  * `nohup`, `sudo [-u user]`, `timeout [-s SIG] DURATION`, `xargs [-n N]`,
- * `stdbuf -oL`, `ionice -c N`, and PowerShell's `.` (dot-sourcing). Empty
- * when there is no program (`export FOO=1` alone).
+ * `stdbuf -oL`, `ionice -c N`, PowerShell's `.` (dot-sourcing), and the
+ * shell's reserved words (`if`, `then`, `do`, `while`, `!`, `{`…). Empty
+ * when there is no program (`export FOO=1` alone, `done`, `}`).
  */
 export function commandWords(segment: string): string[] {
 	const list = words(segment);
@@ -158,6 +177,11 @@ export function commandWords(segment: string): string[] {
 			i++;
 			continue;
 		}
+		if (RESERVED_PREFIXES.has(word)) {
+			i++;
+			continue;
+		}
+		if (RESERVED_CLOSERS.has(word)) return [];
 		const lower = word.toLowerCase();
 		const withArgs = FLAGS_WITH_ARGUMENT[lower];
 		if (PLAIN_WRAPPERS.has(lower) || withArgs || lower === ".") {
@@ -195,11 +219,12 @@ const MAX_NESTING = 4;
 
 /**
  * The commands a segment hands to another shell, as text to parse again:
- * the script after `bash -c` (or `-lc`, `-ec`…), or everything after
- * PowerShell's `-c`/`-Command` or cmd's `/c`.
+ * the script after `bash -c` (or `-lc`, `-ec`…), everything after
+ * PowerShell's `-c`/`-Command` or cmd's `/c`, or the arguments of `eval`.
  */
 function innerScripts(argv: readonly string[]): string[] {
 	const program = programName(argv[0] ?? "");
+	if (program === "eval") return argv.length > 1 ? [argv.slice(1).join(" ")] : [];
 	if (POSIX_SHELLS.has(program)) {
 		const at = argv.findIndex((word, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
 		return at > 0 && at + 1 < argv.length ? [argv[at + 1] as string] : [];
