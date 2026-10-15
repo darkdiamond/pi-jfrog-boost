@@ -8,6 +8,7 @@ import {
 	aborted,
 	asResult,
 	canRenderTools,
+	deferredTools,
 	durationMs,
 	hasStructured,
 	loadout,
@@ -87,4 +88,30 @@ test("asResult is a cast: the patch, structuredContent included, passes through 
 		isError: false,
 	};
 	assert.equal(asResult(patch) as unknown, patch);
+});
+
+test("deferredTools names only registered tools with deferred exposure", () => {
+	const pi = (getAllTools: unknown) => ({ getAllTools }) as unknown as Parameters<typeof deferredTools>[0];
+	assert.deepEqual(
+		deferredTools(
+			pi(() => [
+				{ name: "read", exposure: "direct" },
+				{ name: "mcp__slack__slack_get_users", exposure: "deferred" },
+				{ name: "mcp__gh__search", exposure: "codemode" },
+				{ name: "mcp__x__y", exposure: "hidden" },
+				{ name: "tool_search", exposure: "direct" },
+			]),
+		),
+		["mcp__slack__slack_get_users"],
+	);
+	assert.deepEqual(deferredTools(pi(undefined)), [], "a pi without getAllTools");
+	assert.deepEqual(deferredTools(pi(() => [{ name: "mcp__a__b" }])), [], "a pi without exposure");
+	assert.deepEqual(
+		deferredTools(
+			pi(() => {
+				throw new Error("not bound yet");
+			}),
+		),
+		[],
+	);
 });

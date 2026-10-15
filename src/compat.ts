@@ -89,6 +89,26 @@ export function loadout(event: unknown): { selected?: string[]; hidden?: string[
 	return { ...(selected ? { selected } : {}), ...(hidden ? { hidden } : {}) };
 }
 
+/**
+ * The registered tools with `deferred` exposure (pi 1.x): declared to the
+ * model only once `tool_search` loads them. Empty on a pi without
+ * `getAllTools` or tool exposure, or if the call throws.
+ */
+export function deferredTools(pi: ExtensionAPI): string[] {
+	try {
+		const all = (pi as unknown as Bag).getAllTools;
+		if (typeof all !== "function") return [];
+		const tools: unknown = all.call(pi);
+		if (!Array.isArray(tools)) return [];
+		return tools
+			.map(bag)
+			.filter((tool) => tool?.exposure === "deferred" && typeof tool.name === "string")
+			.map((tool) => tool?.name as string);
+	} catch {
+		return [];
+	}
+}
+
 /** Whether this pi can wrap tool rendering (pi ≥ 1.0.1), which badges need. */
 export function canRenderTools(pi: ExtensionAPI): boolean {
 	return typeof (pi as unknown as Bag).registerToolRenderer === "function";

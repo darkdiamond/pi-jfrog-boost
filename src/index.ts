@@ -66,6 +66,7 @@ import {
 import { type CommandHost, completions, createBoostCommand } from "./commands.ts";
 import {
 	asResult,
+	deferredTools,
 	hasStructured,
 	loadout,
 	parentToolCallId,
@@ -550,7 +551,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * the version), the off switches (`/boost on|off` included), the
 	 * settings, Boost's config (mtime-cached, so it changes when the file
 	 * does), the binary and whether it is on PATH (an install), and the
-	 * loadout. The breaker, a busy semaphore and the savings are not among
+	 * loadout (with the `deferred` tools a visible `tool_search` can load). The breaker, a busy semaphore and the savings are not among
 	 * them, so a breaker that opens mid-session leaves the section — and the
 	 * provider's prompt cache — byte-identical.
 	 */
@@ -569,6 +570,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			mcpFlag: cfg ? resolveFlag(cfg, MCP_FILTERING_FLAG, env).value : "unknown",
 			termsAccepted: cfg?.termsAccepted ?? false,
 			loadout: loadout(event),
+			deferred: deferredTools(pi),
 			binary,
 			onPath: binary ? binaryOnPath(binary) : true,
 			platform: process.platform,

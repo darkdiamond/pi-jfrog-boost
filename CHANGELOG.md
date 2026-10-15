@@ -140,6 +140,13 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   was compacted anyway.
 - `boost retrieve` and other commands that run Boost are no longer compacted a
   second time, which replaced the recovered original with yet another marker.
+- The awareness text told a PowerShell-only model to prefix commands with
+  `DISABLE_BOOST=1`, which PowerShell cannot parse. It now gives
+  `$env:DISABLE_BOOST=1;` there, and both forms when both shells are visible.
+- With pi's `deferred` MCP exposure, the awareness text left MCP out for the
+  prompt in which `tool_search` loads an `mcp__*` tool, although its results
+  were already shortened. Deferred MCP tools now count once `tool_search` is
+  visible.
 
 ### Changed
 

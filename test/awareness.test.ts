@@ -53,7 +53,7 @@ const inputs = (over: Partial<AwarenessInputs> = {}): AwarenessInputs => ({
 const SHELL_ONLY = `JFrog Boost shortens some tool output before you see it: \`bash\` output. Everything else (\`read\` of text files, \`edit\`, \`write\`, …) is exact.
 - Shortened output is intentional and usually enough; prefer it.
 - If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`boost retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.
-- Prefix a command with \`DISABLE_BOOST=1\` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\` yourself.
+- Prefix a command with \`DISABLE_BOOST=1\` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\`.
 - Boost's secret redaction is best effort, not a security boundary.`;
 
 test("the shell-only text, exactly", () => {
@@ -63,7 +63,7 @@ test("the shell-only text, exactly", () => {
 const EVERYTHING_OFF_PATH = `JFrog Boost shortens some tool output before you see it: \`bash\`, \`powershell\`, and \`fetch\` output, whole \`read\`s of *.log/*.out, MCP tool results (\`mcp__*\`), and PDF and Office files you \`read\`. Everything else (other \`read\`s, \`edit\`, \`write\`, …) is exact.
 - Shortened output is intentional and usually enough; prefer it.
 - If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${OFF_PATH} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.
-- Prefix a command with \`DISABLE_BOOST=1\` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\` yourself.
+- Prefix \`DISABLE_BOOST=1\` (\`$env:DISABLE_BOOST=1;\` in \`powershell\`) for exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\`.
 - Documents, and notebooks read whole, arrive as converted text, paged like any read. Line numbers are not file lines; never \`edit\` from them. offset=1 gives a notebook's raw JSON.
 - \`boost\` is not on PATH; use the full path above.
 - Boost's secret redaction is best effort, not a security boundary.`;
@@ -176,6 +176,22 @@ test("each conditional line appears exactly when its surface is active", () => {
 	}
 });
 
+test("the exact-output opt-out is spelled for each visible shell", () => {
+	const optOut = (shellTools: string[]) =>
+		buildAwareness(view({ shellTools }))
+			?.split("\n")
+			.find((line) => line.includes("DISABLE_BOOST"));
+	assert.match(optOut(["bash"]) ?? "", /^- Prefix a command with `DISABLE_BOOST=1` for its exact output/);
+	// `DISABLE_BOOST=1 Get-Content x` is a parse error in PowerShell.
+	const ps = optOut(["powershell"]) ?? "";
+	assert.match(ps, /^- Start a command with `\$env:DISABLE_BOOST=1;` for its exact output/);
+	assert.doesNotMatch(ps, /`DISABLE_BOOST=1/);
+	assert.match(
+		optOut(["bash", "powershell"]) ?? "",
+		/^- Prefix `DISABLE_BOOST=1` \(`\$env:DISABLE_BOOST=1;` in `powershell`\) for exact output/,
+	);
+});
+
 test("surfaces are joined as one, two or three items", () => {
 	const first = (v: AwarenessView) => buildAwareness(v)?.split("\n")[0];
 	assert.match(first(view({ mcp: true })) ?? "", /see it: MCP tool results \(`mcp__\*`\)\. /);
@@ -248,6 +264,42 @@ test("the shell surface needs the gate and a visible shell tool", () => {
 		awarenessView(inputs({ loadout: { selected: ["bash", "read"], hidden: ["bash"] } }))?.shellTools,
 		[],
 		"a hidden tool is not visible",
+	);
+});
+
+test("deferred MCP tools count as visible while tool_search can load them", () => {
+	// pi 1.2 `deferred` exposure: the prompt in which tool_search loads an
+	// mcp__ tool still has it out of selectedTools, yet its result is shortened.
+	const searchOnly = { selected: ["read", "bash", "edit", "write", "tool_search"] };
+	const deferred = ["mcp__slack__slack_get_users"];
+	const v = awarenessView(inputs({ loadout: searchOnly, deferred }));
+	assert.equal(v?.mcp, true);
+	assert.match(buildAwareness(v) ?? "", /MCP tool results \(`mcp__\*`\)/);
+	assert.equal(awarenessView(inputs({ loadout: searchOnly }))?.mcp, false, "no deferred MCP tool");
+	assert.equal(
+		awarenessView(inputs({ loadout: { selected: ["read", "bash"] }, deferred }))?.mcp,
+		false,
+		"no tool_search to load it",
+	);
+	assert.equal(
+		awarenessView(inputs({ loadout: { ...searchOnly, hidden: ["tool_search"] }, deferred }))?.mcp,
+		false,
+		"tool_search hidden",
+	);
+	assert.equal(
+		awarenessView(
+			inputs({
+				loadout: searchOnly,
+				deferred,
+				settings: { ...inputs().settings, mcpExclude: ["mcp__slack__*"] },
+			}),
+		)?.mcp,
+		false,
+		"every deferred MCP tool excluded",
+	);
+	assert.equal(
+		awarenessView(inputs({ loadout: searchOnly, deferred, boostVersion: [0, 15, 2] }))?.mcp,
+		false,
 	);
 });
 

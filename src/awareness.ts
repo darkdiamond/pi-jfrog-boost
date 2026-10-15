@@ -13,7 +13,8 @@
  *   actually active in this session: shell output only when Boost's shell
  *   gate is on and a shell tool (or an `extraTools` tool, routed like one)
  *   is visible, whole reads of logs only when `readLogs` is on as well, MCP
- *   only when the route can run and an `mcp__*` tool is visible, documents
+ *   only when the route can run and an `mcp__*` tool is visible (or
+ *   `deferred` and loadable by a visible `tool_search`), documents
  *   only when `read` is visible and the Preview Agreement is accepted. And
  *   it never calls a surface exact that is not: with `readLogs` on, `read`
  *   of a text file is no longer always exact, so the text stops saying so.
@@ -102,6 +103,12 @@ export interface AwarenessInputs {
 	termsAccepted: boolean;
 	/** `systemPromptOptions` loadout (compat.ts `loadout`). */
 	loadout: { selected?: readonly string[]; hidden?: readonly string[] };
+	/**
+	 * Registered tools with pi 1.x `deferred` exposure (compat.ts
+	 * `deferredTools`): out of the loadout until `tool_search` loads them,
+	 * and callable in the very prompt that loads them.
+	 */
+	deferred?: readonly string[];
 	/** The resolved binary. */
 	binary: string | undefined;
 	onPath: boolean;
@@ -182,9 +189,16 @@ export function awarenessView(r: AwarenessInputs): AwarenessView | undefined {
 	// explicit `boost-mcp-filtering = false`, a Boost before 0.15.3, or every
 	// visible MCP tool excluded means no MCP result will ever be shortened.
 	const mcpRoute = r.settings.mcp && r.mcpFlag !== false && atLeast(r.boostVersion, MCP_MIN_VERSION);
+	// With `deferred` MCP exposure the `mcp__*` tools join the loadout only on
+	// the prompt after `tool_search` loads them, yet the model calls them —
+	// and the route shortens them — in the prompt that loads them. So with
+	// `tool_search` visible, a deferred MCP tool counts as visible already.
+	const reachable = visible.includes("tool_search") ? [...visible, ...(r.deferred ?? [])] : visible;
 	const mcp =
 		mcpRoute &&
-		visible.some((name) => name.startsWith("mcp__") && excludedBy(name, r.settings.mcpExclude) === undefined);
+		reachable.some(
+			(name) => name.startsWith("mcp__") && excludedBy(name, r.settings.mcpExclude) === undefined,
+		);
 	const documents = visible.includes("read") && r.settings.documents && r.termsAccepted;
 	const notebooks = documents && r.settings.notebooks;
 	if (shellTools.length === 0 && extraTools.length === 0 && !logs && !mcp && !documents) return undefined;
@@ -237,8 +251,20 @@ export function buildAwareness(view: AwarenessView | undefined): string | undefi
 		`- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${b} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.`,
 	];
 	if (view.shellTools.length > 0) {
+		// `DISABLE_BOOST=1 cmd` is a parse error in PowerShell ("The term
+		// 'DISABLE_BOOST=1' is not recognized"); there the opt-out is
+		// `$env:DISABLE_BOOST=1;`, the form shell.ts recognises. Name the form
+		// for each visible shell.
+		const bash = view.shellTools.includes("bash");
+		const ps = view.shellTools.includes("powershell");
+		const how =
+			bash && ps
+				? "Prefix `DISABLE_BOOST=1` (`$env:DISABLE_BOOST=1;` in `powershell`)"
+				: ps
+					? "Start a command with `$env:DISABLE_BOOST=1;`"
+					: "Prefix a command with `DISABLE_BOOST=1`";
 		lines.push(
-			"- Prefix a command with `DISABLE_BOOST=1` for its exact output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into `boost` yourself.",
+			`- ${how} for ${bash && ps ? "exact" : "its exact"} output (e.g. raw HTML from curl/wget, which may arrive as readable text). Never pipe into \`boost\`.`,
 		);
 	}
 	if (view.documents) {
