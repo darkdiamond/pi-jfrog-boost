@@ -19,6 +19,7 @@ import {
 	createCounters,
 	createReadiness,
 	type Readiness,
+	type ReadinessState,
 } from "../src/health.ts";
 import {
 	createBoostExtension,
@@ -85,6 +86,7 @@ interface HarnessOptions {
 	/** `--no-boost`'s value, as `pi.getFlag` returns it. */
 	flag?: boolean | string;
 	readiness?: Readiness;
+	breaker?: Breaker;
 	settings?: SettingsStore;
 	config?: ConfigReader;
 	counters?: Counters;
@@ -99,6 +101,7 @@ function harness({
 	file,
 	flag,
 	readiness = fixedReadiness(),
+	breaker,
 	settings,
 	config = fixedConfig(CLI_ON),
 	counters,
@@ -158,6 +161,7 @@ function harness({
 			}),
 		config,
 		readiness,
+		...(breaker ? { breaker } : {}),
 		...(counters ? { counters } : {}),
 		// Each harness is its own process as far as once-only notices go.
 		notices: createNotices(),
@@ -862,6 +866,39 @@ test("with telemetry off, not one observe: tools, replies, compaction, session s
 	await fire("session_compact", {});
 	assert.deepEqual((patched as { content: unknown }).content, [{ type: "text", text: "compacted" }]);
 	assert.equal(calls.filter((c) => c.kind === "observe").length, 0);
+});
+
+test("no observe while Boost is known not to work or the breaker has paused it", async () => {
+	const tool = async (fire: (event: string, payload: unknown) => Promise<unknown>) => {
+		await fire("tool_execution_start", toolExecutionStartEvent("1.2", { toolName: "bash" }));
+		await fire("tool_execution_end", toolExecutionEndEvent("1.2", { toolName: "bash" }));
+	};
+	for (const state of [
+		{ kind: "not-responding" },
+		{ kind: "unknown-version" },
+		{ kind: "too-old", version: [0, 14, 0] },
+		{ kind: "missing" },
+	] as ReadinessState[]) {
+		const { fire, calls } = harness({ readiness: fixedReadiness(state) });
+		await fire("session_start", { reason: "startup" });
+		await tool(fire);
+		assert.equal(calls.filter((c) => c.kind === "observe").length, 0, state.kind);
+	}
+
+	// Probing still sends: a first session's sessionStart fires before the probe settles.
+	const probing = harness({ readiness: fixedReadiness({ kind: "probing" }) });
+	await probing.fire("session_start", { reason: "startup" });
+	assert.equal(observed(probing.calls, "sessionStart").length, 1);
+
+	// The breaker is read live: open stops observe, closed lets it through again.
+	let state: BreakerState = { kind: "open", until: Date.now() + 60_000, reason: "slow" };
+	const breaker: Breaker = { allow: () => true, record: () => {}, reset: () => {}, state: () => state };
+	const paused = harness({ breaker });
+	await tool(paused.fire);
+	assert.equal(paused.calls.filter((c) => c.kind === "observe").length, 0);
+	state = { kind: "closed" };
+	await tool(paused.fire);
+	assert.equal(paused.calls.filter((c) => c.kind === "observe").length, 2);
 });
 
 test("the assistant's reply is reported when the agent settles, not when a loop ends", async () => {

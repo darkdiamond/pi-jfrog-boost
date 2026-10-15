@@ -103,6 +103,12 @@ export interface BoostTimeouts {
 	exec: number;
 	/** Detached `boost sync` is killed after this long. */
 	syncWatchdog: number;
+	/**
+	 * Detached `boost hook observe claude` is killed after this long. One runs
+	 * per tool start, tool end, settle and compaction, so a hung Boost would
+	 * otherwise leave a growing pile of children behind.
+	 */
+	observeWatchdog: number;
 }
 
 export const DEFAULT_TIMEOUTS: Readonly<BoostTimeouts> = {
@@ -110,6 +116,7 @@ export const DEFAULT_TIMEOUTS: Readonly<BoostTimeouts> = {
 	version: 8_000,
 	exec: 30_000,
 	syncWatchdog: 120_000,
+	observeWatchdog: 30_000,
 };
 
 /** Filter and MCP: `min(10 s, 3 s + 4 ms per KiB)` (spec §8.5). */
@@ -196,7 +203,7 @@ export interface BoostClient {
 	convert(meta: HookMeta, path: string, options?: CallOptions): Promise<BoostCall>;
 	/** `boost hook claude` with a PostToolUse payload (JSON text) on stdin. */
 	mcp(meta: HookMeta, payload: string, options?: CallOptions): Promise<BoostCall>;
-	/** `boost hook observe claude`, detached. The caller decides whether observe is on. */
+	/** `boost hook observe claude`, detached, with a 30 s watchdog. The caller decides whether observe is on. */
 	observeDetached(meta: HookMeta, fields: HookPayload): void;
 	/** `boost sync --max-batches 20`, detached, with a 120 s watchdog. */
 	sync(meta: HookMeta, onExit?: (code: number | null) => void): void;
@@ -489,6 +496,7 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 				cwd: meta.cwd,
 				env: childEnv("observe", meta, fields.tool_input),
 				input: payload,
+				watchdogMs: timeouts.observeWatchdog,
 			});
 		},
 		sync(meta, onExit) {

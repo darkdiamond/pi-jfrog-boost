@@ -28,7 +28,7 @@ import {
 	MAX_INPUT_BYTES,
 	parseGoDuration,
 } from "../src/boost-client.ts";
-import type { ProcessRunner, RunResult } from "../src/boost-process.ts";
+import { createProcessRunner, type ProcessRunner, type RunResult } from "../src/boost-process.ts";
 import { createBreaker } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
 
@@ -518,6 +518,36 @@ test("observe sends the payload to `boost hook observe claude`, detached", async
 		cwd: root,
 		hook_event_name: "sessionStart",
 	});
+});
+
+test("a hung observe is killed by its watchdog, 30 s by default", async () => {
+	// The default bound, as handed to the runner.
+	const seen: (number | undefined)[] = [];
+	const spy: ProcessRunner = {
+		run: async (): Promise<RunResult> => ({ code: 0, stdout: "", ms: 0, timedOut: false, aborted: false }),
+		detached: (_exe, _args, options) => seen.push(options.watchdogMs),
+		active: () => 0,
+		killAll: () => {},
+	};
+	clientFor({}, { runner: spy }).observeDetached(meta, { hook_event_name: "sessionStart" });
+	assert.deepEqual(seen, [30_000]);
+
+	// And a real hung child is killed once it runs out: the client's runner,
+	// wrapped only to hear the exit observe itself never asks for.
+	const real = createProcessRunner({ launcher, platform: process.platform });
+	let onExit: ((code: number | null) => void) | undefined;
+	const runner: ProcessRunner = {
+		...real,
+		detached: (exe, args, options) => real.detached(exe, args, { ...options, ...(onExit ? { onExit } : {}) }),
+	};
+	const client = clientFor({ FAKE_BOOST_MODE: "hang" }, { runner, timeouts: { observeWatchdog: 200 } });
+	const started = Date.now();
+	const code = await exitOf((resolve) => {
+		onExit = resolve;
+		client.observeDetached(meta, { hook_event_name: "sessionStart" });
+	});
+	assert.equal(code, null);
+	assert.ok(Date.now() - started < 5_000);
 });
 
 test("exec reports the exit code, stdout and the injected clock's elapsed time", async () => {

@@ -272,9 +272,20 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * it reads `ctx.sessionManager` and `ctx.cwd`, which pi 1.2 turns into
 	 * getters that throw on a stale context, and such a throw must not reach
 	 * pi's handler-error path any more than a client's.
+	 *
+	 * Nor while Boost is known not to work (not responding, too old, an
+	 * unreadable version, missing) or the breaker has paused it: each event is
+	 * a detached child, and against a hung Boost those would only pile up.
+	 * `probing` still sends, so a first session's `sessionStart` (fired before
+	 * the probe settles) is not lost; the client's watchdog bounds those.
+	 * Both reads are cached state, never a probe.
 	 */
+	const boostUsable = (): boolean => {
+		const kind = readiness.state().kind;
+		return (kind === "ready" || kind === "probing") && breaker.state().kind !== "open";
+	};
 	const observer = createObserver({
-		enabled: () => !isOff() && settings.effective().observe,
+		enabled: () => !isOff() && settings.effective().observe && boostUsable(),
 		// `mcpExclude` is the user's say over which MCP bodies Boost keeps and
 		// uploads (spec §7.2); observe honours it like the MCP route does.
 		excluded: (toolName) =>
