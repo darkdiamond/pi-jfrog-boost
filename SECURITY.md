@@ -25,7 +25,10 @@ access pi has. Concretely, it:
   is recorded, filters Boost disabled) and **never writes it**;
 - writes only its own settings file (`~/.pi/agent/jfrog-boost.json`, and only
   from `/boost settings`) and numbers-only `jfrog-boost-stats` entries in
-  the pi session;
+  the pi session, apart from a confirmed binary-only `/boost install`, which
+  downloads and extracts the release in a private temp directory, copies the
+  binary to `~/.local/bin/boost.tmp-<pid>` and renames it to
+  `~/.local/bin/boost`;
 - triggers `boost sync` when the agent settles and on shutdown. Sync uploads
   Boost's local measurements to JFrog, and then prunes them locally. Turn it
   off with `sync: false` or `PI_BOOST_SYNC=0`;

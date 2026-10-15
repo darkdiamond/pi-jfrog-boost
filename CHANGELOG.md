@@ -101,10 +101,12 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 - A global settings file (`~/.pi/agent/jfrog-boost.json`, with
   `settings.schema.json`), the `--no-boost` flag, `BOOST_DISABLED=1` as a
   second kill switch, and `BOOST_EXE` as an alias of `BOOST_BIN`.
-- A circuit breaker that pauses Boost after three slow or failed calls,
+- A circuit breaker that pauses Boost after three calls in a row that timed
+  out, crashed or were very slow,
   abort support, at most four concurrent Boost processes, and size gates.
 - `/boost install`'s binary-only option: the release asset from GitHub,
-  checked against GitHub's published SHA-256, placed in `~/.local/bin`, with
+  checked against GitHub's published SHA-256 when GitHub publishes one (the
+  confirm text says when it does not), placed in `~/.local/bin`, with
   no installer script, rc edits, hooks or terms.
 - A hermetic e2e suite with a tripwire on the real Boost state, run against
   pi 1.2.0 (`npm run test:e2e`) and 0.86.1 (`npm run test:e2e:min`); a CI
@@ -114,7 +116,8 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 ### Security
 
 - The install consent text is accurate, and the default install path runs no
-  third-party script and verifies what it downloads.
+  third-party script and verifies what it downloads against GitHub's
+  published SHA-256 when one is published, and tells you when none is.
 - README and SECURITY.md say what `boost sync` uploads, that Boost stores and
   syncs MCP bodies, and how to turn each off. The "makes no network requests"
   wording is replaced by the exact list of what the package can do.

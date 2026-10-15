@@ -33,7 +33,11 @@ import type { BadReason, BreakerState, ReadinessState } from "./health.ts";
 import type { OffReason, Settings } from "./settings.ts";
 import { BUCKETS, bucketSavings, type StatsSnapshot, totals } from "./stats.ts";
 
-/** pi's status slot; also what powerline `customItems` match on (`{"status":"jfrog-boost"}`). */
+/**
+ * pi's status slot; also what pi-powerline-footer's `customItems` match on:
+ * `{"powerline":{"customItems":[{"id":"boost","statusKey":"jfrog-boost"}]}}`
+ * (the shape the README documents).
+ */
 export const STATUS_KEY = "jfrog-boost";
 /** The usual rule of thumb for English text and code. */
 export const CHARS_PER_TOKEN = 4;
@@ -318,9 +322,13 @@ function versionNote(version: BoostVersion): string {
 
 function binaryLine(view: StatusView): string {
 	// While Boost is off nothing is resolved or probed (health.ts), so a
-	// missing path means "not looked for", not "not installed".
+	// missing path usually means "not looked for", not "not installed". But a
+	// session where the probe already found no binary and the user then ran
+	// `/boost off` was checked: keep the install hint there, because hiding it
+	// would make a missing binary look like a deliberate off.
 	if (!view.binary) {
-		return view.off || view.readiness.kind === "disabled"
+		if (view.readiness.kind === "missing") return "not installed (/boost install)";
+		return view.off || view.readiness.kind === "disabled" || view.readiness.kind === "probing"
 			? "not checked while Boost is off"
 			: "not installed (/boost install)";
 	}

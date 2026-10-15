@@ -157,6 +157,7 @@ and ships a `boost` skill with the longer version.
 | `/boost report` | `boost report -t`, Boost's own measured savings |
 | `/boost doctor` | `boost doctor` |
 | `/boost install` | Install or update the Boost CLI (asks first). `/boost-install` is an alias. |
+| `/boost help` | What each subcommand does |
 
 **Start pi with Boost off:** `pi --no-boost=true "your prompt"`. Write the
 `=true`: pi's parser takes the next argument as the flag's value, so
@@ -240,12 +241,15 @@ What leaves your machine, and how to stop it:
 
 ## Performance
 
-- An eligible call costs about 200–400 ms, the time Boost takes. Small
-  outputs (under 2 KiB) are not sent, and nothing over 1 MiB is.
+- An eligible call costs the time Boost takes: about 0.2 s for a small
+  output, about 0.8 s for 200 KB (Boost v0.15.4, macOS). Small
+  outputs (under 2 KiB) are not sent, and nothing over 1 MiB is, except pi's
+  full-output file for a result pi truncated, which is capped at 2 MiB.
 - Timeouts: `min(10 s, 3 s + 4 ms per KiB)` for shell and MCP, 20 s for a
   document, 8 s for `boost version`. At most four Boost processes run at
   once; a fifth result passes through instead of waiting.
-- **Breaker.** Three slow or failed calls in a row pause Boost for 5 minutes
+- **Breaker.** Three calls in a row that timed out, crashed or were very slow
+  pause Boost for 5 minutes (a non-zero exit from Boost does not count)
   (then one trial call; up to 30 minutes if it keeps failing). The footer
   says `paused (slow)` and output passes through unchanged. `/boost on` or
   `/boost status` → retry resets it.
@@ -256,9 +260,11 @@ What leaves your machine, and how to stop it:
   TTL, so a call stays near 0.2 s. Flags are then refreshed by the idle-time
   `boost sync` or by any other Boost integration. **With sync off and no other
   Boost agent on the machine, they are not refreshed at all**, and
-  `/boost status` says so (`flags stale (N days); not refreshed: sync is off`).
+  `/boost status` says so on its `flags` line: `stale (N days); not refreshed:
+  sync is off`, or `never fetched; not refreshed: sync is off` when Boost has
+  never fetched them.
 - The readiness check never blocks a tool: results pass through until
-  `boost version` has answered (~150 ms).
+  `boost version` has answered (~160 ms).
 
 ## Compatibility
 
@@ -266,12 +272,12 @@ What leaves your machine, and how to stop it:
 |---|---|---|---|
 | **pi** | 0.86.1, 1.2.0 | other versions from 0.86.1 | CI typechecks and unit-tests 0.86.1 and ^1.2.0, plus pi@latest weekly |
 | **Boost** | 0.15.4 | 0.13.13 – 0.15.3, and newer than 0.15.4 | `/boost status` says "newer than validated" for newer versions |
-| **Node** | 22.19, 24 | | |
-| **OS** | macOS (end to end), Linux / Windows / macOS (unit tests in CI) | Linux and Windows against a real Boost | |
+| **Node** | 22.23 | 22.19 and newer | CI matrix (unit tests): 22.19, 24 — pending until CI is green on the release commit |
+| **OS** | macOS | Linux, Windows | CI matrix (unit tests): Linux, Windows, macOS — pending until CI is green on the release commit |
 | **Forks** (oh-my-pi and others) | — | unsupported | `extraTools` can route renamed shell tools |
 
 "Tested" means the hermetic end-to-end suite passed against the real Boost
-binary on that pi version (22 of 22 on pi 1.2.0; 21 of 22 on pi 0.86.1, which
+binary on that pi version, Node version and OS (22 of 22 on pi 1.2.0; 21 of 22 on pi 0.86.1, which
 has no nested tool calls to test). Some features depend on the versions:
 
 - **MCP** needs pi ≥ 0.99 (built-in MCP) and Boost ≥ 0.15.3 (MCP filters).
@@ -294,7 +300,8 @@ the same output is not filtered twice.
 been Boost's default since 0.14.6. `/boost settings` → Shell output: on turns
 it on for pi only. `/boost status` shows where the flag value came from.
 
-**`boost: paused (slow)`.** Three Boost calls in a row timed out or failed.
+**`boost: paused (slow)`.** Three Boost calls in a row timed out, crashed or
+were very slow.
 Output passes through unchanged until the pause ends. `/boost status` shows the
 reason; `/boost doctor` runs Boost's own checks; `/boost on` resumes now.
 

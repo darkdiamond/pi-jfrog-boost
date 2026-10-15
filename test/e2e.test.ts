@@ -195,19 +195,33 @@ function piFor(map: Map<string, Handler[]>): ExtensionAPI {
  * Create the extension on `map` and wait until Boost is ready. Readiness is
  * probed in the background from session_start and never awaited by a tool
  * result (spec §8.1), so wait for it the way a session's first turn does —
- * with a generous bound for a loaded machine. The awareness section is only
- * set once Boost is ready.
+ * with a generous bound for a loaded machine — then read the verdict from
+ * the extension's own readiness state (the `/boost status` title).
+ *
+ * Not from the `jfrog-boost` awareness section: that is only written when a
+ * surface is active (awareness.ts), and a ready Boost can have none — e.g.
+ * CLI filtering off in Boost's config, no Preview Agreement (so no
+ * documents), and no MCP in the loadout, which is exactly the canary runner.
  */
 async function startExtension(map: Map<string, Handler[]>, deps: Parameters<typeof createBoostExtension>[1]) {
 	// Its own notice registry: "once per process" must not let one case's
 	// notice swallow another's in this shared test process.
-	createBoostExtension(piFor(map), { firstTurnWaitMs: 10_000, notices: createNotices(), ...deps });
+	const extension = createBoostExtension(piFor(map), {
+		firstTurnWaitMs: 10_000,
+		notices: createNotices(),
+		...deps,
+	});
 	for (const handler of map.get("session_start") ?? []) await handler(sessionStartEvent(), ctx());
 	const sections: Record<string, string> = {};
 	for (const handler of map.get("before_agent_start") ?? []) {
 		await handler(beforeAgentStartEvent(line, { sections }), ctx());
 	}
-	assert.ok(sections["jfrog-boost"], `Boost at ${h().binary} did not become ready (unusable or too old)`);
+	const title = extension.statusReport().split("\n", 1)[0];
+	assert.equal(
+		title,
+		"JFrog Boost — ready",
+		`Boost at ${h().binary} did not become ready (unusable or too old)`,
+	);
 }
 
 /**
