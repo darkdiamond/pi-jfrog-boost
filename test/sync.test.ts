@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { HookMeta } from "../src/boost-client.ts";
-import { createSyncScheduler, SYNC_DELAY_MS } from "../src/sync.ts";
+import { createSyncFlight, createSyncScheduler, processSyncFlight, SYNC_DELAY_MS } from "../src/sync.ts";
 
 const meta: HookMeta = { session_id: "s1", cwd: "/tmp" };
 
@@ -45,7 +45,12 @@ test("syncs 8 s after the agent settles by default", () => {
 
 test("a burst of settles produces one upload, not one per settle", async () => {
 	const fake = fakeSync({ exitAtOnce: true });
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 10 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 10,
+	});
 	sync.schedule(meta);
 	sync.schedule(meta);
 	sync.schedule(meta);
@@ -56,7 +61,12 @@ test("a burst of settles produces one upload, not one per settle", async () => {
 
 test("never two at once: a schedule due while one runs re-runs once, after it exits", async () => {
 	const fake = fakeSync();
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 5 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 5,
+	});
 	sync.schedule(meta);
 	await delay(20);
 	assert.equal(fake.calls.length, 1);
@@ -81,7 +91,13 @@ test("never two at once: a schedule due while one runs re-runs once, after it ex
 
 test("an exit that never comes stops blocking after the stuck timeout", async () => {
 	const fake = fakeSync();
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 1, stuckMs: 60 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 1,
+		stuckMs: 60,
+	});
 	sync.schedule(meta);
 	await delay(10);
 	sync.schedule(meta);
@@ -98,7 +114,12 @@ test("an exit that never comes stops blocking after the stuck timeout", async ()
 
 test("shutdown uploads a pending sync at once instead of waiting out the debounce", () => {
 	const fake = fakeSync({ exitAtOnce: true });
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 10_000 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 10_000,
+	});
 	sync.schedule(meta);
 	sync.flush(meta);
 	assert.deepEqual(fake.calls, [meta]);
@@ -106,7 +127,12 @@ test("shutdown uploads a pending sync at once instead of waiting out the debounc
 
 test("shutdown with a sync already running starts no second one", async () => {
 	const fake = fakeSync();
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 1 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 1,
+	});
 	sync.schedule(meta);
 	await delay(10);
 	sync.schedule(meta);
@@ -119,13 +145,23 @@ test("shutdown with a sync already running starts no second one", async () => {
 
 test("flushing with nothing pending does not upload", () => {
 	const fake = fakeSync();
-	createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 10 }).flush(meta);
+	createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 10,
+	}).flush(meta);
 	assert.equal(fake.calls.length, 0);
 });
 
 test("dispose cancels a pending upload, and a flush after it does not resurrect it", async () => {
 	const fake = fakeSync();
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => true, delayMs: 10 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => true,
+		delayMs: 10,
+	});
 	sync.schedule(meta);
 	sync.dispose();
 	sync.flush(meta);
@@ -136,7 +172,12 @@ test("dispose cancels a pending upload, and a flush after it does not resurrect 
 test("the opt-out is read when the timer fires, not only when it was set", async () => {
 	let enabled = true;
 	const fake = fakeSync();
-	const sync = createSyncScheduler({ client: fake.client, enabled: () => enabled, delayMs: 10 });
+	const sync = createSyncScheduler({
+		client: fake.client,
+		flight: createSyncFlight(),
+		enabled: () => enabled,
+		delayMs: 10,
+	});
 	sync.schedule(meta);
 	enabled = false;
 	await delay(30);
@@ -156,7 +197,7 @@ test("a throwing client or opt-out fails open, from the timer and from flush", a
 				throw new Error("boost exploded");
 			},
 		};
-		const sync = createSyncScheduler({ client, enabled: () => true, delayMs: 5 });
+		const sync = createSyncScheduler({ client, flight: createSyncFlight(), enabled: () => true, delayMs: 5 });
 		sync.schedule(meta);
 		await delay(20);
 		assert.equal(sync.running(), false, "a spawn that threw is not left running");
@@ -164,6 +205,7 @@ test("a throwing client or opt-out fails open, from the timer and from flush", a
 		assert.doesNotThrow(() => sync.flush(meta));
 		const broken = createSyncScheduler({
 			client,
+			flight: createSyncFlight(),
 			enabled: () => {
 				throw new Error("settings exploded");
 			},
@@ -174,4 +216,51 @@ test("a throwing client or opt-out fails open, from the timer and from flush", a
 	} finally {
 		process.off("uncaughtException", onUncaught);
 	}
+});
+
+test("the running sync is the process's: a scheduler from the next session waits for it", async () => {
+	const fake = fakeSync();
+	const flight = createSyncFlight();
+	const old = createSyncScheduler({ client: fake.client, flight, enabled: () => true, delayMs: 10_000 });
+	old.schedule(meta);
+	old.flush(meta);
+	old.dispose();
+	assert.equal(fake.calls.length, 1, "the shutdown flush started one");
+
+	const next = createSyncScheduler({ client: fake.client, flight, enabled: () => true, delayMs: 1 });
+	assert.equal(next.running(), true, "the new scheduler sees it running");
+	const later = { ...meta, session_id: "s2" };
+	next.schedule(later);
+	await delay(10);
+	assert.equal(fake.calls.length, 1, "no second sync alongside it");
+	old.dispose();
+	fake.exit();
+	assert.deepEqual(
+		fake.calls[1],
+		later,
+		"the new session's re-run starts once it exits, despite the old dispose",
+	);
+	assert.equal(fake.maxRunning(), 1);
+	fake.exit();
+	next.dispose();
+});
+
+test("a scheduler's dispose drops only its own queued re-run", async () => {
+	const fake = fakeSync();
+	const flight = createSyncFlight();
+	const a = createSyncScheduler({ client: fake.client, flight, enabled: () => true, delayMs: 1 });
+	const b = createSyncScheduler({ client: fake.client, flight, enabled: () => true, delayMs: 1 });
+	a.schedule(meta);
+	await delay(10);
+	b.schedule(meta);
+	await delay(10);
+	b.dispose();
+	fake.exit();
+	assert.equal(fake.calls.length, 1, "b's re-run went with b");
+});
+
+test("the default flight is process-wide, hung on globalThis", () => {
+	const flight = processSyncFlight();
+	assert.equal(processSyncFlight(), flight);
+	assert.equal((globalThis as Record<symbol, unknown>)[Symbol.for("pi-jfrog-boost.sync-flight")], flight);
 });

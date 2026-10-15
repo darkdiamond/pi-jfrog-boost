@@ -78,9 +78,9 @@ import { createDocumentCache, type DocumentOutcome, readDocument } from "./docum
 import {
 	type Breaker,
 	type Counters,
-	createBreaker,
 	createCounters,
 	createReadiness,
+	processBreaker,
 	type Readiness,
 	type ReadinessState,
 } from "./health.ts";
@@ -130,7 +130,7 @@ import {
 	tokensOf,
 	tooOldNotice,
 } from "./status.ts";
-import { createSyncScheduler } from "./sync.ts";
+import { createSyncScheduler, type SyncFlight } from "./sync.ts";
 import { equivalentCommand, LEGACY_OFFICE, resolveReadPath } from "./tools.ts";
 
 export { createNotices, TERMS_NOTICE };
@@ -161,7 +161,17 @@ export interface BoostExtensionDeps {
 	config?: ConfigReader;
 	/** Injected by tests; defaults to probing the client's binary. */
 	readiness?: Readiness;
+	/**
+	 * Defaults to the process-wide breaker, so a pause outlives the session
+	 * that hit it; tests pass their own.
+	 */
 	breaker?: Breaker;
+	/**
+	 * The running `boost sync`. Defaults to the process-wide flight, so a
+	 * session's shutdown flush and the next session's sync never overlap;
+	 * tests pass their own.
+	 */
+	syncFlight?: SyncFlight;
 	/** Injected by tests, to see what was counted. */
 	counters?: Counters;
 	/** Injected by tests; per-bucket savings persisted in the session. */
@@ -237,7 +247,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			flag: () => (typeof pi.getFlag === "function" ? pi.getFlag(NO_BOOST_FLAG) : undefined),
 		});
 	const config = deps.config ?? createConfigReader();
-	const breaker = deps.breaker ?? createBreaker();
+	const breaker = deps.breaker ?? processBreaker();
 	const counters: Counters = deps.counters ?? createCounters();
 	const stats: Stats = deps.stats ?? createStats();
 	const notices: Notices = deps.notices ?? processNotices();
@@ -319,10 +329,23 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		client,
 		enabled: () => !isOff() && settings.effective().sync && readiness.state().kind === "ready",
 		...(deps.syncDelayMs !== undefined ? { delayMs: deps.syncDelayMs } : {}),
+		...(deps.syncFlight ? { flight: deps.syncFlight } : {}),
 	});
 	const firstTurnWaitMs = deps.firstTurnWaitMs ?? FIRST_TURN_WAIT_MS;
-	/** The breaker opening last seen, so each opening is noticed once. */
-	let seenOpenUntil: number | undefined;
+	/**
+	 * The breaker opening last seen, so each opening is noticed once. Seeded
+	 * with one already open: the breaker outlives the session, and a pause
+	 * the previous session announced is not news to this one (the footer and
+	 * `/boost status` still show it).
+	 */
+	let seenOpenUntil: number | undefined = (() => {
+		try {
+			const b = breaker.state();
+			return b.kind === "open" ? b.until : undefined;
+		} catch {
+			return undefined;
+		}
+	})();
 	/**
 	 * Whether this session's readiness probe was started and its notices
 	 * scheduled (`wake`). False while off, so turning Boost on mid-session —

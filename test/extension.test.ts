@@ -39,6 +39,7 @@ import {
 	shellOffNotice,
 	tooOldNotice,
 } from "../src/status.ts";
+import { createSyncFlight, type SyncFlight } from "../src/sync.ts";
 import { docx } from "./helpers/docx.ts";
 import {
 	agentSettledEvent,
@@ -90,6 +91,8 @@ interface HarnessOptions {
 	settings?: SettingsStore;
 	config?: ConfigReader;
 	counters?: Counters;
+	/** Shared with another harness: the same process across a session switch. */
+	syncFlight?: SyncFlight;
 }
 
 function harness({
@@ -105,6 +108,7 @@ function harness({
 	settings,
 	config = fixedConfig(CLI_ON),
 	counters,
+	syncFlight = createSyncFlight(),
 }: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const commands: string[] = [];
@@ -161,9 +165,11 @@ function harness({
 			}),
 		config,
 		readiness,
-		...(breaker ? { breaker } : {}),
+		// Each harness is its own process as far as the breaker, the running
+		// sync and once-only notices go.
+		breaker: breaker ?? createBreaker(),
+		syncFlight,
 		...(counters ? { counters } : {}),
-		// Each harness is its own process as far as once-only notices go.
 		notices: createNotices(),
 		syncDelayMs: 5,
 		firstTurnWaitMs: 50,
@@ -952,6 +958,27 @@ test("shutdown flushes the pending upload instead of waiting out the debounce", 
 	assert.equal(calls.filter((c) => c.kind === "sync").length, 1);
 });
 
+test("a session replacing another never syncs alongside the sync its shutdown started", async () => {
+	// pi builds a fresh extension instance for /new, /resume, /fork and
+	// /reload; the running child is the process's, not the instance's.
+	const flight = createSyncFlight();
+	const exits: (() => void)[] = [];
+	const sync = (_meta: HookMeta, onExit?: (code: number | null) => void) => {
+		exits.push(() => onExit?.(0));
+	};
+	const first = harness({ syncFlight: flight, overrides: { sync } });
+	await first.fire("agent_settled", agentSettledEvent("1.2"));
+	await first.fire("session_shutdown", { reason: "new" });
+	assert.equal(exits.length, 1, "the shutdown flush started a sync");
+
+	const second = harness({ syncFlight: flight, overrides: { sync } });
+	await second.fire("agent_settled", agentSettledEvent("1.2"));
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(exits.length, 1, "the new session's settle waits for the running sync");
+	exits[0]?.();
+	assert.equal(exits.length, 2, "and runs once it exits");
+});
+
 test("shutdown sends no observe: `stop` records nothing measurable", async () => {
 	const { fire, calls } = harness();
 	await fire("session_shutdown", { reason: "quit" });
@@ -1593,7 +1620,8 @@ function uiExtension(options: UiOptions = {}) {
 		settings,
 		config: fixedConfig(options.config ?? CLI_ON),
 		readiness: options.readiness ?? fixedReadiness(),
-		...(options.breaker ? { breaker: options.breaker } : {}),
+		breaker: options.breaker ?? createBreaker(),
+		syncFlight: createSyncFlight(),
 		notices: options.notices ?? createNotices(),
 	});
 	const statusTexts = () => stub.ui.statuses.map((s) => s.text);
@@ -1735,6 +1763,23 @@ test("when the breaker opens: the paused notice once per opening, and the footer
 	assert.equal(statusTexts().at(-1), "boost: paused (slow)");
 	// A new opening (a failed trial, or a new pause) is announced too, once.
 	assert.deepEqual(noticeTexts(), [pausedNotice("timeout", 5), pausedNotice("slow", 10)]);
+});
+
+test("a pause outlives the session: the next one stays paused and is not told again", async () => {
+	const breaker = createBreaker();
+	const first = uiExtension({ breaker });
+	await start(first.stub);
+	for (let i = 0; i < 3; i++) breaker.record({ ...call(""), timedOut: true }, 10);
+	await first.stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
+	assert.equal(first.noticeTexts().length, 1, "the opening is announced");
+	await first.stub.fire("session_shutdown", { type: "session_shutdown", reason: "new" });
+
+	// /new: a fresh instance on the same process-wide breaker.
+	const second = uiExtension({ breaker });
+	await start(second.stub, "new");
+	await second.stub.emitToolResult(toolResultEvent("1.2", { toolName: "ls", content: "a" }));
+	assert.equal(second.statusTexts().at(-1), "boost: paused (slow)");
+	assert.deepEqual(second.noticeTexts(), [], "the same opening is not announced twice");
 });
 
 /** The `jfrog-boost-stats` entries appended so far, as session entries. */

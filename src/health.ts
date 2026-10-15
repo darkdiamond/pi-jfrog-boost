@@ -385,6 +385,22 @@ export function createBreaker(deps: BreakerDeps = {}): Breaker {
 	};
 }
 
+/**
+ * The process-wide breaker. pi builds a fresh extension instance for every
+ * `/new`, `/resume`, `/fork` and `/reload` (re-evaluating this module for
+ * the last), and a pause is about Boost, not the session: one that ended
+ * with the session would let each new session pay the timeouts again,
+ * although only `/boost on` and `/boost status → retry` reset it (§8.2).
+ * Hung on `globalThis` under a registered symbol, as status.ts does for the
+ * notices.
+ */
+export function processBreaker(): Breaker {
+	const key = Symbol.for("pi-jfrog-boost.breaker");
+	const store = globalThis as unknown as Record<symbol, Breaker | undefined>;
+	store[key] ??= createBreaker();
+	return store[key];
+}
+
 // ---------------------------------------------------------------------------
 // Counters
 

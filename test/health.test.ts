@@ -23,6 +23,7 @@ import {
 	expectedMs,
 	MISSING_RECHECK_MS,
 	PROBE_BACKOFF_MS,
+	processBreaker,
 	type ReadinessDeps,
 } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
@@ -431,4 +432,10 @@ test("counters tally skip reasons and errors per session", () => {
 	counters.reset();
 	assert.deepEqual(counters.skips(), {});
 	assert.equal(counters.lastError(), undefined);
+});
+
+test("the default breaker is process-wide, so a pause outlives a session switch (§8.2)", () => {
+	const breaker = processBreaker();
+	assert.equal(processBreaker(), breaker, "the next instance gets the same one");
+	assert.equal((globalThis as Record<symbol, unknown>)[Symbol.for("pi-jfrog-boost.breaker")], breaker);
 });

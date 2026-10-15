@@ -19,6 +19,13 @@
  *   re-run, which starts once, when the running child exits — however many
  *   schedules arrived meanwhile. The child's exit is the signal, through
  *   the client's `onExit` (exit, spawn failure, or the watchdog's kill).
+ *   That is per process, not per scheduler: pi builds a fresh extension
+ *   instance (and with it a fresh scheduler) for every `/new`, `/resume`,
+ *   `/fork` and `/reload`, and evaluates this module afresh for the last, so
+ *   the running child is tracked in a {@link SyncFlight} hung on
+ *   `globalThis` under a registered symbol, as status.ts does for notices.
+ *   A session-shutdown flush and the next session's first settle then share
+ *   one flight instead of uploading side by side.
  * - **Bounded.** `boost sync --max-batches 20` (F3) caps one run's upload;
  *   anything left goes with the next. The client kills a sync still running
  *   after 120 s (an unref'd watchdog), and this scheduler stops waiting for
@@ -57,14 +64,44 @@ export const SYNC_DELAY_MS = 8_000;
  */
 export const SYNC_STUCK_MS = DEFAULT_TIMEOUTS.syncWatchdog + 10_000;
 
+/**
+ * The sync child running in this process, shared by every scheduler in it
+ * (see "Single-flight" above). Each scheduler keeps only its own debounce
+ * timer.
+ */
+export interface SyncFlight {
+	/** The running child's generation, or undefined when none runs. */
+	id: number | undefined;
+	generation: number;
+	stuckTimer: NodeJS.Timeout | undefined;
+	/**
+	 * A schedule came due while a sync ran: the re-run to start, once, when it
+	 * exits, and the scheduler that queued it (whose dispose() drops it).
+	 */
+	rerun: { owner: object; run: () => void } | undefined;
+}
+
+export function createSyncFlight(): SyncFlight {
+	return { id: undefined, generation: 0, stuckTimer: undefined, rerun: undefined };
+}
+
+/** The process-wide flight; survives `/reload` re-evaluating this module. */
+export function processSyncFlight(): SyncFlight {
+	const key = Symbol.for("pi-jfrog-boost.sync-flight");
+	const store = globalThis as unknown as Record<symbol, SyncFlight | undefined>;
+	store[key] ??= createSyncFlight();
+	return store[key];
+}
+
 export interface SyncScheduler {
 	/** Note that the agent settled; upload once it stays idle for the delay. */
 	schedule(meta: HookMeta): void;
 	/** Upload now if an upload is pending (session shutdown). */
 	flush(meta: HookMeta): void;
 	/**
-	 * Drop any pending timer or re-run without uploading. The scheduler stays
-	 * usable: pi may start another session on the same instance.
+	 * Drop this scheduler's pending timer and queued re-run without
+	 * uploading. A running child is left to finish and stays in the
+	 * process-wide flight, so the next session's scheduler waits for it.
 	 */
 	dispose(): void;
 	/** Whether a sync child is running (tests, status). */
@@ -78,19 +115,18 @@ export interface SyncSchedulerOptions {
 	delayMs?: number;
 	/** See {@link SYNC_STUCK_MS}; injected by tests. */
 	stuckMs?: number;
+	/** Defaults to the process-wide {@link processSyncFlight}; tests pass their own. */
+	flight?: SyncFlight;
 }
 
 export function createSyncScheduler(options: SyncSchedulerOptions): SyncScheduler {
 	const { client, enabled } = options;
 	const delayMs = options.delayMs ?? SYNC_DELAY_MS;
 	const stuckMs = options.stuckMs ?? SYNC_STUCK_MS;
+	const flight = options.flight ?? processSyncFlight();
+	/** Identifies this scheduler's queued re-run in the shared flight. */
+	const self = {};
 	let timer: NodeJS.Timeout | undefined;
-	/** The running child's generation, or undefined when none runs. */
-	let flight: number | undefined;
-	let generation = 0;
-	let stuckTimer: NodeJS.Timeout | undefined;
-	/** A schedule came due while a sync ran: the meta to re-run with, once. */
-	let pending: HookMeta | undefined;
 
 	const isEnabled = () => {
 		try {
@@ -102,13 +138,13 @@ export function createSyncScheduler(options: SyncSchedulerOptions): SyncSchedule
 
 	const landed = (id: number) => {
 		// A late exit from a run already given up on must not end a newer one.
-		if (flight !== id) return;
-		flight = undefined;
-		if (stuckTimer) clearTimeout(stuckTimer);
-		stuckTimer = undefined;
-		const next = pending;
-		pending = undefined;
-		if (next) start(next);
+		if (flight.id !== id) return;
+		flight.id = undefined;
+		if (flight.stuckTimer) clearTimeout(flight.stuckTimer);
+		flight.stuckTimer = undefined;
+		const next = flight.rerun;
+		flight.rerun = undefined;
+		next?.run();
 	};
 
 	/**
@@ -118,14 +154,14 @@ export function createSyncScheduler(options: SyncSchedulerOptions): SyncSchedule
 	 */
 	function start(meta: HookMeta): void {
 		if (!isEnabled()) return;
-		if (flight !== undefined) {
-			pending = meta;
+		if (flight.id !== undefined) {
+			flight.rerun = { owner: self, run: () => start(meta) };
 			return;
 		}
-		const id = ++generation;
-		flight = id;
-		stuckTimer = setTimeout(() => landed(id), stuckMs);
-		stuckTimer.unref?.();
+		const id = ++flight.generation;
+		flight.id = id;
+		flight.stuckTimer = setTimeout(() => landed(id), stuckMs);
+		flight.stuckTimer.unref?.();
 		try {
 			client.sync(meta, () => landed(id));
 		} catch {
@@ -155,16 +191,16 @@ export function createSyncScheduler(options: SyncSchedulerOptions): SyncSchedule
 			// With a sync running, the pending one is dropped, not queued: see
 			// "Shutdown" above.
 			cancel();
-			if (!wasPending || flight !== undefined) return;
+			if (!wasPending || flight.id !== undefined) return;
 			start(meta);
 		},
 		dispose() {
-			pending = undefined;
-			// A running child is left to finish, and still tracked (its unref'd
-			// stuck timer included), so a later session on this instance cannot
-			// start a second one alongside it.
+			if (flight.rerun?.owner === self) flight.rerun = undefined;
+			// A running child is left to finish, and still tracked in the
+			// process-wide flight (its unref'd stuck timer included), so the
+			// next session's scheduler cannot start a second one alongside it.
 			cancel();
 		},
-		running: () => flight !== undefined,
+		running: () => flight.id !== undefined,
 	};
 }
