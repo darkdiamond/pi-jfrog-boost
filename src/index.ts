@@ -54,7 +54,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { AWARENESS_SECTION, awarenessView, buildAwareness, withAwareness } from "./awareness.ts";
-import { binaryStamp, onPath } from "./boost-binary.ts";
+import { atLeast, type BoostVersion, binaryStamp, MCP_MIN_VERSION, onPath } from "./boost-binary.ts";
 import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } from "./boost-client.ts";
 import {
 	type ConfigReader,
@@ -123,7 +123,8 @@ import {
 	type Notices,
 	pausedNotice,
 	processNotices,
-	SHELL_OFF_NOTICE,
+	type StillHandled,
+	shellOffNotice,
 	statusReport,
 	TERMS_NOTICE,
 	tokensOf,
@@ -255,6 +256,22 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * call, never cached, so `DISABLE_BOOST=1` takes effect at once.
 	 */
 	const isOff = () => settings.off() !== undefined;
+	/**
+	 * What still works while shell compaction is off, so the shell-off notice
+	 * names only what is active: documents need their setting and the terms,
+	 * MCP its setting, a flag that does not forbid it and Boost ≥ 0.15.3.
+	 */
+	const stillHandled = (version: BoostVersion): StillHandled => {
+		const effective = settings.effective();
+		const cfg = config.read();
+		return {
+			documents: effective.documents && cfg.termsAccepted,
+			mcp:
+				effective.mcp &&
+				resolveFlag(cfg, MCP_FILTERING_FLAG, env).value !== false &&
+				atLeast(version, MCP_MIN_VERSION),
+		};
+	};
 	const readiness =
 		deps.readiness ??
 		createReadiness({
@@ -408,7 +425,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// Only when the gate is off by Boost's flag or default: a user who set
 		// `shell: "off"` themselves needs no telling how to turn it on.
 		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
-		if (!gate.on && gate.reason !== "setting-off") notices.show(ctx, "shell-off", SHELL_OFF_NOTICE, "info");
+		if (!gate.on && gate.reason !== "setting-off") {
+			notices.show(ctx, "shell-off", shellOffNotice(stillHandled(state.version)), "info");
+		}
 		const disabled = config.read().disabledFilters;
 		if (disabled.length > 0) {
 			notices.show(ctx, "filters-disabled", filtersDisabledNotice(disabled), "info");
@@ -1037,12 +1056,14 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		return uiState();
 	};
 
-	/** Shell compaction is off because of Boost's flag or default, not the user's setting. */
-	const shellOffByBoost = (): boolean => {
+	/** The shell-off notice when Boost's flag or default (not the user's setting) has shell compaction off. */
+	const shellOffByBoost = (): string | undefined => {
 		const state = readiness.state();
-		if (state.kind !== "ready") return false;
+		if (state.kind !== "ready") return undefined;
 		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
-		return !gate.on && gate.reason !== "setting-off";
+		return !gate.on && gate.reason !== "setting-off"
+			? shellOffNotice(stillHandled(state.version))
+			: undefined;
 	};
 
 	const install = createInstaller(
@@ -1067,7 +1088,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				return readiness.state();
 			},
 			onPath: (binary) => onPath(binary, env),
-			shellOffByBoost,
+			shellOffNotice: shellOffByBoost,
 			termsAccepted: () => config.read().termsAccepted,
 		},
 		{ print, ...deps.install },

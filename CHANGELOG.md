@@ -65,6 +65,12 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   marker. A result already changed by pi-jfrog-boost is now left alone.
 - Moving to another point with `/tree` kept the previous branch's savings in
   the footer and wrote them onto the new branch.
+- The binary-only install confirm promised that shell compaction works right
+  away, but Boost ≥ 0.14.6 has it off by default. It now says so and how to
+  turn it on for pi. The shell-off notice, at startup and after an install,
+  names documents and MCP results as still handled only when they really are
+  (the setting is on, the terms are accepted for documents, Boost is ≥ 0.15.3
+  for MCP).
 
 ### Changed
 

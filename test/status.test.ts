@@ -20,9 +20,9 @@ import {
 	MISSING_NOTICE,
 	pausedNotice,
 	processNotices,
-	SHELL_OFF_NOTICE,
 	STATUS_KEY,
 	type StatusView,
+	shellOffNotice,
 	statusReport,
 	TERMS_NOTICE,
 	tooOldNotice,
@@ -151,8 +151,21 @@ test("notice texts are the §10.4 texts", () => {
 		"JFrog Boost v0.12.1 is older than v0.13.13, so pi-jfrog-boost is idle. /boost install shows how to update.",
 	);
 	assert.equal(
-		SHELL_OFF_NOTICE,
+		shellOffNotice({ documents: true, mcp: true }),
 		"Boost's shell-output compaction is off (Boost's default since v0.14.6). Documents and MCP results are still handled. To turn it on for pi: /boost settings → Shell output.",
+	);
+	assert.equal(
+		shellOffNotice({ documents: true, mcp: false }),
+		"Boost's shell-output compaction is off (Boost's default since v0.14.6). Documents are still handled. To turn it on for pi: /boost settings → Shell output.",
+	);
+	assert.equal(
+		shellOffNotice({ documents: false, mcp: true }),
+		"Boost's shell-output compaction is off (Boost's default since v0.14.6). MCP results are still handled. To turn it on for pi: /boost settings → Shell output.",
+	);
+	assert.equal(
+		shellOffNotice({ documents: false, mcp: false }),
+		"Boost's shell-output compaction is off (Boost's default since v0.14.6). To turn it on for pi: /boost settings → Shell output.",
+		"names nothing as handled when nothing is",
 	);
 	assert.equal(
 		TERMS_NOTICE,

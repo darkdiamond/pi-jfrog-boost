@@ -36,7 +36,7 @@ import {
 	MISSING_NOTICE,
 	type Notices,
 	pausedNotice,
-	SHELL_OFF_NOTICE,
+	shellOffNotice,
 	tooOldNotice,
 } from "../src/status.ts";
 import { docx } from "./helpers/docx.ts";
@@ -1664,7 +1664,7 @@ test("the shell-off notice comes on the first ready session with the gate off, o
 	// A reload builds a new instance; the process registry is shared.
 	const reloaded = uiExtension({ config: CLI_OFF, notices });
 	await start(reloaded.stub, "reload");
-	assert.deepEqual(first.noticeTexts(), [SHELL_OFF_NOTICE]);
+	assert.deepEqual(first.noticeTexts(), [shellOffNotice({ documents: false, mcp: true })]);
 	assert.deepEqual(reloaded.noticeTexts(), []);
 
 	const chosen = uiExtension({ config: CLI_OFF, file: { shell: "off" } });
@@ -1673,6 +1673,27 @@ test("the shell-off notice comes on the first ready session with the gate off, o
 	const on = uiExtension({ config: CLI_ON });
 	await start(on.stub);
 	assert.deepEqual(on.noticeTexts(), []);
+});
+
+test("the shell-off notice names only what is still handled", async () => {
+	const terms = `accept_terms = "yes"\n${CLI_OFF}`;
+	const both = uiExtension({ config: terms });
+	await start(both.stub);
+	assert.deepEqual(both.noticeTexts(), [shellOffNotice({ documents: true, mcp: true })]);
+
+	// Boost 0.14.6–0.15.2 has no MCP route; documents still convert.
+	const oldBoost = uiExtension({
+		config: terms,
+		readiness: fixedReadiness({ kind: "ready", version: [0, 15, 2] }),
+	});
+	await start(oldBoost.stub);
+	assert.deepEqual(oldBoost.noticeTexts(), [shellOffNotice({ documents: true, mcp: false })]);
+
+	// Both switched off in settings: nothing is said to be handled.
+	const neither = uiExtension({ config: terms, file: { documents: false, mcp: false } });
+	await start(neither.stub);
+	assert.deepEqual(neither.noticeTexts(), [shellOffNotice({ documents: false, mcp: false })]);
+	assert.doesNotMatch(neither.noticeTexts()[0] ?? "", /still handled/);
 });
 
 test("filters Boost disabled after retrieves are announced once", async () => {

@@ -142,8 +142,10 @@ export function confirmText(view: ConfirmView): { title: string; message: string
 			"  • it does not run `boost init`, so no hooks are added to other agents",
 			"  • it does not accept JFrog's Preview Agreement for you",
 			"",
-			"Shell and MCP compaction work right away. PDF/Office conversion needs the",
-			"agreement: in a terminal run `boost init --dry-run`, then `boost init`.",
+			"MCP compaction works right away (Boost ≥ 0.15.3). Shell-output compaction is",
+			"off by default in Boost; turn it on for pi with /boost settings → Shell output.",
+			"PDF/Office conversion needs the agreement: in a terminal run",
+			"`boost init --dry-run`, then `boost init`.",
 			`Terms: ${TERMS_URL}`,
 		].join("\n"),
 	};
@@ -246,8 +248,11 @@ export interface InstallHost {
 	refresh(ctx: ExtensionCommandContext): Promise<ReadinessState>;
 	/** Whether `boost` typed in a shell finds this binary. */
 	onPath(binary: string): boolean;
-	/** Whether shell compaction is off by Boost's flag or default (not by the user's setting). */
-	shellOffByBoost(): boolean;
+	/**
+	 * The shell-off notice when shell compaction is off by Boost's flag or
+	 * default (not by the user's setting); undefined when it is not.
+	 */
+	shellOffNotice(): string | undefined;
 	termsAccepted(): boolean;
 }
 
@@ -583,11 +588,8 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 				`${tildePath(dirname(binary), home)} isn't on your PATH; pi still finds Boost and gives the model the full path.`,
 			);
 		}
-		if (ready && host.shellOffByBoost()) {
-			lines.push(
-				"Boost's shell-output compaction is off (Boost's default since v0.14.6). Documents and MCP results are still handled. To turn it on for pi: /boost settings → Shell output.",
-			);
-		}
+		const shellOff = ready ? host.shellOffNotice() : undefined;
+		if (shellOff) lines.push(shellOff);
 		if (ready && !host.termsAccepted()) {
 			lines.push(
 				"PDF/Office conversion needs Boost's Preview Agreement: in a terminal run `boost init --dry-run`, then `boost init`.",

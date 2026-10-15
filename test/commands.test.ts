@@ -17,7 +17,7 @@ import { type Breaker, createBreaker, type Readiness, type ReadinessState } from
 import { createBoostExtension, createNotices } from "../src/index.ts";
 import { INSTALL_OPTIONS } from "../src/install.ts";
 import { createSettingsStore, type SettingsFs, settingsPath } from "../src/settings.ts";
-import { MISSING_NOTICE, SHELL_OFF_NOTICE } from "../src/status.ts";
+import { MISSING_NOTICE, shellOffNotice } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memoryFs, stubClient } from "./helpers/runtime.ts";
 
@@ -233,7 +233,10 @@ test("/boost on in a session that started off wakes it: footer after the probe, 
 	await s.run("on");
 	assert.ok(starts >= 1, "turning on starts the probe");
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "painted once the probe settled");
-	assert.ok(s.notices().includes(SHELL_OFF_NOTICE), "the startup notice it missed");
+	assert.ok(
+		s.notices().includes(shellOffNotice({ documents: false, mcp: true })),
+		"the startup notice it missed",
+	);
 	assert.equal(s.notices().at(-1), "JFrog Boost is on for this session.");
 
 	// Not installed: said so, not "on".
@@ -255,7 +258,7 @@ test("turning Enabled on in /boost settings wakes a session that started off", a
 	await s.run("settings");
 	assert.equal(s.settings.off(), undefined);
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off");
-	assert.ok(s.notices().includes(SHELL_OFF_NOTICE));
+	assert.ok(s.notices().includes(shellOffNotice({ documents: false, mcp: true })));
 });
 
 test("/boost off after the probe found Boost missing keeps the install hint in /boost status", async () => {

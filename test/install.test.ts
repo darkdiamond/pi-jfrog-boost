@@ -42,6 +42,7 @@ import {
 	tildePath,
 	WINDOWS_TEXT,
 } from "../src/install.ts";
+import { shellOffNotice } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call } from "./helpers/runtime.ts";
 
@@ -170,7 +171,7 @@ function setup(options: Setup = {}) {
 			return refreshedState;
 		},
 		onPath: () => options.onPath ?? false,
-		shellOffByBoost: () => true,
+		shellOffNotice: () => shellOffNotice({ documents: false, mcp: true }),
 		termsAccepted: () => false,
 	};
 
@@ -289,7 +290,10 @@ test("binary only: confirmed, verified, placed atomically, refreshed, temp remov
 		new RegExp(`^Installed JFrog Boost v0\\.15\\.4 at ${s.dest.replace(/[\\.]/g, "\\$&")}\\.`),
 	);
 	assert.match(done, /~\/\.local\/bin isn't on your PATH; pi still finds Boost/);
-	assert.match(done, /\/boost settings → Shell output/);
+	assert.ok(
+		done.includes(shellOffNotice({ documents: false, mcp: true })),
+		"the host's state-built shell-off line",
+	);
 	assert.match(done, /boost init --dry-run/);
 });
 

@@ -152,8 +152,29 @@ export const MISSING_NOTICE =
 	"JFrog Boost isn't installed, so pi-jfrog-boost is idle. /boost install sets it up (asks first).";
 export const tooOldNotice = (version: BoostVersion) =>
 	`JFrog Boost v${formatVersion(version)} is older than v${formatVersion(MIN_BOOST_VERSION)}, so pi-jfrog-boost is idle. /boost install shows how to update.`;
-export const SHELL_OFF_NOTICE =
-	"Boost's shell-output compaction is off (Boost's default since v0.14.6). Documents and MCP results are still handled. To turn it on for pi: /boost settings → Shell output.";
+/** What still works while shell compaction is off: each only when it is really active. */
+export interface StillHandled {
+	/** The documents setting is on and Boost's Preview Agreement is accepted. */
+	documents: boolean;
+	/** The mcp setting is on, the flag does not forbid it and Boost is ≥ MCP_MIN_VERSION. */
+	mcp: boolean;
+}
+
+/**
+ * The shell-off notice (and the post-install line). It names only the
+ * surfaces that are active, and says nothing about them when none is (§10.4).
+ */
+export function shellOffNotice(still: StillHandled): string {
+	const handled =
+		still.documents && still.mcp
+			? " Documents and MCP results are still handled."
+			: still.documents
+				? " Documents are still handled."
+				: still.mcp
+					? " MCP results are still handled."
+					: "";
+	return `Boost's shell-output compaction is off (Boost's default since v0.14.6).${handled} To turn it on for pi: /boost settings → Shell output.`;
+}
 export const TERMS_NOTICE =
 	"Boost converts PDF/Office files once its Preview Agreement is accepted. In a terminal: boost init --dry-run, then boost init (it also offers hooks for other agents).";
 export const pausedNotice = (reason: BadReason, minutes: number) =>
