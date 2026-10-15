@@ -1,7 +1,7 @@
 {
 	"name": "pi-jfrog-boost",
-	"version": "0.3.0",
-	"description": "JFrog Boost integration for the pi coding agent — compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
+	"version": "0.4.0",
+	"description": "Cut pi's token use with JFrog Boost: compacts test/build and MCP output, converts PDF and Office files, keeps file reads exact. Fail-open, zero dependencies. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
 	"author": "DarkDiamonD (https://github.com/darkdiamond)",
@@ -12,7 +12,10 @@
 		"boost",
 		"token-optimization",
 		"agent",
-		"hooks"
+		"hooks",
+		"mcp",
+		"context",
+		"tokens"
 	],
 	"repository": {
 		"type": "git",

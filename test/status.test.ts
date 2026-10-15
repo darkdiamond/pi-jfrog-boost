@@ -293,6 +293,11 @@ test("the title, binary and breaker lines follow the state", () => {
 		/^JFrog Boost — off \(DISABLE_BOOST=1\)\n/,
 	);
 	assert.match(statusReport(view({ off: { by: "flag" } })), /^JFrog Boost — off \(--no-boost\)\n/);
+	// Off, nothing is resolved: the binary line must not claim it is missing.
+	assert.match(
+		statusReport(view({ off: { by: "flag" }, readiness: { kind: "disabled" }, binary: undefined })),
+		/\n {2}binary {4}not checked while Boost is off\n/,
+	);
 	assert.match(
 		statusReport(view({ readiness: { kind: "missing" }, binary: undefined })),
 		/^JFrog Boost — not installed\n {2}binary {4}not installed \(\/boost install\)\n/,

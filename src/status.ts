@@ -317,7 +317,13 @@ function versionNote(version: BoostVersion): string {
 }
 
 function binaryLine(view: StatusView): string {
-	if (!view.binary) return "not installed (/boost install)";
+	// While Boost is off nothing is resolved or probed (health.ts), so a
+	// missing path means "not looked for", not "not installed".
+	if (!view.binary) {
+		return view.off || view.readiness.kind === "disabled"
+			? "not checked while Boost is off"
+			: "not installed (/boost install)";
+	}
 	const state = view.readiness;
 	let text = view.binary;
 	if ("version" in state) text += `  v${formatVersion(state.version)} ${versionNote(state.version)}`;

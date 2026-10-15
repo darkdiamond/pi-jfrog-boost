@@ -12,14 +12,39 @@ within a few days.
 It is a pi extension, so it runs in-process with your agent and has whatever
 access pi has. Concretely, it:
 
-- runs the locally installed `boost` binary and pipes tool output to it on
-  stdin, with a 15-second timeout and a 4 MiB ceiling;
-- replaces tool output with whatever Boost returns;
-- adds a block to the system prompt;
-- runs `boost sync` when the agent goes idle.
+- runs the locally installed `boost` binary: its stdin filter on shell, log
+  and (through `boost hook claude`) MCP results; `boost read` on binary
+  documents (PDF, Office, OpenDocument) and large notebooks; `boost version`
+  to check readiness; and `boost report -t` / `boost doctor` only when you
+  ask with `/boost report` or `/boost doctor`. Every call has a timeout, and
+  what it pipes to Boost is capped at 1 MiB (2 MiB for pi's full-output
+  file);
+- replaces tool output with Boost's reply when it is a real reduction, and
+  adds a `jfrog-boost` section to the system prompt;
+- reads `~/.boost/config.toml` (feature flags, whether the Preview Agreement
+  is recorded, filters Boost disabled) and **never writes it**;
+- writes only its own settings file (`~/.pi/agent/jfrog-boost.json`, and only
+  from `/boost settings`) and numbers-only `jfrog-boost-stats` entries in
+  the pi session;
+- triggers `boost sync` when the agent settles and on shutdown. Sync uploads
+  Boost's local measurements to JFrog, and then prunes them locally. Turn it
+  off with `sync: false` or `PI_BOOST_SYNC=0`;
+- with the opt-in `observe` setting, sends tool argument and output excerpts
+  (up to 16k characters each) and the assistant's last reply to Boost, which
+  stores them and sync uploads them;
+- causes Boost to store the full request and response of every MCP call it
+  filters in its local database (sync uploads them too). `mcpExclude` and
+  `mcp: false` keep a server, or all of MCP, away from Boost;
+- has **no network access of its own**, except a `/boost install` you
+  confirm: the binary-only option calls the GitHub API for the latest
+  release and downloads that asset from github.com/jfrog/boost, checking it
+  against the SHA-256 GitHub publishes for it (the confirm text says so if
+  GitHub publishes none); the official option runs JFrog's `install.sh`,
+  which the confirm text describes;
+- **never** runs `boost init`, `boost retrieve`, `boost feature-flags` or
+  `boost filters`, and never accepts JFrog's Preview Agreement. A test-suite
+  spy (`test/helpers/spawn-spy.ts`) fails any run that tries.
 
-It installs nothing, writes no configuration, and makes no network requests of
-its own. `/boost-install` runs the official installer only after you confirm it.
 Boost's own network behaviour is governed by the
 [JFrog Online Preview Agreement](https://boost.jfrog.com/preview-agreement/).
 

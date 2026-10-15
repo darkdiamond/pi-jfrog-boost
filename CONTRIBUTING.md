@@ -34,9 +34,17 @@ Boost binary, inside a throwaway HOME (see [End to end](#end-to-end)).
   even when fail-open code swallows the error.
 - **Never run Boost against your real HOME from tests.** Not in a unit test,
   not in a probe script, not "just once". Use the hermetic helper below.
-- **Use Boost's agent-neutral surfaces.** The `boost hook <agent>` dialects
-  stamp spans with the agent named by the subcommand, which mislabels pi. See
-  the comment at the top of `src/tools.ts`.
+- **Use Boost's agent-neutral surfaces, except for MCP, which only
+  `boost hook claude` filters.** The `boost hook <agent>` dialects stamp spans
+  with the agent named by the subcommand, which mislabels pi; the stdin
+  filter and `boost read` keep `pi` from `BOOST_HOOK_META`. Boost's MCP
+  filters run on no other surface, so the MCP route accepts the
+  `claude_code` label (README, "Attribution and telemetry"). See the comment
+  at the top of `src/tools.ts`.
+- **Every claim in README.md and SECURITY.md maps to a test or a probe.** If
+  you change behaviour a doc describes, change the doc in the same PR and say
+  in the description which test or probe backs it. The compatibility table
+  lists only versions the e2e suite actually passed on.
 
 ## Tests
 
@@ -130,6 +138,15 @@ and runs `npm run check:pack`, which asserts the tarball holds exactly
 `package.json`, with no install-time lifecycle scripts and no runtime
 dependencies.
 
+### Canary
+
+`.github/workflows/canary.yml` runs weekly (and on demand from the Actions
+tab). It installs `@earendil-works/pi-coding-agent@latest` over the lockfile
+with `--no-save --ignore-scripts` and runs the typecheck and unit tests, so a
+pi release that breaks the extension shows up before users report it. On
+failure a separate job, the only one with `issues: write`, opens a `canary`
+issue or comments on the open one. Close the issue once a fix lands.
+
 ### Running Boost in CI
 
 CI does not run the e2e suite, so it skips there. That is a maintainer policy
@@ -137,9 +154,16 @@ decision about JFrog's Preview Agreement, not a technical limit: the binary
 can be downloaded without its installer, and shell and MCP filtering work
 without the agreement recorded (only document conversion needs it). The
 question is whether running JFrog's preview binary in this project's CI is
-acceptable under its terms. If it is, a job would download a pinned release,
-check its SHA-256, and run the suite with no terms, so the document and
-retrieve cases skip.
+acceptable under its terms.
+
+The canary's `boost-e2e` job is ready for that decision and off until then.
+It runs only when the repository variable `BOOST_CANARY` is `true`: it
+downloads a pinned Boost release tarball (`BOOST_VERSION`, `BOOST_ASSET`),
+checks it against the recorded `BOOST_SHA256`, and runs the hermetic suite
+with no terms, so the document and retrieve cases skip. To move the pin, take
+the new asset's digest from
+`https://api.github.com/repos/jfrog/boost/releases/tags/<tag>` and update all
+three values together.
 
 ## Releasing
 
