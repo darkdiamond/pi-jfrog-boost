@@ -170,6 +170,11 @@ test("notice texts are the §10.4 texts", () => {
 		"names nothing as handled when nothing is",
 	);
 	assert.equal(
+		shellOffNotice({ documents: false, mcp: true }, "remote"),
+		"Boost's shell-output compaction is off (turned off by JFrog's remote flag). MCP results are still handled. To turn it on for pi: /boost settings → Shell output.",
+		"JFrog's remote flag, not Boost's default",
+	);
+	assert.equal(
 		TERMS_NOTICE,
 		"Boost converts PDF/Office files once its Preview Agreement is accepted. In a terminal: boost init --dry-run, then boost init (it also offers hooks for other agents).",
 	);

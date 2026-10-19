@@ -226,7 +226,8 @@ test("/boost on in a session that started off wakes it: footer after the probe, 
 			return state;
 		},
 	};
-	const s = setup({ readiness, file: { enabled: false } });
+	// No flag value recorded: off by Boost's default, which the notice explains.
+	const s = setup({ readiness, config: "", file: { enabled: false } });
 	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: off");
 	assert.equal(starts, 0, "an off session never probes");
@@ -252,7 +253,7 @@ test("/boost on in a session that started off wakes it: footer after the probe, 
 });
 
 test("turning Enabled on in /boost settings wakes a session that started off", async () => {
-	const s = setup({ file: { enabled: false }, ui: { select: ["Enabled: off", "Done"] } });
+	const s = setup({ config: "", file: { enabled: false }, ui: { select: ["Enabled: off", "Done"] } });
 	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
 	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: off");
 	await s.run("settings");

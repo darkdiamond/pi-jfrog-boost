@@ -432,14 +432,23 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	}
 
-	/** The shell-off notice when Boost's flag or default (not the user's setting) has shell compaction off. */
+	/**
+	 * The shell-off notice when Boost's default or JFrog's remote flag has
+	 * shell compaction off. Nothing when the user chose it: `shell: "off"`,
+	 * their own Boost flag (`user`) or `BOOST_FEATURE_FLAGS_FORCE_DISABLED`;
+	 * being told how to undo a choice is noise, and `/boost status` still
+	 * shows why it is off.
+	 */
 	const shellOffByBoost = (): string | undefined => {
 		const state = readiness.state();
 		if (state.kind !== "ready") return undefined;
 		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
-		return !gate.on && gate.reason !== "setting-off"
-			? shellOffNotice(stillHandled(state.version))
-			: undefined;
+		if (gate.on) return undefined;
+		if (gate.reason === "unknown-default-off") return shellOffNotice(stillHandled(state.version), "default");
+		if (gate.reason === "flag" && gate.flag.source === "remote") {
+			return shellOffNotice(stillHandled(state.version), "remote");
+		}
+		return undefined;
 	};
 
 	/**
@@ -639,7 +648,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 */
 	async function awarenessFor(event: {
 		systemPrompt: string;
-		systemPromptOptions?: { sections?: Record<string, string> };
+		systemPromptOptions?: { sections?: Record<string, string>; forceSystemPrompt?: string };
 	}): Promise<{ systemPrompt: string } | undefined> {
 		// Only the first turn waits, and at most a second: the probe started at
 		// session_start has normally settled by the time the user has typed a
@@ -656,13 +665,17 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// unchanged block keeps the provider's prompt cache. An empty string is
 		// how the section is withdrawn: pi renders nothing for it (pi 1.2.0
 		// `buildSystemPromptSections` skips empty sections). Nothing else is
-		// returned (spec §4).
-		const sections = event.systemPromptOptions?.sections;
-		if (sections) {
-			sections[AWARENESS_SECTION] = text ?? "";
+		// returned (spec §4). Not when an earlier handler returned
+		// `systemPrompt`: pi then sends that forced text and never renders the
+		// sections, so the block is appended to it instead.
+		const options = event.systemPromptOptions;
+		if (options?.sections && options.forceSystemPrompt === undefined) {
+			options.sections[AWARENESS_SECTION] = text ?? "";
 			return;
 		}
-		// The fallback for a pi without structured sections.
+		// The fallback for a pi without structured sections, or a forced
+		// prompt (`event.systemPrompt` renders it; withAwareness never adds
+		// the block twice).
 		if (text === undefined) return;
 		return { systemPrompt: withAwareness(event.systemPrompt, text) };
 	}
@@ -1039,6 +1052,17 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			stats.restore(restoreSnapshot(ctx.sessionManager));
 		} catch {
 			stats.restore();
+		}
+		// `/boost on|off` is for the session, not the branch: /tree moves the
+		// leaf without a session_start, so the toggle in memory still holds,
+		// but the branch arrived at may not record it, and the next /reload or
+		// /resume would restore from that branch. Recorded again here, so the
+		// branch says what this runtime is doing.
+		try {
+			const inMemory = settings.session();
+			if (restoreSessionToggle(ctx.sessionManager) !== inMemory) persistToggle(inMemory ?? null);
+		} catch {
+			/* fail open: this runtime still has the toggle */
 		}
 		refreshUi(ctx);
 	});

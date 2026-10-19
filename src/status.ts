@@ -154,10 +154,23 @@ export interface StillHandled {
 }
 
 /**
+ * Why shell compaction is off when the notice is given: Boost's built-in
+ * default (no flag value recorded), or JFrog's remote flag. A user who turned
+ * it off (their Boost flag, `BOOST_FEATURE_FLAGS_FORCE_DISABLED`, or
+ * `shell: "off"`) gets no notice at all.
+ */
+export type ShellOffCause = "default" | "remote";
+
+const SHELL_OFF_CAUSES: Readonly<Record<ShellOffCause, string>> = {
+	default: "Boost's default since v0.14.6",
+	remote: "turned off by JFrog's remote flag",
+};
+
+/**
  * The shell-off notice (and the post-install line). It names only the
  * surfaces that are active, and says nothing about them when none is (§10.4).
  */
-export function shellOffNotice(still: StillHandled): string {
+export function shellOffNotice(still: StillHandled, cause: ShellOffCause = "default"): string {
 	const handled =
 		still.documents && still.mcp
 			? " Documents and MCP results are still handled."
@@ -166,7 +179,7 @@ export function shellOffNotice(still: StillHandled): string {
 				: still.mcp
 					? " MCP results are still handled."
 					: "";
-	return `Boost's shell-output compaction is off (Boost's default since v0.14.6).${handled} To turn it on for pi: /boost settings → Shell output.`;
+	return `Boost's shell-output compaction is off (${SHELL_OFF_CAUSES[cause]}).${handled} To turn it on for pi: /boost settings → Shell output.`;
 }
 export const TERMS_NOTICE =
 	"Boost converts PDF/Office files once its Preview Agreement is accepted. In a terminal: boost init --dry-run, then boost init (it also offers hooks for other agents).";

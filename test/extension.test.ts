@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { withAwareness } from "../src/awareness.ts";
 import { type BoostClient, createBoostClient, type HookMeta, type HookPayload } from "../src/boost-client.ts";
 import type { ConfigReader } from "../src/boost-config.ts";
 import {
@@ -61,6 +62,10 @@ import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from ".
  */
 const CLI_ON = `[feature_flags."boost-cli-filtering"]\nuser = true\n`;
 const CLI_OFF = `[feature_flags."boost-cli-filtering"]\nuser = false\n`;
+/** JFrog's remote flag turned CLI filtering off; the user set nothing. */
+const CLI_REMOTE_OFF = `[feature_flags."boost-cli-filtering"]\nremote = false\n`;
+/** No flag value recorded: Boost's built-in default (off since 0.14.6) applies. */
+const CLI_DEFAULT = "";
 
 /** Test-runner output long enough to be worth a Boost call (over the 2 KiB minBytes). */
 const NOISY = Array.from({ length: 200 }, (_, i) => `ok ${i} - case ${i} passes`).join("\n");
@@ -791,6 +796,40 @@ test("the section changes with /boost off and on, and with the settings", async 
 	assert.equal(await turn(), on);
 	settings.save({ awareness: false });
 	assert.equal(await turn(), "");
+});
+
+test("an earlier handler that forced the system prompt gets the block appended, not a section pi never renders", async () => {
+	const { stub } = uiExtension();
+	await start(stub);
+	const sections: Record<string, string> = {};
+	const unforced = await stub.fire("before_agent_start", beforeAgentStartEvent("1.2", { sections }));
+	const body = sections["jfrog-boost"];
+	assert.ok(body);
+	assert.deepEqual(unforced, [undefined], "the section path returns nothing");
+
+	// As pi's runner leaves it after an earlier extension returned
+	// `{ systemPrompt }`: `forceSystemPrompt` set, and `event.systemPrompt`
+	// rendering the forced text (pi 1.2.0 buildSystemPromptState ignores the
+	// sections then).
+	const forcedSections: Record<string, string> = {};
+	const forced = "You are pi.\nPreset: careful";
+	const results = await stub.fire("before_agent_start", {
+		...beforeAgentStartEvent("1.2", { sections: forcedSections }),
+		systemPrompt: forced,
+		systemPromptOptions: { sections: forcedSections, forceSystemPrompt: forced },
+	});
+	assert.equal(forcedSections["jfrog-boost"], undefined, "not written where it would be dropped");
+	assert.deepEqual(results, [{ systemPrompt: withAwareness(forced, body) }]);
+	assert.ok((results[0] as { systemPrompt: string }).systemPrompt.startsWith(forced));
+
+	// Withdrawn (/boost off): nothing to add to a forced prompt.
+	await stub.command("boost", "off");
+	const off = await stub.fire("before_agent_start", {
+		...beforeAgentStartEvent("1.2", { sections: {} }),
+		systemPrompt: forced,
+		systemPromptOptions: { sections: {}, forceSystemPrompt: forced },
+	});
+	assert.deepEqual(off, [undefined]);
 });
 
 test("tool telemetry is reported from the run itself, when opted in", async () => {
@@ -1597,6 +1636,7 @@ interface UiOptions {
 	notices?: Notices;
 	client?: Partial<BoostClient>;
 	settings?: SettingsStore;
+	env?: NodeJS.ProcessEnv;
 }
 
 /** The extension on the shared stub with a UI, compacting every shell result it is sent. */
@@ -1616,7 +1656,7 @@ function uiExtension(options: UiOptions = {}) {
 				),
 			...options.client,
 		}),
-		env: {},
+		env: options.env ?? {},
 		settings,
 		config: fixedConfig(options.config ?? CLI_ON),
 		readiness: options.readiness ?? fixedReadiness(),
@@ -1686,16 +1726,16 @@ test("footer: false clears the slot", async () => {
 
 test("the shell-off notice comes on the first ready session with the gate off, once per process", async () => {
 	const notices = createNotices();
-	const first = uiExtension({ config: CLI_OFF, notices });
+	const first = uiExtension({ config: CLI_DEFAULT, notices });
 	await start(first.stub);
 	await start(first.stub, "new");
 	// A reload builds a new instance; the process registry is shared.
-	const reloaded = uiExtension({ config: CLI_OFF, notices });
+	const reloaded = uiExtension({ config: CLI_DEFAULT, notices });
 	await start(reloaded.stub, "reload");
 	assert.deepEqual(first.noticeTexts(), [shellOffNotice({ documents: false, mcp: true })]);
 	assert.deepEqual(reloaded.noticeTexts(), []);
 
-	const chosen = uiExtension({ config: CLI_OFF, file: { shell: "off" } });
+	const chosen = uiExtension({ config: CLI_DEFAULT, file: { shell: "off" } });
 	await start(chosen.stub);
 	assert.deepEqual(chosen.noticeTexts(), [], "the user turned it off; no need to say how to turn it on");
 	const on = uiExtension({ config: CLI_ON });
@@ -1703,8 +1743,37 @@ test("the shell-off notice comes on the first ready session with the gate off, o
 	assert.deepEqual(on.noticeTexts(), []);
 });
 
+test("the shell-off notice names the cause, and says nothing when the user turned it off in Boost", async () => {
+	const remote = uiExtension({ config: CLI_REMOTE_OFF });
+	await start(remote.stub);
+	assert.deepEqual(remote.noticeTexts(), [shellOffNotice({ documents: false, mcp: true }, "remote")]);
+	assert.match(remote.noticeTexts()[0] ?? "", /JFrog's remote flag/);
+	assert.doesNotMatch(remote.noticeTexts()[0] ?? "", /Boost's default/);
+
+	// The user's own Boost flag, or the force-disabled environment variable:
+	// their choice, which the notice would only offer to undo.
+	const userFlag = uiExtension({ config: CLI_OFF });
+	await start(userFlag.stub);
+	assert.equal(userFlag.statusTexts().at(-1), "boost ✓ shell off");
+	assert.deepEqual(userFlag.noticeTexts(), [], "user = false");
+	const forced = uiExtension({
+		config: CLI_DEFAULT,
+		env: { BOOST_FEATURE_FLAGS_FORCE_DISABLED: "boost-cli-filtering" },
+	});
+	await start(forced.stub);
+	assert.equal(forced.statusTexts().at(-1), "boost ✓ shell off");
+	assert.deepEqual(forced.noticeTexts(), [], "BOOST_FEATURE_FLAGS_FORCE_DISABLED");
+	// Force-disabled beats a remote true and a user true alike.
+	const forcedOverRemote = uiExtension({
+		config: `[feature_flags."boost-cli-filtering"]\nremote = true\n`,
+		env: { BOOST_FEATURE_FLAGS_FORCE_DISABLED: "boost-cli-filtering" },
+	});
+	await start(forcedOverRemote.stub);
+	assert.deepEqual(forcedOverRemote.noticeTexts(), []);
+});
+
 test("the shell-off notice names only what is still handled", async () => {
-	const terms = `accept_terms = "yes"\n${CLI_OFF}`;
+	const terms = `accept_terms = "yes"\n${CLI_DEFAULT}`;
 	const both = uiExtension({ config: terms });
 	await start(both.stub);
 	assert.deepEqual(both.noticeTexts(), [shellOffNotice({ documents: true, mcp: true })]);
@@ -2032,6 +2101,58 @@ test("an idle extension writes no stats entry: Boost off, missing, or a nested c
 	await working.stub.emitToolResult(bash());
 	await settle(working.stub);
 	assert.equal(statsEntries(working.stub).length, 1);
+});
+
+test("/boost off is carried to the branch /tree moves to, so a later /reload keeps it", async () => {
+	// The stub reads this array for getBranch(); /tree is simulated by
+	// rewriting it, and appended entries are added at the leaf by hand.
+	const branchA: unknown[] = [{ type: "message", id: "m1" }];
+	const live: unknown[] = [...branchA];
+	const first = uiExtension({ branch: live });
+	await start(first.stub);
+	await first.stub.command("boost", "off");
+	const toggleEntries = () => first.stub.appended.filter((a) => a.customType === SESSION_TOGGLE_ENTRY);
+	assert.deepEqual(
+		toggleEntries().map((a) => a.data),
+		[{ enabled: false }],
+	);
+	live.push({ type: "custom", id: "t0", customType: SESSION_TOGGLE_ENTRY, data: { enabled: false } });
+
+	// /tree back to m1: the toggle entry is on the branch left behind.
+	live.splice(0, live.length, ...branchA);
+	await first.stub.fire("session_before_tree", { type: "session_before_tree" });
+	await first.stub.fire("session_tree", { type: "session_tree" });
+	assert.equal(first.statusTexts().at(-1), "boost: off");
+	assert.deepEqual(
+		toggleEntries().map((a) => a.data),
+		[{ enabled: false }, { enabled: false }],
+		"recorded again on the branch arrived at",
+	);
+	live.push({ type: "custom", id: "t1", customType: SESSION_TOGGLE_ENTRY, data: { enabled: false } });
+
+	// /reload rebuilds the extension from that branch: still off.
+	const reloaded = uiExtension({ branch: [...live] });
+	await start(reloaded.stub, "reload");
+	assert.deepEqual(reloaded.settings.off(), { by: "session" });
+	assert.equal(reloaded.statusTexts().at(-1), "boost: off");
+
+	// A branch that already agrees is left alone.
+	await first.stub.fire("session_tree", { type: "session_tree" });
+	assert.equal(toggleEntries().length, 2, "nothing appended when the branch agrees");
+
+	// No toggle in memory, but the branch arrived at has an old `off`: the
+	// session is on, so the branch is told the file decides again.
+	const plainBranch: unknown[] = [...branchA];
+	const plain = uiExtension({ branch: plainBranch });
+	await start(plain.stub, "resume");
+	assert.equal(plain.settings.off(), undefined);
+	plainBranch.splice(0, plainBranch.length, ...live);
+	await plain.stub.fire("session_tree", { type: "session_tree" });
+	assert.equal(plain.statusTexts().at(-1), "boost ✓", "the toggle in memory holds");
+	assert.deepEqual(
+		plain.stub.appended.filter((a) => a.customType === SESSION_TOGGLE_ENTRY).map((a) => a.data),
+		[{ enabled: null }],
+	);
 });
 
 test("/boost off survives a reload, resume and fork of the session; a new session starts clean", async () => {
