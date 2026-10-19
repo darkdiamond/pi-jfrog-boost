@@ -106,6 +106,11 @@ export interface CommandHost {
 	 * and starts a probe if none ran. Returns what still keeps Boost off.
 	 */
 	setSession(enabled: boolean): OffReason | undefined;
+	/**
+	 * Drop the session toggle (and persist that), so the `enabled` setting
+	 * decides again. Returns whether there was one.
+	 */
+	clearSession(): boolean;
 	/** `/boost status → retry`: forget the probe verdict and the breaker, look again. */
 	retry(): Promise<void>;
 	/** Run Boost with plain arguments (report, doctor). */
@@ -388,7 +393,20 @@ export function createBoostCommand(host: CommandHost) {
 			`Every setting in ${host.settings.path()} goes back to its default. Environment overrides still apply.`,
 		);
 		if (!ok) return false;
-		return save(ctx, () => host.settings.reset());
+		if (!save(ctx, () => host.settings.reset())) return false;
+		endSessionToggle(ctx);
+		return true;
+	}
+
+	/**
+	 * A saved `enabled` (or a reset) is the user saying what they want now; a
+	 * `/boost on|off` from earlier in the session would otherwise outrank it
+	 * silently, here and in every resume of the session.
+	 */
+	function endSessionToggle(ctx: ExtensionCommandContext): void {
+		if (!host.clearSession()) return;
+		host.refreshUi(ctx);
+		say(ctx, "This also ends /boost on|off for this session: the Enabled setting decides again.");
 	}
 
 	async function settingsLoop(ctx: ExtensionCommandContext, args: string[]): Promise<void> {
@@ -444,6 +462,7 @@ export function createBoostCommand(host: CommandHost) {
 				if (sources[key] === "env" && env) {
 					say(ctx, `Saved, but ${env} overrides "${key}" while it is set in pi's environment.`, "warning");
 				}
+				if (key === "enabled") endSessionToggle(ctx);
 			}
 		}
 		if (saved) say(ctx, `Settings saved to ${host.settings.path()}`);

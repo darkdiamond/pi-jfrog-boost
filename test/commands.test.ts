@@ -16,7 +16,7 @@ import { completions, OBSERVE_CONFIRM, SUBCOMMANDS } from "../src/commands.ts";
 import { type Breaker, createBreaker, type Readiness, type ReadinessState } from "../src/health.ts";
 import { createBoostExtension, createNotices } from "../src/index.ts";
 import { INSTALL_OPTIONS } from "../src/install.ts";
-import { createSettingsStore, type SettingsFs, settingsPath } from "../src/settings.ts";
+import { createSettingsStore, SESSION_TOGGLE_ENTRY, type SettingsFs, settingsPath } from "../src/settings.ts";
 import { MISSING_NOTICE, shellOffNotice } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memoryFs, stubClient } from "./helpers/runtime.ts";
@@ -298,6 +298,63 @@ test("/boost on overrides the enabled setting for the session", async () => {
 	assert.deepEqual(s.settings.off(), { by: "settings" });
 	await s.run("on");
 	assert.equal(s.settings.off(), undefined);
+});
+
+test("/boost on while nothing keeps Boost off records no toggle; it only un-pauses", async () => {
+	const s = setup();
+	await s.run("on");
+	assert.equal(s.settings.session(), undefined);
+	assert.deepEqual(
+		s.stub.appended.filter((a) => a.customType === SESSION_TOGGLE_ENTRY),
+		[],
+	);
+	// So the Enabled setting still decides.
+	s.settings.save({ enabled: false });
+	assert.deepEqual(s.settings.off(), { by: "settings" });
+});
+
+test("changing Enabled in /boost settings ends /boost on|off for the session, and says so", async () => {
+	const s = setup({ ui: { select: ["Enabled: on", "Done"] } });
+	await s.stub.fire("session_start", { type: "session_start", reason: "startup" });
+	await s.run("off");
+	await s.run("on");
+	assert.equal(s.settings.session(), true);
+	await s.run("settings");
+	assert.equal(s.rec.file().enabled, false);
+	assert.deepEqual(
+		s.settings.off(),
+		{ by: "settings" },
+		"the saved setting applies, not the earlier /boost on",
+	);
+	assert.equal(s.settings.session(), undefined);
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost: off");
+	assert.ok(s.notices().some((n) => /ends \/boost on\|off for this session/.test(n)));
+	assert.deepEqual(
+		s.stub.appended.filter((a) => a.customType === SESSION_TOGGLE_ENTRY).map((a) => a.data),
+		[{ enabled: false }, { enabled: true }, { enabled: null }],
+		"persisted, so a resumed session follows the file too",
+	);
+
+	// Another key leaves the toggle alone.
+	const other = setup({ ui: { select: ["Footer: on", "Done"] } });
+	await other.run("off");
+	await other.run("settings");
+	assert.deepEqual(other.settings.off(), { by: "session" });
+	assert.ok(!other.notices().some((n) => /ends \/boost on\|off/.test(n)));
+});
+
+test("settings reset ends /boost on|off for the session", async () => {
+	const s = setup({ ui: { confirm: [true] } });
+	await s.run("off");
+	await s.run("settings reset");
+	assert.equal(s.settings.off(), undefined);
+	assert.equal(s.stub.ui.statuses.at(-1)?.text, "boost ✓ shell off");
+
+	// Declined: nothing changes.
+	const declined = setup({ ui: { confirm: [false] } });
+	await declined.run("off");
+	await declined.run("settings reset");
+	assert.deepEqual(declined.settings.off(), { by: "session" });
 });
 
 test("report always passes -t, waits 30 s, and shows the last 40 lines", async () => {

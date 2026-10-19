@@ -366,6 +366,12 @@ test("the session toggle is restored from the branch's last entry", () => {
 		"junk skipped",
 	);
 	assert.equal(
+		restoreSessionToggle({ getBranch: () => [toggle(false), toggle(null)] }),
+		undefined,
+		"a cleared toggle hands the decision back to the settings",
+	);
+	assert.equal(restoreSessionToggle({ getBranch: () => [toggle(null), toggle(false)] }), false);
+	assert.equal(
 		restoreSessionToggle({ getBranch: () => [], getEntries: () => [toggle(false)] }),
 		undefined,
 		"a sibling branch's toggle does not leak in",

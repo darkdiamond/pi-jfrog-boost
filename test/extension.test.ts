@@ -2059,6 +2059,17 @@ test("/boost off survives a reload, resume and fork of the session; a new sessio
 		assert.equal(patch, undefined, `${reason}: nothing reaches Boost`);
 	}
 
+	// Ended by a change to Enabled in /boost settings: the file decides again.
+	const cleared = uiExtension({
+		branch: [
+			...branch,
+			{ type: "custom", id: "tc", customType: SESSION_TOGGLE_ENTRY, data: { enabled: null } },
+		],
+	});
+	await start(cleared.stub, "resume");
+	assert.equal(cleared.settings.off(), undefined);
+	assert.equal(cleared.statusTexts().at(-1), "boost ✓");
+
 	// Same process, same store: a new session clears the previous toggle.
 	await start(first.stub, "new");
 	assert.equal(first.settings.off(), undefined, "a new session has no toggle on its branch");

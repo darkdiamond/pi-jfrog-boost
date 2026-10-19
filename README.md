@@ -225,7 +225,8 @@ The per-key env booleans (`PI_BOOST_*`) take `0/1/true/false/yes/no`; the
 kill switches `DISABLE_BOOST`/`BOOST_DISABLED` take only `1` or `true`. Precedence, highest first:
 `DISABLE_BOOST`/`BOOST_DISABLED`, `--no-boost`, `/boost on|off`, the per-key
 env, the file, the defaults. `/boost on` cannot override a kill switch and
-says which one is blocking. An invalid value falls back to its default with
+says which one is blocking; changing Enabled in `/boost settings` (or
+resetting) ends the session's `/boost on|off`. An invalid value falls back to its default with
 one warning.
 
 **There is no project settings file, on purpose.** These settings decide what

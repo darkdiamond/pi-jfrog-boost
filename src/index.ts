@@ -1115,6 +1115,19 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		{ print, ...deps.install },
 	);
 
+	/**
+	 * Set the session toggle (`null` clears it) and persist it, so a rebuilt
+	 * runtime (`/reload`, `/resume`, `/fork`) keeps it; the in-memory toggle
+	 * holds either way.
+	 */
+	const persistToggle = (enabled: boolean | null) => {
+		settings.setSession(enabled ?? undefined);
+		try {
+			if (typeof pi.appendEntry === "function") pi.appendEntry(SESSION_TOGGLE_ENTRY, { enabled });
+		} catch {
+			/* fail open: this runtime still has the toggle */
+		}
+	};
 	const host: CommandHost = {
 		settings,
 		headline: () => currentFooter(true) ?? "boost: checking…",
@@ -1130,14 +1143,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			return state.kind === "ready" ? shellGate("auto", config.read(), env, state.version).on : undefined;
 		},
 		setSession(enabled) {
-			settings.setSession(enabled);
-			// Persisted so a rebuilt runtime (`/reload`, `/resume`, `/fork`)
-			// keeps it; the in-memory toggle above holds either way.
-			try {
-				if (typeof pi.appendEntry === "function") pi.appendEntry(SESSION_TOGGLE_ENTRY, { enabled });
-			} catch {
-				/* fail open: this runtime still has the toggle */
-			}
+			// `/boost on` while nothing keeps Boost off only un-pauses it: no
+			// toggle is recorded, so the `enabled` setting keeps deciding.
+			if (!enabled || settings.off() !== undefined) persistToggle(enabled);
 			if (enabled) {
 				// `/boost on` is also how a user un-pauses Boost (§8.2), and a
 				// session that started off never probed: start one, not awaited.
@@ -1149,6 +1157,11 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				}
 			}
 			return settings.off();
+		},
+		clearSession() {
+			if (settings.session() === undefined) return false;
+			persistToggle(null);
+			return true;
 		},
 		async retry() {
 			await recheck();

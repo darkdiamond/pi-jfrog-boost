@@ -453,6 +453,8 @@ export interface SettingsStore {
 	off(): OffReason | undefined;
 	/** `/boost on|off` for this session; undefined clears it. */
 	setSession(enabled: boolean | undefined): void;
+	/** The session toggle, or undefined when `/boost on|off` was not used (or was cleared). */
+	session(): boolean | undefined;
 	/** Merge `values` into the file and save it atomically (only from `/boost settings`). */
 	save(values: Partial<Settings>): void;
 	/**
@@ -569,6 +571,7 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 		setSession(enabled) {
 			session = enabled;
 		},
+		session: () => session,
 		save(values) {
 			const path = pathOf();
 			const raw = currentRaw(path);
@@ -594,7 +597,11 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
 // ---------------------------------------------------------------------------
 // The session toggle across a rebuilt runtime
 
-/** Custom session entry holding the last `/boost on|off` (`{ enabled }`). */
+/**
+ * Custom session entry holding the last `/boost on|off` (`{ enabled }`), or
+ * `{ enabled: null }` once `/boost settings` changed `enabled` (or reset),
+ * which hands the decision back to the settings file.
+ */
 export const SESSION_TOGGLE_ENTRY = "jfrog-boost-session";
 
 /** The parts of pi's session manager this reads; both exist from 0.86.1 on. */
@@ -610,6 +617,7 @@ function lastToggle(entries: unknown): boolean | undefined {
 		if (entry && entry.type === "custom" && entry.customType === SESSION_TOGGLE_ENTRY) {
 			const enabled = (entry.data as { enabled?: unknown } | null)?.enabled;
 			if (typeof enabled === "boolean") return enabled;
+			if (enabled === null) return undefined;
 		}
 	}
 	return undefined;
