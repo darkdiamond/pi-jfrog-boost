@@ -1724,7 +1724,7 @@ test("the shell-off notice names only what is still handled", async () => {
 	assert.doesNotMatch(neither.noticeTexts()[0] ?? "", /still handled/);
 });
 
-test("filters Boost disabled after retrieves are announced once", async () => {
+test("disabled filters are announced once", async () => {
 	const notices = createNotices();
 	const config = `${CLI_ON}[filters]\ndisabled = ["npm-test"]\n`;
 	const a = uiExtension({ config, notices });

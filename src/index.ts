@@ -444,8 +444,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 
 	/**
 	 * Notices that depend on what the probe found (§10.4): a Boost too old to
-	 * use, shell compaction off on a working Boost, filters Boost switched off
-	 * after retrieves. Each once per process.
+	 * use, shell compaction off on a working Boost, disabled filters (by
+	 * `boost filters disable` or by Boost after retrieves). Each once per
+	 * process.
 	 */
 	function stateNotices(ctx: ExtensionContext): void {
 		if (isOff()) return;

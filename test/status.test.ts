@@ -179,7 +179,7 @@ test("notice texts are the §10.4 texts", () => {
 	);
 	assert.equal(
 		filtersDisabledNotice(["npm-test", "pytest"]),
-		"Boost switched off these filters after repeated retrieves: npm-test, pytest. Re-enable in a terminal: boost filters enable <name>.",
+		"Boost has these filters disabled (by `boost filters disable` or after repeated retrieves): npm-test, pytest. Re-enable in a terminal: boost filters enable <name>.",
 	);
 });
 
@@ -255,7 +255,7 @@ test("the status report matches the §10.2 layout", () => {
 			"  documents on (Preview Agreement accepted 2026-10-01)    notebooks on    readLogs off",
 			"  mcp       on (boost-mcp-filtering: default)    exclude: none",
 			"  breaker   closed    sync on    observe off",
-			"  filters   disabled by Boost after retrieves: none (re-enable: boost filters enable <name>)",
+			"  filters   disabled: none",
 			"  session   ~12.3k tokens saved (41%) — bash 9.1k · documents 2.0k · mcp 1.2k",
 			"  skipped   small 40 · exact 31 · html 2 · bypass 3 · shell-off 0 · busy 0 · paused 0",
 			"  errors    timeouts 0 · last: none",
@@ -275,11 +275,11 @@ test("without the terms, the documents line says how to accept them", () => {
 	assert.match(report, /\n {12}notebooks on {4}readLogs off\n/);
 });
 
-test("filters Boost disabled after retrieves are listed with how to re-enable them", () => {
+test("disabled filters are listed with both possible causes and how to re-enable them", () => {
 	const config = parseBoostConfig(`accept_terms = "yes"\n[filters]\ndisabled = ["npm-test", "pytest"]\n`);
 	assert.match(
 		statusReport(view({ config })),
-		/\n {2}filters {3}disabled by Boost after retrieves: npm-test, pytest \(re-enable: boost filters enable <name>\)\n/,
+		/\n {2}filters {3}disabled: npm-test, pytest \(by `boost filters disable` or after retrieves; re-enable: boost filters enable <name>\)\n/,
 	);
 });
 
@@ -287,7 +287,7 @@ test("stale or missing flag metadata is reported, with whether sync refreshes it
 	const old = parseBoostConfig(`[feature_flags._metadata]\nlast_updated_at = "2026-10-10T12:00:00Z"\n`);
 	assert.match(
 		statusReport(view({ config: old, flags: flagsFreshness(old, {}, NOW) })),
-		/\n {2}flags {5}stale \(3 days\); refreshed by sync\n/,
+		/\n {2}flags {5}stale \(3 days old\); refreshed by sync\n/,
 	);
 	const never = parseBoostConfig("");
 	assert.match(
@@ -299,6 +299,24 @@ test("stale or missing flag metadata is reported, with whether sync refreshes it
 		flagsFreshness(old, { BOOST_FEATURE_FLAGS_TTL: "96h" }, NOW).stale,
 		false,
 		"the user's TTL",
+	);
+	// A sub-day TTL: the age reads in hours, not "0 days".
+	const hoursOld = parseBoostConfig(
+		`[feature_flags._metadata]\nlast_updated_at = "${new Date(NOW - 5 * 3_600_000).toISOString()}"\n`,
+	);
+	assert.match(
+		statusReport(
+			view({ config: hoursOld, flags: flagsFreshness(hoursOld, { BOOST_FEATURE_FLAGS_TTL: "1h" }, NOW) }),
+		),
+		/\n {2}flags {5}stale \(5 h old\); refreshed by sync\n/,
+	);
+	// Present but not a time: stale, and not "never fetched".
+	const garbage = parseBoostConfig(`[feature_flags._metadata]\nlast_updated_at = "garbage"\n`);
+	assert.deepEqual(flagsFreshness(garbage, {}, NOW), { stale: true, unreadable: true });
+	assert.deepEqual(flagsFreshness(never, {}, NOW), { stale: true });
+	assert.match(
+		statusReport(view({ config: garbage, flags: flagsFreshness(garbage, {}, NOW) })),
+		/\n {2}flags {5}last update time unreadable; refreshed by sync\n/,
 	);
 });
 

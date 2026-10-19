@@ -11,7 +11,7 @@
  *   [feature_flags."boost-cli-filtering"]
  *   user = true / remote = false              → whether shell output is filtered (§8.4)
  *   [filters]
- *   disabled = ["go", "node-test"]            → filters Boost switched off after retrieves
+ *   disabled = ["go", "node-test"]            → filters off (`boost filters disable`, or Boost after retrieves)
  *   [measurement]
  *   boost_off_sessions = false
  *
@@ -295,7 +295,7 @@ export interface BoostConfig {
 	flagsUpdatedAt?: string;
 	/** A flag's recorded values; `{}` when the flag is not in the file. */
 	flag(name: string): FlagValue;
-	/** Filters Boost switched off after repeated retrieves (`[filters] disabled`). */
+	/** Disabled filters (`[filters] disabled`): by `boost filters disable` or by Boost after repeated retrieves. */
 	disabledFilters: string[];
 	/** `[measurement] boost_off_sessions`, shown in status only. */
 	boostOffSessions?: boolean;
@@ -541,15 +541,18 @@ export function parseGoDuration(value: string): number | undefined {
  * `last_updated_at` is stale (Boost cannot use it either); a user TTL this
  * parser does not understand is left to the user and Boost (not stale).
  * `ageMs` is undefined when the flags were never fetched or the timestamp is
- * unreadable.
+ * unreadable; `unreadable` tells the second case from the first.
  */
-export function flagsFreshness(
-	config: BoostConfig,
-	env: NodeJS.ProcessEnv,
-	now: number,
-): { stale: boolean; ageMs?: number } {
-	const at = config.flagsUpdatedAt ? Date.parse(config.flagsUpdatedAt) : Number.NaN;
-	if (Number.isNaN(at)) return { stale: true };
+export interface FlagsFreshness {
+	stale: boolean;
+	ageMs?: number;
+	/** `last_updated_at` is present but not a time. */
+	unreadable?: true;
+}
+export function flagsFreshness(config: BoostConfig, env: NodeJS.ProcessEnv, now: number): FlagsFreshness {
+	if (!config.flagsUpdatedAt) return { stale: true };
+	const at = Date.parse(config.flagsUpdatedAt);
+	if (Number.isNaN(at)) return { stale: true, unreadable: true };
 	const ageMs = Math.max(0, now - at);
 	const userTtl = env.BOOST_FEATURE_FLAGS_TTL ? parseGoDuration(env.BOOST_FEATURE_FLAGS_TTL) : undefined;
 	// A TTL Go would parse but this cannot is the user's business; say nothing.

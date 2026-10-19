@@ -289,9 +289,10 @@ What leaves your machine, and how to stop it:
   TTL, so a call stays near 0.2 s. Flags are then refreshed by the idle-time
   `boost sync` or by any other Boost integration. **With sync off and no other
   Boost agent on the machine, they are not refreshed at all**, and
-  `/boost status` says so on its `flags` line: `stale (N days); not refreshed:
-  sync is off`, or `never fetched; not refreshed: sync is off` when Boost has
-  never fetched them.
+  `/boost status` says so on its `flags` line: `stale (N days old); not
+  refreshed: sync is off` (hours under a day), `never fetched; …` when Boost
+  has never fetched them, or `last update time unreadable; …` when the
+  recorded time is not a time.
 - The readiness check never blocks a tool: results pass through until
   `boost version` has answered (~160 ms).
 
@@ -352,7 +353,8 @@ recognise `pi` in its session list. See [Attribution](#attribution-and-telemetry
 
 **Some output stopped being compacted.** Boost learns from retrieves: after a
 few `boost retrieve` calls for the same filter it switches that filter off on
-this machine, for every agent. `/boost status` lists filters Boost disabled;
+this machine, for every agent. `/boost status` lists disabled filters, whether
+Boost or `boost filters disable` turned them off (both write the same list);
 re-enable one in a terminal with `boost filters enable <name>`.
 
 **Upgraded and nothing changed.** Restart pi after upgrading the package;

@@ -25,6 +25,7 @@ import {
 	type BoostConfig,
 	CLI_FILTERING_FLAG,
 	type FlagResolution,
+	type FlagsFreshness,
 	MCP_FILTERING_FLAG,
 	type ShellGate,
 } from "./boost-config.ts";
@@ -172,7 +173,7 @@ export const TERMS_NOTICE =
 export const pausedNotice = (reason: BadReason, minutes: number) =>
 	`Boost was slow or failing (${PAUSE_REASONS[reason]}), so it's paused for ${minutes} min; output passes through unchanged. /boost status for details.`;
 export const filtersDisabledNotice = (filters: readonly string[]) =>
-	`Boost switched off these filters after repeated retrieves: ${filters.join(", ")}. Re-enable in a terminal: boost filters enable <name>.`;
+	`Boost has these filters disabled (by \`boost filters disable\` or after repeated retrieves): ${filters.join(", ")}. Re-enable in a terminal: boost filters enable <name>.`;
 
 /** The breaker's reason, in the words a notice uses. */
 const PAUSE_REASONS: Readonly<Record<BadReason, string>> = {
@@ -250,7 +251,7 @@ export interface StatusView {
 	gate: ShellGate;
 	mcpFlag: FlagResolution;
 	config: BoostConfig;
-	flags: { stale: boolean; ageMs?: number };
+	flags: FlagsFreshness;
 	stats: StatsSnapshot;
 	/** This session's skip reasons and errors (health.ts counters). */
 	skips: Readonly<Record<string, number>>;
@@ -411,12 +412,21 @@ function breakerText(view: StatusView): string {
 
 function flagsLine(view: StatusView): string | undefined {
 	if (!view.flags.stale) return undefined;
-	const age =
-		view.flags.ageMs === undefined
+	const { ageMs, unreadable } = view.flags;
+	const age = unreadable
+		? "last update time unreadable"
+		: ageMs === undefined
 			? "never fetched"
-			: `stale (${Math.floor(view.flags.ageMs / 86_400_000)} days)`;
+			: `stale (${ageText(ageMs)} old)`;
 	const by = view.settings.sync ? "refreshed by sync" : "not refreshed: sync is off";
 	return line("flags", `${age}; ${by}`);
+}
+
+/** Whole days, or whole hours under a day (a user TTL can be `1h`). */
+function ageText(ms: number): string {
+	const days = Math.floor(ms / 86_400_000);
+	if (days >= 1) return days === 1 ? "1 day" : `${days} days`;
+	return `${Math.floor(ms / 3_600_000)} h`;
 }
 
 function sessionLine(view: StatusView): string {
@@ -463,7 +473,9 @@ export function statusReport(view: StatusView): string {
 		line("breaker", `${breakerText(view)}${GAP}sync ${onOff(s.sync)}${GAP}observe ${onOff(s.observe)}`),
 		line(
 			"filters",
-			`disabled by Boost after retrieves: ${filters.length ? filters.join(", ") : "none"} (re-enable: boost filters enable <name>)`,
+			filters.length
+				? `disabled: ${filters.join(", ")} (by \`boost filters disable\` or after retrieves; re-enable: boost filters enable <name>)`
+				: "disabled: none",
 		),
 	];
 	const flags = flagsLine(view);
