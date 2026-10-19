@@ -532,7 +532,7 @@ test("a hung observe is killed by its watchdog, 30 s by default", async () => {
 
 	// And a real hung child is killed once it runs out: the client's runner,
 	// wrapped only to hear the exit observe itself never asks for.
-	const real = createProcessRunner({ launcher, platform: process.platform });
+	const real = createProcessRunner({ launcher });
 	let onExit: ((code: number | null) => void) | undefined;
 	const runner: ProcessRunner = {
 		...real,

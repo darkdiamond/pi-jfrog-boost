@@ -229,3 +229,19 @@ test("detached children report their exit, and a watchdog kills a hung one", asy
 		clearInterval(keep);
 	}
 });
+
+test("detached children are spawned detached and hidden on every platform", () => {
+	// On Windows only `detached: true` keeps the child out of the job object
+	// libuv kills when pi exits, so the shutdown `boost sync` survives pi.
+	const seen: Array<Record<string, unknown>> = [];
+	let unrefd = false;
+	const spawn = ((_file: string, _args: readonly string[], options: Record<string, unknown>) => {
+		seen.push(options);
+		return { on: () => {}, unref: () => (unrefd = true), stdin: null };
+	}) as unknown as typeof import("node:child_process").spawn;
+	createProcessRunner({ launcher, spawn }).detached(FAKE, ["sync"], { env: options().env });
+	assert.equal(seen.length, 1);
+	assert.equal(seen[0]?.detached, true);
+	assert.equal(seen[0]?.windowsHide, true);
+	assert.ok(unrefd, "the child is unref'd so it never keeps pi alive");
+});

@@ -245,7 +245,6 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 			...(deps.launcher ? { launcher: deps.launcher } : {}),
 			...(deps.now ? { now: deps.now } : {}),
 			...(deps.concurrency !== undefined ? { concurrency: deps.concurrency } : {}),
-			platform,
 		});
 	const readConfig = deps.config ?? createConfigReader().read;
 	const shellMode = deps.shellMode ?? (() => "auto" as const);

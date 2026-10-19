@@ -78,8 +78,8 @@ export interface DetachedOptions {
 export interface ProcessRunner {
 	run(exe: string, args: readonly string[], options: RunOptions): Promise<RunResult>;
 	/**
-	 * Fire and forget: the child runs detached (on POSIX) and unref'd, so it
-	 * neither blocks a turn nor keeps pi alive, and outlives pi when pi exits.
+	 * Fire and forget: the child runs detached and unref'd on every platform, so
+	 * it neither blocks a turn nor keeps pi alive, and outlives pi when pi exits.
 	 * Not counted by the semaphore — it is never on a tool's critical path.
 	 */
 	detached(exe: string, args: readonly string[], options: DetachedOptions): void;
@@ -95,7 +95,6 @@ export interface ProcessRunnerDeps {
 	/** Monotonic clock in milliseconds; defaults to `performance.now`. */
 	now?: () => number;
 	concurrency?: number;
-	platform?: NodeJS.Platform;
 }
 
 const NOT_RUN: RunResult = { code: null, stdout: "", ms: 0, timedOut: false, aborted: false };
@@ -106,7 +105,6 @@ export function createProcessRunner(deps: ProcessRunnerDeps = {}): ProcessRunner
 	// Monotonic, so a wall-clock adjustment mid-call cannot produce a negative or huge duration.
 	const now = deps.now ?? (() => performance.now());
 	const limit = deps.concurrency ?? DEFAULT_CONCURRENCY;
-	const platform = deps.platform ?? process.platform;
 	/** Kill functions of the foreground children still running. */
 	const running = new Set<() => void>();
 
@@ -204,9 +202,12 @@ export function createProcessRunner(deps: ProcessRunnerDeps = {}): ProcessRunner
 	};
 
 	/**
-	 * Windows has no `detached` that avoids allocating a console window, so the
-	 * child stays attached there with the window hidden — the same trade-off
-	 * Boost's OpenCode plugin makes.
+	 * `detached: true` on every platform. On POSIX it gives the child its own
+	 * process group. On Windows it is what lets the child outlive pi at all:
+	 * libuv puts every non-detached child in a job object that kills it when pi
+	 * exits, which would cut off the shutdown `boost sync` (and, under `pi -p`,
+	 * every sync). A detached Windows child is created with DETACHED_PROCESS, so
+	 * it has no console, and `windowsHide` keeps any window hidden besides.
 	 */
 	const detached = (exe: string, args: readonly string[], options: DetachedOptions): void => {
 		let exited = false;
@@ -225,7 +226,7 @@ export function createProcessRunner(deps: ProcessRunnerDeps = {}): ProcessRunner
 				...(options.cwd ? { cwd: options.cwd } : {}),
 				env: options.env,
 				stdio: [options.input === undefined ? "ignore" : "pipe", "ignore", "ignore"],
-				detached: platform !== "win32",
+				detached: true,
 				windowsHide: true,
 			});
 			let watchdog: NodeJS.Timeout | undefined;
