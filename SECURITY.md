@@ -41,8 +41,11 @@ access pi has. Concretely, it:
 - has **no network access of its own**, except a `/boost install` you
   confirm: the binary-only option calls the GitHub API for the latest
   release and downloads that asset from github.com/jfrog/boost, checking it
-  against the SHA-256 GitHub publishes for it (the confirm text says so if
-  GitHub publishes none); the official option runs JFrog's `install.sh`,
+  against the SHA-256 GitHub publishes for it (with no published digest it
+  installs nothing and shows the manual steps instead); the download URL
+  must parse to `https://github.com/jfrog/boost/releases/download/…`, and the
+  binary is verified before it replaces anything; the official option runs
+  JFrog's `install.sh`,
   which the confirm text describes;
 - **never** runs `boost init`, `boost retrieve`, `boost feature-flags` or
   `boost filters`, and never accepts JFrog's Preview Agreement. A test-suite

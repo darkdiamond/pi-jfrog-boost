@@ -33,6 +33,7 @@ import {
 	confirmText,
 	createInstaller,
 	defaultVerify,
+	downloadUrl,
 	findAsset,
 	INSTALL_COMMAND,
 	INSTALL_OPTIONS,
@@ -226,7 +227,7 @@ test("platforms map to Boost's release assets; others have none", () => {
 	assert.equal(releasePlatform("win32", "x64"), undefined);
 });
 
-test("the confirm text is the golden text, verified and unverified", () => {
+test("the confirm text is the golden text", () => {
 	const base = {
 		tag: "v0.15.4",
 		os: "darwin",
@@ -235,18 +236,18 @@ test("the confirm text is the golden text, verified and unverified", () => {
 		size: 14_234_567,
 		dest: "~/.local/bin/boost",
 	};
-	const render = (verified: boolean) => {
-		const t = confirmText({ ...base, verified });
-		return `${t.title}\n\n${t.message}\n`;
-	};
-	assert.equal(`# verified\n${render(true)}# unverified\n${render(false)}`, GOLDEN);
+	const t = confirmText(base);
+	assert.equal(`${t.title}\n\n${t.message}\n`, GOLDEN);
 });
 
 test("the asset lookup reads tag, URL, size and digest, defensively", () => {
 	const found = findAsset(release(), "boost-darwin-arm64.tar.gz");
 	assert.deepEqual(found, { tag: "v0.15.4", url: ASSET_URL, size: ARCHIVE.length, sha256: SHA });
-	const noDigest = findAsset(release({ digest: undefined }), "boost-darwin-arm64.tar.gz");
-	assert.equal(typeof noDigest === "object" && noDigest.sha256, undefined);
+	assert.match(
+		String(findAsset(release({ digest: undefined }), "boost-darwin-arm64.tar.gz")),
+		/no SHA-256/,
+		"an unverifiable asset is never offered",
+	);
 	assert.equal(typeof findAsset(release(), "boost-linux-arm64.tar.gz"), "string", "missing asset");
 	assert.equal(
 		typeof findAsset(
@@ -297,10 +298,32 @@ test("binary only: confirmed, verified, placed atomically, refreshed, temp remov
 	assert.match(done, /boost init --dry-run/);
 });
 
-test("binary only without a published digest says so in the confirm", async () => {
-	const s = setup({ ui: { select: [BINARY], confirm: [false] }, api: release({ digest: undefined }) });
+test("binary only without a published digest downloads nothing and shows the commands", async () => {
+	const s = setup({ ui: { select: [BINARY], confirm: [true] }, api: release({ digest: undefined }) });
 	await s.run();
-	assert.match(s.stub.ui.confirms[0]?.message ?? "", /NOTE: GitHub publishes no checksum for this asset/);
+	assert.equal(s.stub.ui.confirms.length, 0);
+	assert.deepEqual(s.fetched, ["https://api.github.com/repos/jfrog/boost/releases/latest"]);
+	assert.equal(existsSync(s.dest), false);
+	assert.match(s.notices().at(-1) ?? "", /no SHA-256 for boost-darwin-arm64\.tar\.gz/);
+	assert.match(s.notices().at(-1) ?? "", /To install JFrog Boost yourself/);
+});
+
+test("download URLs are checked structurally, not by prefix", () => {
+	const ok = "https://github.com/jfrog/boost/releases/download/v0.15.4/boost-darwin-arm64.tar.gz";
+	assert.equal(downloadUrl(ok), ok);
+	for (const bad of [
+		"https://github.com/jfrog/boost/releases/download/../../../evil/repo/releases/download/x.tar.gz",
+		"https://github.com/jfrog/boost/releases/download/%2e%2e/%2e%2e/%2e%2e/evil/x.tar.gz",
+		"http://github.com/jfrog/boost/releases/download/v1/x.tar.gz",
+		"https://user:pw@github.com/jfrog/boost/releases/download/v1/x.tar.gz",
+		"https://github.com:8443/jfrog/boost/releases/download/v1/x.tar.gz",
+		"https://github.com.evil.example/jfrog/boost/releases/download/v1/x.tar.gz",
+		"https://evil.example/jfrog/boost/releases/download/v1/x.tar.gz",
+		"not a url",
+		42,
+	]) {
+		assert.equal(downloadUrl(bad), undefined, String(bad));
+	}
 });
 
 test("cancelling the confirm downloads and runs nothing", async () => {
@@ -335,10 +358,9 @@ test("a checksum mismatch aborts before tar, leaves no binary and cleans up", as
 	assert.equal(s.stub.ui.notices.at(-1)?.level, "error");
 });
 
-test("a download of the wrong size is refused even without a digest", async () => {
+test("a download of the wrong size is refused", async () => {
 	const s = setup({
 		ui: { select: [BINARY], confirm: [true] },
-		api: release({ digest: undefined }),
 		body: Buffer.concat([ARCHIVE, Buffer.from("extra")]),
 	});
 	await s.run();
@@ -619,7 +641,7 @@ test("a GitHub lookup that never answers times out to the commands text", async 
 		});
 		await s.run();
 		const message = s.notices().at(-1) ?? "";
-		assert.match(message, /^Could not look up the Boost release \(GitHub did not answer in time\)/);
+		assert.match(message, /^Not installing automatically: GitHub did not answer in time\./);
 		assert.match(message, /To install JFrog Boost yourself/);
 		assert.equal(s.stub.ui.confirms.length, 0);
 	} finally {

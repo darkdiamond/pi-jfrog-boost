@@ -41,7 +41,8 @@ export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_URL} | bash`;
 export const RELEASES_API = "https://api.github.com/repos/jfrog/boost/releases/latest";
 export const RELEASES_PAGE = "https://github.com/jfrog/boost/releases/latest";
 /** Every asset URL must start with this; anything else falls back to the commands text. */
-const DOWNLOAD_PREFIX = "https://github.com/jfrog/boost/releases/download/";
+const DOWNLOAD_HOST = "github.com";
+const DOWNLOAD_PATH = "/jfrog/boost/releases/download/";
 export const TERMS_URL = "https://boost.jfrog.com/preview-agreement/";
 export const WINDOWS_COMMAND = "irm https://raw.githubusercontent.com/jfrog/boost/main/install.ps1 | iex";
 
@@ -115,8 +116,6 @@ export interface ConfirmView {
 	arch: string;
 	asset: string;
 	size: number;
-	/** Whether GitHub publishes a SHA-256 digest for the asset. */
-	verified: boolean;
 	/** The destination, as shown (already `~`-shortened). */
 	dest: string;
 }
@@ -128,14 +127,11 @@ export interface ConfirmView {
  * the code it describes.
  */
 export function confirmText(view: ConfirmView): { title: string; message: string } {
-	const check = view.verified
-		? "check it against the SHA-256 GitHub publishes for it"
-		: "NOTE: GitHub publishes no checksum for this asset, so it cannot be verified";
 	return {
 		title: `Install JFrog Boost ${view.tag} for ${view.os}/${view.arch}?`,
 		message: [
 			`pi-jfrog-boost will download ${view.asset} (${formatSize(view.size)}) from github.com/jfrog/boost,`,
-			`${check},`,
+			"check it against the SHA-256 GitHub publishes for it,",
 			`and place the boost binary at ${view.dest}. That is all it does:`,
 			"  • it does not run JFrog's install.sh",
 			"  • it does not change your shell startup files or PATH",
@@ -193,8 +189,8 @@ export interface ReleaseAsset {
 	tag: string;
 	url: string;
 	size: number;
-	/** Lower-case hex SHA-256, when GitHub publishes one (`digest: "sha256:<hex>"`). */
-	sha256?: string;
+	/** Lower-case hex SHA-256 GitHub publishes for the asset (`digest: "sha256:<hex>"`). */
+	sha256: string;
 }
 
 /**
@@ -212,14 +208,35 @@ export function findAsset(release: unknown, name: string): ReleaseAsset | string
 			typeof a === "object" && a !== null && (a as Record<string, unknown>).name === name,
 	);
 	if (!asset) return `release ${tag} has no ${name}`;
-	const url = asset.browser_download_url;
-	// Only JFrog's own release downloads: a redirect elsewhere is fetch's to
-	// follow, but the starting point is never taken from anywhere else.
-	if (typeof url !== "string" || !url.startsWith(DOWNLOAD_PREFIX)) return `${name} has no download URL`;
+	const url = downloadUrl(asset.browser_download_url);
+	if (!url) return `${name} has no download URL`;
 	const size = typeof asset.size === "number" && asset.size > 0 ? asset.size : 0;
 	if (size === 0 || size > MAX_DOWNLOAD_BYTES) return `${name} has no plausible size`;
+	// An unverifiable binary is never installed: without a published digest
+	// the caller falls back to showing the manual steps.
 	const digest = typeof asset.digest === "string" ? /^sha256:([0-9a-f]{64})$/i.exec(asset.digest) : null;
-	return { tag, url, size, ...(digest ? { sha256: (digest[1] as string).toLowerCase() } : {}) };
+	if (!digest) return `GitHub publishes no SHA-256 for ${name}, so it cannot be verified`;
+	return { tag, url, size, sha256: (digest[1] as string).toLowerCase() };
+}
+
+/**
+ * Only JFrog's own release downloads. Checked on the parsed URL, not the raw
+ * string: a prefix match lets `…/download/../../../other/repo/…` through,
+ * which fetch normalises to someone else's release. Returns the normalised
+ * href, so what is checked is exactly what is fetched. A redirect elsewhere is
+ * fetch's to follow; the starting point is never taken from anywhere else.
+ */
+export function downloadUrl(raw: unknown): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	let u: URL;
+	try {
+		u = new URL(raw);
+	} catch {
+		return undefined;
+	}
+	if (u.protocol !== "https:" || u.host !== DOWNLOAD_HOST || u.username || u.password) return undefined;
+	if (!u.pathname.startsWith(DOWNLOAD_PATH)) return undefined;
+	return u.href;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +489,7 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 		try {
 			const archive = join(work, name);
 			const sha = await download(ctx, asset, archive);
-			if (asset.sha256 && sha !== asset.sha256) {
+			if (sha !== asset.sha256) {
 				throw new StepError("checksum", `SHA-256 ${sha} does not match GitHub's ${asset.sha256}`);
 			}
 			// Only the one member, into the private temp directory: whatever else
@@ -606,11 +623,7 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 		const name = assetName(release.os, release.arch);
 		const asset = await lookup(ctx, name);
 		if (typeof asset === "string") {
-			say(
-				ctx,
-				`Could not look up the Boost release (${asset}).\n${commandsText(release, shownDest)}`,
-				"warning",
-			);
+			say(ctx, `Not installing automatically: ${asset}.\n${commandsText(release, shownDest)}`, "warning");
 			return;
 		}
 		const { title, message } = confirmText({
@@ -619,7 +632,6 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 			arch: release.arch,
 			asset: name,
 			size: asset.size,
-			verified: asset.sha256 !== undefined,
 			dest: shownDest,
 		});
 		if (!(await ctx.ui.confirm(title, message))) {
