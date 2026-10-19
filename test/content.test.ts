@@ -168,6 +168,10 @@ test("an HTML document is recognised exactly as Boost recognises one", () => {
 		"\u001b[38;5;12m<!DOCTYPE html>",
 		"\u001b]0;title\u0007\u001b[1m  <html>",
 		"<HTML>\n<body>",
+		// Boost trims before it looks, however much there is to trim.
+		`${" ".repeat(5000)}\n<!DOCTYPE html>\n<html>`,
+		`\uFEFF${"\n".repeat(5000)}<html>`,
+		`${"\u001b[0m \n".repeat(2000)}<!doctype html>`,
 	]) {
 		assert.equal(looksLikeHtmlDocument(text), true, text);
 	}
@@ -177,7 +181,9 @@ test("an HTML document is recognised exactly as Boost recognises one", () => {
 		"<?xml version='1.0'?><html>",
 		"text\n<!doctype html>",
 		"<!-- unterminated <!doctype html>",
-		`${" ".repeat(5000)}<!doctype html>`,
+		`${" ".repeat(5000)}<div>fragment</div>`,
+		`${" ".repeat(5000)}\u001b]0;unterminated <!doctype html>`,
+		" \n\t",
 		"",
 	]) {
 		assert.equal(looksLikeHtmlDocument(text), false, text);
@@ -234,6 +240,15 @@ test("escape stripping stays linear on unterminated OSC sequences", () => {
 		const ms = performance.now() - started;
 		assert.ok(ms < 500, `${JSON.stringify(unit)}: ${ms.toFixed(0)} ms`);
 		assert.ok(out.length <= text.length);
+	}
+	// The HTML sniff skips leading whitespace and escapes of any length, so
+	// it walks a whole result that is nothing else; that walk is linear too.
+	for (const unit of [" ", "\n\u001b[0m", "\u001b]0;t\u0007 ", " \u001b]a"]) {
+		const text = unit.repeat(Math.ceil((1024 * 1024) / unit.length));
+		const started = performance.now();
+		assert.equal(looksLikeHtmlDocument(text), false);
+		const ms = performance.now() - started;
+		assert.ok(ms < 500, `sniff ${JSON.stringify(unit)}: ${ms.toFixed(0)} ms`);
 	}
 	// Terminated sequences are still removed, unterminated ones left as text.
 	assert.equal(stripAnsi("a\u001b]0;t\u0007b\u001b]8;;x"), "ab\u001b]8;;x");

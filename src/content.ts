@@ -119,6 +119,28 @@ export function stripAnsi(text: string): string {
 
 /** How much of the start of a result the HTML sniff looks at. */
 const HTML_SNIFF_CHARS = 4096;
+/** One escape sequence exactly at `lastIndex`. */
+const ANSI_AT = new RegExp(ANSI.source, "y");
+/** The next character that is not whitespace (a BOM counts as whitespace). */
+const NOT_SPACE = /[^\s\uFEFF]/g;
+
+/**
+ * Where the text Boost will be given starts once it trims: the index of the
+ * first character that is neither whitespace, a BOM nor part of a terminal
+ * escape, or -1 when there is none. Linear: each step consumes what it looks
+ * at, and an escape that does not match ends the scan.
+ */
+function contentStart(text: string): number {
+	let at = 0;
+	for (;;) {
+		NOT_SPACE.lastIndex = at;
+		const next = NOT_SPACE.exec(text);
+		if (!next) return -1;
+		ANSI_AT.lastIndex = next.index;
+		if (!ANSI_AT.test(text)) return next.index;
+		at = ANSI_AT.lastIndex;
+	}
+}
 /**
  * Boost's own trigger for turning HTML into article text (NP1): a document
  * that opens, after any comments, with a doctype or an `<html>` tag. Anchored,
@@ -138,9 +160,14 @@ const HTML_DOCUMENT = /^(<!--[\s\S]*?-->\s*)*(<!doctype\s+html|<html[\s>])/i;
  * text (shell.ts): `pygmentize index.html` prints `ESC[38;5;12m<!DOCTYPE html>`,
  * which the anchored pattern would miss while Boost, given the clean page,
  * still converts it. The sniff must judge exactly what Boost will be given.
+ * Likewise the window starts after any leading whitespace, BOM and escapes,
+ * however long: Boost trims them before its own check, so a page rendered
+ * after 5 KiB of blank template lines is still converted.
  */
 export function looksLikeHtmlDocument(text: string): boolean {
-	const head = stripAnsi(text.slice(0, HTML_SNIFF_CHARS)).replace(/^﻿/, "").trimStart();
+	const start = contentStart(text);
+	if (start < 0) return false;
+	const head = stripAnsi(text.slice(start, start + HTML_SNIFF_CHARS)).trimStart();
 	return HTML_DOCUMENT.test(head);
 }
 
