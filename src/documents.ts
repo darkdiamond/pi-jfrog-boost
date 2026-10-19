@@ -538,6 +538,27 @@ function numberArg(value: unknown): number | undefined | null {
 }
 
 /**
+ * The continuation notice for a converted notebook's first page. pi's says
+ * `Use offset=N to continue`, but a notebook read with an offset is exact
+ * (router.ts): it would return the raw JSON from line N of the file — a
+ * different text, with nothing to say so — and the rest of the converted text
+ * could not be reached at all. This one keeps pi's "Showing lines" wording
+ * and points at `boost read` piped into `sed` for the next page of the same
+ * size, which does print the converted lines. pi's other notices stand: the
+ * "line too long" one already uses `boost read`, and a notebook has no
+ * `limit` to end a page early.
+ */
+export function notebookNotice(slice: Extract<Slice, { kind: "page" }>, abs: string): string {
+	const t = slice.truncation;
+	if (!t?.truncated || t.firstLineExceedsLimit) return slice.notice;
+	const [first, last, total] = slice.lines;
+	const next = last + 1;
+	const until = Math.min(total, last + (last - first + 1));
+	const limit = t.truncatedBy === "bytes" ? ` (${formatSize(PI_MAX_BYTES)} limit)` : "";
+	return `\n\n[Showing lines ${first}-${last} of ${total} of the converted notebook${limit}. To continue, use bash: boost read -- ${shellQuote(abs)} | sed -n '${next},${until}p'. A read with offset returns the raw notebook JSON instead.]`;
+}
+
+/**
  * Convert a `read` of a document, or say why not. The caller (index.ts) has
  * already routed the read here: a document extension, the setting on, and
  * pi's read not refused for any reason but an offset past the
@@ -620,7 +641,8 @@ export async function readDocument(req: DocumentRequest, deps: DocumentDeps): Pr
 	// A notebook is only converted whole; slicing starts at line 1.
 	const slice = sliceLikePiRead(text, offset, limit, abs);
 	if (slice.kind === "error") return { kind: "error", text: slice.message, ext, ...(call ? { call } : {}) };
-	const page = `${slice.page}${slice.notice}`;
+	const notice = mode === "notebook" ? notebookNotice(slice, abs) : slice.notice;
+	const page = `${slice.page}${notice}`;
 	return {
 		kind: "page",
 		text: `${headerFor(name, ext)}\n${page}`,

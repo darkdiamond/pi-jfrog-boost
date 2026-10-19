@@ -500,6 +500,42 @@ test("a large notebook read whole is converted; offset=1 returns its raw JSON", 
 	assert.match(raw.text, /"cell_type": "code"/);
 });
 
+test("a converted notebook over one page points past its first page at the converted text", {
+	skip: termsSkip,
+}, async () => {
+	const notebook = {
+		cells: Array.from({ length: 250 }, (_, i) => ({
+			cell_type: "code",
+			execution_count: i,
+			metadata: {},
+			source: Array.from({ length: 6 }, (_, j) => `v${i}_${j} = ${j}\n`),
+			outputs: [{ output_type: "stream", name: "stdout", text: [`out ${i}\n`] }],
+		})),
+		metadata: {},
+		nbformat: 4,
+		nbformat_minor: 5,
+	};
+	writeFileSync(join(dir, "many.ipynb"), JSON.stringify(notebook, null, 1));
+	const whole = await run("read", { path: "many.ipynb" });
+	assert.ok(whole.changed, "the notebook was not converted");
+	const notice = whole.text.match(
+		/\n\n\[Showing lines 1-(\d+) of (\d+) of the converted notebook[^\]]*\. To continue, use bash: boost read -- (\S+) \| sed -n '(\d+),(\d+)p'\. A read with offset returns the raw notebook JSON instead\.\]$/,
+	);
+	assert.ok(notice, whole.text.slice(-400));
+	const [last, total, next] = [notice[1], notice[2], notice[4]].map(Number) as [number, number, number];
+	assert.equal(next, last + 1);
+	assert.ok(total > last);
+	assert.doesNotMatch(whole.text, /Use offset=/);
+	// The text the notice's command pages is the text this page came from.
+	const ext = await variantExtension("default", {});
+	const converted = await ext.client.convert({ session_id: "e2e", cwd: dir }, join(dir, "many.ipynb"));
+	assert.equal(converted.code, 0);
+	const lines = converted.stdout.split("\n");
+	assert.equal(lines.length, total);
+	assert.ok(whole.text.endsWith(`\n${lines[last - 1]}${notice[0]}`));
+	assert.doesNotMatch(lines[next - 1] ?? "", /"cell_type"/);
+});
+
 test("a small source read is left exactly as pi returned it", { skip }, async () => {
 	writeFileSync(join(dir, "index.ts"), "export const answer = 42;\n");
 	const source = await run("read", { path: "index.ts" });

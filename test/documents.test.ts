@@ -34,6 +34,7 @@ import {
 	readDocument,
 	sliceLikePiRead,
 } from "../src/documents.ts";
+import { shellQuote } from "../src/tools.ts";
 import { docx } from "./helpers/docx.ts";
 import { call } from "./helpers/runtime.ts";
 
@@ -435,6 +436,49 @@ test("notebooks: whole reads of files ≥ 16 KiB only, from line 1", async () =>
 		assert.deepEqual(whole.lines, [1, 4, 4]);
 	}
 	assert.equal(calls.length, 1);
+});
+
+test("a converted notebook over one page says how to reach the rest of the converted text", async () => {
+	file("many.ipynb", JSON.stringify({ cells: [], pad: "x".repeat(NOTEBOOK_MIN_BYTES) }));
+	const abs = join(root, "many.ipynb");
+	const lines = Array.from({ length: 4748 }, (_, i) => `l${i + 1}`).join("\n");
+	const { deps } = converter(call(lines));
+	const outcome = await readDocument(request("many.ipynb"), deps);
+	assert.equal(outcome.kind, "page");
+	if (outcome.kind !== "page") return;
+	assert.deepEqual(outcome.lines, [1, 2000, 4748]);
+	assert.equal(outcome.truncation?.truncatedBy, "lines");
+	assert.ok(
+		outcome.text.endsWith(
+			`\nl2000\n\n[Showing lines 1-2000 of 4748 of the converted notebook. To continue, use bash: boost read -- ${shellQuote(abs)} | sed -n '2001,4000p'. A read with offset returns the raw notebook JSON instead.]`,
+		),
+		outcome.text.slice(-300),
+	);
+	assert.doesNotMatch(outcome.text, /Use offset=/);
+	// The offset read the notice warns about is pi's raw JSON, not this text.
+	assert.deepEqual(await readDocument(request("many.ipynb", { offset: 2001 }), deps), {
+		kind: "skip",
+		reason: "exact",
+	});
+
+	// Cut by bytes: the next range is as many lines as this page showed.
+	file("wide.ipynb", JSON.stringify({ cells: [], pad: "y".repeat(NOTEBOOK_MIN_BYTES) }));
+	const wide = Array.from({ length: 300 }, () => "w".repeat(1000)).join("\n");
+	const bytes = await readDocument(request("wide.ipynb"), converter(call(wide)).deps);
+	assert.equal(bytes.kind, "page");
+	if (bytes.kind !== "page") return;
+	assert.deepEqual(bytes.lines, [1, 51, 300]);
+	assert.match(
+		bytes.text,
+		/\n\n\[Showing lines 1-51 of 300 of the converted notebook \(50\.0KB limit\)\. To continue, use bash: boost read -- \S+wide\.ipynb \| sed -n '52,102p'\. A read with offset returns the raw notebook JSON instead\.\]$/,
+	);
+
+	// A PDF keeps pi's own notice: its offset reads do page the converted text.
+	file("many.pdf", PDF);
+	const pdf = await readDocument(request("many.pdf"), converter(call(lines)).deps);
+	assert.ok(
+		pdf.kind === "page" && pdf.text.endsWith("[Showing lines 1-2000 of 4748. Use offset=2001 to continue.]"),
+	);
 });
 
 test("offset and limit that pi would not accept leave the read alone", async () => {

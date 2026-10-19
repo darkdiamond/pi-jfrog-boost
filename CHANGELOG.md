@@ -108,7 +108,9 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 - Full-output re-filter: when pi truncated `bash` output, Boost filters pi's
   full output file, so early failures in a long run reach the model.
 - Notebook conversion for whole reads of `.ipynb` files of 16 KiB or more
-  (`offset=1` returns the raw JSON), and opt-in compaction of whole `*.log`/
+  (`offset=1` returns the raw JSON; a converted notebook longer than one page
+  says how to page the rest with `boost read … | sed`, since an `offset` read
+  is the raw JSON), and opt-in compaction of whole `*.log`/
   `*.out` reads (`readLogs`).
 - The `/boost` hub (`status`, `on`, `off`, `settings`, `stats`, `report`,
   `doctor`, `install`, `help`, with completions), a footer that always shows
