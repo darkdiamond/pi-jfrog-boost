@@ -55,8 +55,8 @@ missing, slow or failing, the original output is used.
   pi alone: `/boost settings` → **Shell output: on**. That only sets an
   environment variable on pi's own Boost calls; Boost's config is never
   written.
-- **Documents need Boost's Preview Agreement.** PDF and Office conversion
-  (`boost read`) refuses to run until the
+- **Documents need Boost's Preview Agreement.** PDF, Office and notebook
+  conversion (`boost read`) refuses to run until the
   [Preview Agreement](https://boost.jfrog.com/preview-agreement/) is accepted.
   Shell and MCP compaction work without it. This package never accepts it for
   you: run `boost init --dry-run`, then `boost init`, in a terminal (init also
@@ -113,9 +113,9 @@ PATH, the model is given its full path.
 | `bash`, `powershell` | Output of 2 KiB to 1 MiB goes through Boost's filter **when shell compaction is on**. Failed commands are compacted too and stay errors; pi's own notices (`Command exited with code 1`, `Full output: …`) are kept verbatim. |
 | `bash` output pi truncated | Boost filters pi's full output file instead of the tail pi kept, so failures near the start of a long run are not lost. Used only when the result fits one pi page. |
 | `read` of `.pdf .docx .xlsx .pptx .odt .ods .odp` | Converted to text by `boost read`, paged exactly like pi's own `read` (2000 lines / 50 KB, `offset` to continue), with a first line saying it was converted. |
-| `read` of a `.ipynb` of 16 KiB or more, whole | Converted to Markdown. A read with `offset=1` returns the raw JSON. |
+| `read` of a `.ipynb` of 16 KiB or more, whole | Converted to Markdown (needs `documents` and the Preview Agreement). A read with `offset=1` returns the raw JSON. |
 | `read` of legacy `.doc .xls .ppt` | Boost cannot convert these; the model gets a clear error asking for a modern or text export, instead of binary noise. |
-| `read` of `*.log` / `*.out`, whole | Compacted only if you turn on `readLogs` (off by default: a generic log can trip the wrong filter). |
+| `read` of `*.log` / `*.out`, whole | Compacted only if you turn on `readLogs` **and shell compaction is on** (off by default: a generic log can trip the wrong filter). |
 | `mcp__<server>__<tool>` results | Compacted by Boost's MCP filters (Slack, GitHub, GitLab, Atlassian, Linear, Notion, Sentry, browser snapshots and more) **when the model calls the tool directly**: on pi 1.x that means `"exposure": "direct"` or `"deferred"` (see [MCP exposure](#mcp-exposure)). Images and `structuredContent` are kept. |
 | everything else | Never touched. |
 
@@ -210,8 +210,8 @@ are easiest to change with `/boost settings`. The file has a
 | `fullOutput` | `true` | | Re-filter pi's full output file when `bash` output was truncated |
 | `minBytes` | `2048` | | Skip shell and log output smaller than this |
 | `documents` | `true` | `PI_BOOST_DOCUMENTS` | Convert PDF/Office/ODF reads (needs the Preview Agreement) |
-| `notebooks` | `true` | | Convert whole reads of `.ipynb` of 16 KiB or more |
-| `readLogs` | `false` | | Compact whole reads of `*.log` / `*.out` |
+| `notebooks` | `true` | | Convert whole reads of `.ipynb` of 16 KiB or more (needs `documents` and the Preview Agreement) |
+| `readLogs` | `false` | | Compact whole reads of `*.log` / `*.out` through the shell filter (needs shell compaction on, like `bash`) |
 | `mcp` | `true` | `PI_BOOST_MCP` | Compact `mcp__*` results |
 | `mcpExclude` | `[]` | | MCP tool name globs never sent to Boost, e.g. `["mcp__secrets__*"]` |
 | `extraTools` | `[]` | | More tool names routed like `bash`, e.g. `["fetch"]` |
@@ -221,7 +221,8 @@ are easiest to change with `/boost settings`. The file has a
 | `sync` | `true` | `PI_BOOST_SYNC` | Run `boost sync` when the agent settles (uploads to JFrog) |
 | `observe` | `false` | `PI_BOOST_OBSERVE` | Lifecycle telemetry to Boost, including tool output excerpts |
 
-Env booleans take `0/1/true/false/yes/no`. Precedence, highest first:
+The per-key env booleans (`PI_BOOST_*`) take `0/1/true/false/yes/no`; the
+kill switches `DISABLE_BOOST`/`BOOST_DISABLED` take only `1` or `true`. Precedence, highest first:
 `DISABLE_BOOST`/`BOOST_DISABLED`, `--no-boost`, `/boost on|off`, the per-key
 env, the file, the defaults. `/boost on` cannot override a kill switch and
 says which one is blocking. An invalid value falls back to its default with
@@ -307,7 +308,8 @@ What leaves your machine, and how to stop it:
 binary on that pi version, Node version and OS (22 of 22 on pi 1.2.0; 21 of 22 on pi 0.86.1, which
 has no nested tool calls to test). Some features depend on the versions:
 
-- **MCP** needs pi ≥ 0.99 (built-in MCP) and Boost ≥ 0.15.3 (MCP filters).
+- **MCP** needs `mcp__<server>__<tool>` tools (pi ≥ 0.99's built-in MCP, or an
+  MCP extension on older pi) and Boost ≥ 0.15.3 (MCP filters).
   On pi 1.x only tools with `direct` or `deferred` exposure are compacted;
   the default `codemode` exposure leaves MCP output untouched (see
   [MCP exposure](#mcp-exposure)).

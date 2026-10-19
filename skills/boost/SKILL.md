@@ -13,9 +13,11 @@ what is active in this session. At most:
 - MCP tool results (`mcp__<server>__<tool>`) you call directly, when Boost has a
   filter for the tool (calls made from inside `codemode` are never changed);
 - `read` of PDF, Word, Excel, PowerPoint and OpenDocument files, and of large
-  notebooks read whole, which arrive as converted text.
+  notebooks read whole, which arrive as converted text;
+- whole `read`s of `*.log` / `*.out`, when the user turned on `readLogs` (re-read with
+  `offset`/`limit` for exact lines).
 
-Ordinary reads (source, JSON, Markdown, HTML, CSV, logs), `edit`, `write`, `grep`,
+Ordinary reads (source, JSON, Markdown, HTML, CSV), `edit`, `write`, `grep`,
 `find` and `ls` are never changed. Plenty of output passes through unchanged; that
 is normal.
 

@@ -75,7 +75,7 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 ### Changed
 
 - File reads are exact: `read` of text files (source, JSON, Markdown, HTML,
-  CSV, logs) is never changed, and `grep`, `find` and `ls` are no longer
+  CSV; logs unless you opt in with `readLogs`) is never changed, and `grep`, `find` and `ls` are no longer
   filtered (pi's output for them never compacts on Boost 0.15.4).
 - Shell compaction follows Boost's `boost-cli-filtering` flag, which has been
   off by default since Boost 0.14.6; with it off, shell output is not even

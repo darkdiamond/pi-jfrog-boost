@@ -34,13 +34,11 @@ Boost binary, inside a throwaway HOME (see [End to end](#end-to-end)).
   even when fail-open code swallows the error.
 - **Never run Boost against your real HOME from tests.** Not in a unit test,
   not in a probe script, not "just once". Use the hermetic helper below.
-- **Use Boost's agent-neutral surfaces, except for MCP, which only
-  `boost hook claude` filters.** The `boost hook <agent>` dialects stamp spans
-  with the agent named by the subcommand, which mislabels pi; the stdin
-  filter and `boost read` keep `pi` from `BOOST_HOOK_META`. Boost's MCP
-  filters run on no other surface, so the MCP route accepts the
-  `claude_code` label (README, "Attribution and telemetry"). See the comment
-  at the top of `src/tools.ts`.
+- **Use Boost's agent-neutral surfaces (stdin filter, `boost read`), plus
+  `boost hook observe claude`, which keeps `pi` from `BOOST_HOOK_META` on
+  v0.15.4.** The exception is MCP: only `boost hook claude` runs Boost's MCP
+  filters, and that path stamps `claude_code` (README, "Attribution and
+  telemetry"). See the comment at the top of `src/tools.ts`.
 - **Every claim in README.md and SECURITY.md maps to a test or a probe.** If
   you change behaviour a doc describes, change the doc in the same PR and say
   in the description which test or probe backs it. The compatibility table

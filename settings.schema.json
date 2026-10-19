@@ -36,12 +36,12 @@
 			"default": true
 		},
 		"notebooks": {
-			"description": "Convert whole reads of .ipynb files of 16 KiB or more.",
+			"description": "Convert whole reads of .ipynb files of 16 KiB or more. Needs documents on and Boost's Preview Agreement.",
 			"type": "boolean",
 			"default": true
 		},
 		"readLogs": {
-			"description": "Compact whole reads of *.log and *.out files. Off by default: a lossy filter can misfire on generic logs.",
+			"description": "Compact whole reads of *.log and *.out files through the shell filter (needs shell compaction on, like bash). Off by default: a lossy filter can misfire on generic logs.",
 			"type": "boolean",
 			"default": false
 		},
