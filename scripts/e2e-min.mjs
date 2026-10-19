@@ -75,7 +75,10 @@ try {
 		run(process.execPath, [join(work, "node_modules", "typescript", "bin", "tsc"), "--noEmit"], work);
 		run(process.execPath, [...spy, "--test", "test/*.test.ts"], work);
 	}
-	run(process.execPath, [...spy, "--test", "test/e2e.test.ts"], work, { ...process.env, PI_BOOST_E2E: "1" });
+	run(process.execPath, [...spy, "--test", "test/e2e.test.ts", "test/session.e2e.test.ts"], work, {
+		...process.env,
+		PI_BOOST_E2E: "1",
+	});
 } catch (error) {
 	failed = true;
 	process.stderr.write(`\ne2e-min: ${error instanceof Error ? error.message : String(error)}\n`);

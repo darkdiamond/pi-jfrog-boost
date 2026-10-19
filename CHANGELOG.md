@@ -125,7 +125,10 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   confirm text says when it does not), placed in `~/.local/bin`, with
   no installer script, rc edits, hooks or terms.
 - A hermetic e2e suite with a tripwire on the real Boost state, run against
-  pi 1.2.0 (`npm run test:e2e`) and 0.86.1 (`npm run test:e2e:min`); a CI
+  pi 1.2.0 (`npm run test:e2e`) and 0.86.1 (`npm run test:e2e:min`). Part of
+  it runs a real pi session on pi-ai's scripted faux model, so pi's own
+  runner, loadout and built-in MCP (direct, deferred and codemode exposure,
+  against a stub stdio server) are exercised, not simulated. A CI
   matrix over pi 0.86.1 and ^1.2.0; and a weekly canary against pi@latest
   that opens a `canary` issue when it fails.
 

@@ -78,6 +78,19 @@ assumptions everything else rests on — what pi's tools actually return, what
 Boost actually does with it — and asserts only what this integration
 guarantees, not how much a given Boost release compresses.
 
+`test/e2e.test.ts` still calls the extension's handlers through the host
+stub, so pi's runner itself is simulated there. `test/session.e2e.test.ts`
+closes that gap: a real `AgentSession` with this package loaded from
+`src/index.ts` and pi's built-in extensions, driven by pi-ai's faux provider
+(each scripted step is a tool call). It asserts on what the session records
+— `session.messages` tool results with `details.jfrogBoost`, and the
+`<jfrog-boost>` section in the context the model is sent — for `bash`, a
+`.docx` read and, on pi ≥ 0.99, MCP through `test/fixtures/mcp-stub-server.mjs`
+under direct, deferred and codemode exposure. Sessions are closed with
+`session_shutdown`, as pi's CLI does on quit; `dispose()` alone leaves the
+extension's and pi's MCP children running. Both files share the gate and the
+harness below, and both scripts run both.
+
 It is **hermetic** (`test/helpers/hermetic.ts`). Before anything spawns, it:
 
 - resolves the binary from `BOOST_BIN` (or the normal search) while HOME is

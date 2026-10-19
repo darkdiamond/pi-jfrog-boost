@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const result = spawnSync(
 	process.execPath,
-	["--import", "./test/helpers/spawn-spy.ts", "--test", "test/e2e.test.ts"],
+	["--import", "./test/helpers/spawn-spy.ts", "--test", "test/e2e.test.ts", "test/session.e2e.test.ts"],
 	{ cwd: repo, env: { ...process.env, PI_BOOST_E2E: "1" }, stdio: "inherit" },
 );
 if (result.error) process.stderr.write(`e2e: ${result.error.message}\n`);
