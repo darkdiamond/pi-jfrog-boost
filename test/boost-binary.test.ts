@@ -75,6 +75,53 @@ test("PATH is searched in order when Boost is installed elsewhere", () => {
 	assert.equal(resolved, join("/b", "boost"));
 });
 
+test("relative PATH entries are skipped: a boost the repository ships never resolves", () => {
+	// A real file, found relative to pi's cwd, ahead of the real install.
+	const project = join(root, "project");
+	const planted = join(project, "node_modules", ".bin");
+	const real = join(root, "real-bin");
+	mkdirSync(planted, { recursive: true });
+	mkdirSync(real, { recursive: true });
+	for (const dir of [planted, real]) {
+		writeFileSync(join(dir, "boost"), "#!/bin/sh\n");
+		chmodSync(join(dir, "boost"), 0o755);
+	}
+	const cwd = process.cwd();
+	process.chdir(project);
+	try {
+		for (const rel of [join("node_modules", ".bin"), ".", "./node_modules/.bin"]) {
+			const options = { platform: "linux" as const, home: join(root, "no-home") };
+			assert.equal(
+				resolveBoostBinary({ ...options, env: { PATH: [rel, real].join(delimiter) } }),
+				join(real, "boost"),
+				`${rel} is skipped for the absolute entry after it`,
+			);
+			assert.equal(
+				resolveBoostBinary({ ...options, env: { PATH: rel } }),
+				undefined,
+				`${rel} alone finds nothing`,
+			);
+			assert.equal(
+				onPath(join(real, "boost"), { PATH: [rel, real].join(delimiter) }, "linux"),
+				true,
+				"onPath skips it the same way",
+			);
+		}
+	} finally {
+		process.chdir(cwd);
+	}
+});
+
+test("a double-quoted PATH entry is unquoted", () => {
+	const resolved = resolveBoostBinary({
+		env: { PATH: ['"/a"', '"/b"'].join(delimiter) },
+		platform: "linux",
+		home: "/home/dev",
+		isExecutable: onDisk(["/b", "boost"]),
+	});
+	assert.equal(resolved, join("/b", "boost"));
+});
+
 test("Windows finds boost.exe under LOCALAPPDATA", () => {
 	const winHome = "C:\\Users\\dev";
 	const appData = "C:\\Users\\dev\\AppData\\Local";

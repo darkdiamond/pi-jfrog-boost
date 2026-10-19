@@ -82,11 +82,22 @@ function candidates(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home: str
 	return list;
 }
 
+/**
+ * The absolute PATH entries, in order. A relative entry (`node_modules/.bin`,
+ * `bin`, `.`) is skipped, as Go's `exec.LookPath` refuses one: it would be
+ * checked against pi's cwd — the project — yet spawned from `home` (the
+ * probe, ENOENT forever) or the session's cwd (filtering, `/boost doctor`),
+ * which runs whatever `boost` the repository ships, unasked, at session
+ * start. Windows entries may be wrapped in double quotes.
+ */
 function pathDirs(env: NodeJS.ProcessEnv): string[] {
 	// Windows spells it `Path`; process.env is case-insensitive there, but an
 	// injected plain object is not.
 	const key = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-	return (env[key] ?? "").split(delimiter).filter(Boolean);
+	return (env[key] ?? "")
+		.split(delimiter)
+		.map((dir) => dir.replace(/^"(.*)"$/, "$1"))
+		.filter((dir) => dir && isAbsolute(dir));
 }
 
 /**
