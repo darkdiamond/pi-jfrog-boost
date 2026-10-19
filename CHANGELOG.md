@@ -106,7 +106,9 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   exposure the calls are nested and their output is left alone. The README
   says how to set it.
 - Full-output re-filter: when pi truncated `bash` output, Boost filters pi's
-  full output file, so early failures in a long run reach the model.
+  full output file, so early failures in a long run reach the model. On pi 1.x
+  this covers every run; on pi 0.86 only runs that exit 0, since pi 0.86 does
+  not record the file's path for a failed command, which keeps pi's tail.
 - Notebook conversion for whole reads of `.ipynb` files of 16 KiB or more
   (`offset=1` returns the raw JSON; a converted notebook longer than one page
   says how to page the rest with `boost read … | sed`, since an `offset` read

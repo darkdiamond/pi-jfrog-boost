@@ -112,7 +112,7 @@ PATH, the model is given its full path.
 | pi tool | What happens |
 |---|---|
 | `bash`, `powershell` | Output of 2 KiB to 1 MiB goes through Boost's filter **when shell compaction is on**. Failed commands are compacted too and stay errors; pi's own notices (`Command exited with code 1`, `Full output: …`) are kept verbatim. |
-| `bash` output pi truncated | Boost filters pi's full output file instead of the tail pi kept, so failures near the start of a long run are not lost. Used only when the result fits one pi page. |
+| `bash` output pi truncated | Boost filters pi's full output file instead of the tail pi kept, so failures near the start of a long run are not lost. Used only when the result fits one pi page. On pi 1.x this covers every run; on pi 0.86 only runs that exit 0, because a failed command there keeps pi's tail (pi 0.86 does not record the file's path for a failed command). |
 | `read` of `.pdf .docx .xlsx .pptx .odt .ods .odp` | Converted to text by `boost read`, paged exactly like pi's own `read` (2000 lines / 50 KB, `offset` to continue), with a first line saying it was converted. |
 | `read` of a `.ipynb` of 16 KiB or more, whole | Converted to Markdown (needs `documents` and the Preview Agreement). A read with `offset=1` returns the raw JSON. |
 | `read` of legacy `.doc .xls .ppt` | Boost cannot convert these; the model gets a clear error asking for a modern or text export, instead of binary noise. |
@@ -308,8 +308,10 @@ What leaves your machine, and how to stop it:
 | **Forks** (oh-my-pi and others) | — | unsupported | `extraTools` can route renamed shell tools |
 
 "Tested" means the hermetic end-to-end suite passed against the real Boost
-binary on that pi version, Node version and OS (22 of 22 on pi 1.2.0; 21 of 22 on pi 0.86.1, which
-has no nested tool calls to test). Some features depend on the versions:
+binary on that pi version, Node version and OS. On pi 1.2.0 every case runs; on
+pi 0.86.1 the nested-call case and the three real-session MCP cases skip, since
+0.86 has no nested tool calls and no built-in MCP. MCP on 0.86 is covered only
+through a stub host, not a real MCP extension. Some features depend on the versions:
 
 - **MCP** needs `mcp__<server>__<tool>` tools (pi ≥ 0.99's built-in MCP, or an
   MCP extension on older pi) and Boost ≥ 0.15.3 (MCP filters).

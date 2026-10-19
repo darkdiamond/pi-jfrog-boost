@@ -383,8 +383,10 @@ export const FULL_OUTPUT_MAX_BYTES = 2 * 1024 * 1024;
 /**
  * The full-output file a shell result names, from where pi records it:
  * `structuredContent.full_output_path` (pi 1.x's bash output schema) or
- * `details.fullOutputPath` (bash and powershell on every supported pi,
- * 0.86.1 included). Undefined when neither holds a non-empty string.
+ * `details.fullOutputPath` (bash and powershell). On pi 0.86 only a result
+ * that exits 0 carries `details`: a failed command throws, and the error
+ * result pi builds from the throw has neither source, so it takes the tail
+ * route. Undefined when neither holds a non-empty string.
  */
 export function fullOutputPathOf(structuredContent: unknown, details: unknown): string | undefined {
 	const sources: [unknown, string][] = [
