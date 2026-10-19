@@ -25,7 +25,8 @@ import {
 	isSupportedVersion,
 	parseBoostVersion,
 } from "./boost-binary.ts";
-import type { RunResult } from "./boost-process.ts";
+import { NOT_RUN, type RunResult } from "./boost-process.ts";
+import { processSingleton } from "./compat.ts";
 
 // ---------------------------------------------------------------------------
 // Readiness
@@ -140,7 +141,7 @@ export function createReadiness(deps: ReadinessDeps): Readiness {
 		memo = { path: target, stamp, outcome: { kind: "probing" }, failures, retryAt: 0 };
 		// Wrapped so a probe that throws synchronously still lands in `.catch`.
 		inflight = (async () => deps.probe(target))()
-			.catch((): RunResult => ({ code: null, stdout: "", ms: 0, timedOut: false, aborted: false }))
+			.catch((): RunResult => ({ ...NOT_RUN }))
 			.then((result) => {
 				if (gen !== generation) return;
 				if (result.busy || result.aborted) {
@@ -379,19 +380,13 @@ export function createBreaker(deps: BreakerDeps = {}): Breaker {
 }
 
 /**
- * The process-wide breaker. pi builds a fresh extension instance for every
- * `/new`, `/resume`, `/fork` and `/reload` (re-evaluating this module for
- * the last), and a pause is about Boost, not the session: one that ended
- * with the session would let each new session pay the timeouts again,
- * although only `/boost on` and `/boost status → retry` reset it (§8.2).
- * Hung on `globalThis` under a registered symbol, as status.ts does for the
- * notices.
+ * The process-wide breaker ({@link processSingleton}): a pause is about
+ * Boost, not the session, so one that ended with the session would let each
+ * new session pay the timeouts again, although only `/boost on` and
+ * `/boost status → retry` reset it (§8.2).
  */
 export function processBreaker(): Breaker {
-	const key = Symbol.for("pi-jfrog-boost.breaker");
-	const store = globalThis as unknown as Record<symbol, Breaker | undefined>;
-	store[key] ??= createBreaker();
-	return store[key];
+	return processSingleton("breaker", createBreaker);
 }
 
 // ---------------------------------------------------------------------------

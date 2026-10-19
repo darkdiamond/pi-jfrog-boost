@@ -60,6 +60,7 @@ import {
 import {
 	createProcessRunner,
 	type Launcher,
+	NOT_RUN,
 	type ProcessRunner,
 	type ProcessRunnerDeps,
 	type RunResult,
@@ -214,14 +215,13 @@ export interface BoostClient {
 }
 
 const skippedCall = (skipped: SkipReason): BoostCall => ({
-	code: null,
-	stdout: "",
-	ms: 0,
-	timedOut: false,
-	aborted: false,
+	...NOT_RUN,
 	...(skipped === "busy" ? { busy: true } : {}),
 	skipped,
 });
+
+/** A run the process runner refused for lack of a free slot reads as skipped. */
+const tagBusy = (result: RunResult): BoostCall => (result.busy ? { ...result, skipped: "busy" } : result);
 
 /** The file's size in bytes, or 0 when it cannot be stat'ed (the call then fails open on its own). */
 function fileSize(path: string): number {
@@ -360,10 +360,10 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 			});
 		} catch {
 			// The runner resolves rather than rejects; this is belt and braces.
-			result = { code: null, stdout: "", ms: 0, timedOut: false, aborted: false, spawnError: true };
+			result = { ...NOT_RUN, spawnError: true };
 		}
 		breaker?.record(result, bytes);
-		return result.busy ? { ...result, skipped: "busy" } : result;
+		return tagBusy(result);
 	};
 
 	/** The binary for a detached call, or undefined when it must not run. */
@@ -384,7 +384,7 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 				timeoutMs: timeouts.version,
 				maxStdout: VERSION_STDOUT_CAP,
 			});
-			return result.busy ? { ...result, skipped: "busy" } : result;
+			return tagBusy(result);
 		},
 		filter(meta, text, options = {}) {
 			const bytes = Buffer.byteLength(text);
@@ -467,7 +467,7 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 				timeoutMs,
 				maxStdout: EXEC_STDOUT_CAP,
 			});
-			return result.busy ? { ...result, skipped: "busy" } : result;
+			return tagBusy(result);
 		},
 		killAll() {
 			runner.killAll();

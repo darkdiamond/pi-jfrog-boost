@@ -47,14 +47,12 @@
  */
 
 import type { BoostVersion } from "./boost-binary.ts";
+import { MAX_INPUT_BYTES } from "./boost-client.ts";
 import { looksLikeHtmlDocument, splitNotices } from "./content.ts";
 import { documentMode, PI_OFFSET_ERROR } from "./documents.ts";
 import { isMcpTool, type McpSkipReason, mcpSkip } from "./mcp.ts";
 import { bypassesBoost, fullOutputNoticeIndex, isWebFetch } from "./shell.ts";
 import { extensionOf, isShell, LOG_EXTENSIONS, NEVER_EXTRA } from "./tools.ts";
-
-/** The largest body any route sends to Boost (was 4 MiB in 0.3.0; spec §8.5). */
-export const MAX_ROUTE_BYTES = 1024 * 1024;
 
 export type SkipReason =
 	| "nested"
@@ -138,7 +136,8 @@ export function isShellLike(toolName: string, extraTools: readonly string[]): bo
 function sizeSkip(body: string, minBytes: number): Route | undefined {
 	const bytes = Buffer.byteLength(body);
 	if (bytes < minBytes) return skip("small");
-	if (bytes > MAX_ROUTE_BYTES) return skip("large");
+	// The client's stdin ceiling, the largest body any route sends (spec §8.5).
+	if (bytes > MAX_INPUT_BYTES) return skip("large");
 	return undefined;
 }
 

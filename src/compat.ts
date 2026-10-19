@@ -169,3 +169,64 @@ export interface ToolResultPatch {
 export function asResult(patch: ToolResultPatch): ToolResultEventResult {
 	return patch as unknown as ToolResultEventResult;
 }
+
+// ---------------------------------------------------------------------------
+// Session entries and process-wide state
+
+/** The parts of pi's session manager read here; both exist from 0.86.1 on. */
+export interface SessionEntries {
+	getBranch?: () => unknown;
+	getEntries?: () => unknown;
+}
+
+/**
+ * The newest custom entry of `customType` on the current branch that `parse`
+ * accepts (returns other than undefined), or undefined. The branch, not every
+ * entry: after `/tree` or a fork, what a sibling branch saved never happened
+ * here. `getEntries()` is only the fallback for a session manager whose branch
+ * cannot be read at all.
+ */
+export function lastCustomEntry<T>(
+	sessionManager: SessionEntries | undefined,
+	customType: string,
+	parse: (data: unknown) => T | undefined,
+): T | undefined {
+	if (!sessionManager) return undefined;
+	let entries: unknown;
+	try {
+		if (typeof sessionManager.getBranch === "function") entries = sessionManager.getBranch();
+	} catch {
+		entries = undefined;
+	}
+	if (!Array.isArray(entries)) {
+		try {
+			if (typeof sessionManager.getEntries === "function") entries = sessionManager.getEntries();
+		} catch {
+			return undefined;
+		}
+	}
+	if (!Array.isArray(entries)) return undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
+		if (entry && entry.type === "custom" && entry.customType === customType) {
+			const parsed = parse(entry.data);
+			if (parsed !== undefined) return parsed;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * State that lives for the process, not the extension instance. pi loads
+ * extensions with jiti's module cache off and builds a fresh instance for
+ * every `/new`, `/resume`, `/fork` and `/reload` (re-evaluating each module
+ * for the last), so a module-level value would be forgotten. Hung on
+ * `globalThis` under the registered symbol `pi-jfrog-boost.<name>` instead;
+ * the names stay fixed so a `/reload` into a newer version finds the state.
+ */
+export function processSingleton<T>(name: string, create: () => T): T {
+	const key = Symbol.for(`pi-jfrog-boost.${name}`);
+	const store = globalThis as unknown as Record<symbol, T | undefined>;
+	store[key] ??= create();
+	return store[key];
+}

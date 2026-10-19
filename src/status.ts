@@ -29,6 +29,7 @@ import {
 	MCP_FILTERING_FLAG,
 	type ShellGate,
 } from "./boost-config.ts";
+import { processSingleton } from "./compat.ts";
 import type { BadReason, BreakerState, ReadinessState } from "./health.ts";
 import { tildePath } from "./install.ts";
 import type { OffReason, Settings } from "./settings.ts";
@@ -230,17 +231,9 @@ export function createNotices(): Notices {
 	};
 }
 
-/**
- * The process-wide registry. pi loads extensions with jiti's module cache
- * off, so `/reload` evaluates this module afresh and a module-level set
- * would forget; a registry hung on `globalThis` under a registered symbol
- * survives that, which is what "once per process" means to the user.
- */
+/** The process-wide registry ({@link processSingleton}): "once per process" as the user means it. */
 export function processNotices(): Notices {
-	const key = Symbol.for("pi-jfrog-boost.notices");
-	const store = globalThis as unknown as Record<symbol, Notices | undefined>;
-	store[key] ??= createNotices();
-	return store[key];
+	return processSingleton("notices", createNotices);
 }
 
 // ---------------------------------------------------------------------------

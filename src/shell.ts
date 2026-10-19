@@ -326,6 +326,21 @@ export interface Compaction {
 	full?: true;
 }
 
+/**
+ * The {@link Compaction} for `text`, the new text, replacing `before`
+ * characters; `reply` is Boost's own part of it, where its marker is.
+ */
+export function compactionOf(text: string, before: number, reply: string, full = false): Compaction {
+	const marker = parseMarker(reply);
+	return {
+		text,
+		before,
+		after: text.length,
+		...(marker ? { retrieveId: marker.id } : {}),
+		...(full ? { full: true as const } : {}),
+	};
+}
+
 export interface CompactOutcome {
 	/** The call, for counting errors; absent when nothing was sent. */
 	call?: BoostCall;
@@ -356,17 +371,7 @@ export async function compactShellOutput(
 	const call = await filter(stripped);
 	if (call.code !== 0 || call.skipped || !isMeaningfulReduction(stripped, call.stdout)) return { call };
 	const reply = call.stdout.trimEnd();
-	const replacement = `${reply}${notices}`;
-	const marker = parseMarker(reply);
-	return {
-		call,
-		compaction: {
-			text: replacement,
-			before: text.length,
-			after: replacement.length,
-			...(marker ? { retrieveId: marker.id } : {}),
-		},
-	};
+	return { call, compaction: compactionOf(`${reply}${notices}`, text.length, reply) };
 }
 
 // ---------------------------------------------------------------------------
@@ -586,16 +591,5 @@ export async function compactFullOutput(
 	const reply = call.stdout.trimEnd();
 	if (!isMeaningfulReduction(stripped, reply) || !fitsPiPage(reply)) return tail("unfit");
 	parts[at] = `[Boost compacted the full ${lineCount(stripped)}-line output. Full output: ${path}]`;
-	const replacement = `${reply}${parts.join("\n\n")}`;
-	const marker = parseMarker(reply);
-	return {
-		call,
-		compaction: {
-			text: replacement,
-			before: text.length,
-			after: replacement.length,
-			...(marker ? { retrieveId: marker.id } : {}),
-			full: true,
-		},
-	};
+	return { call, compaction: compactionOf(`${reply}${parts.join("\n\n")}`, text.length, reply, true) };
 }

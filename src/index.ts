@@ -132,7 +132,7 @@ import {
 	tooOldNotice,
 } from "./status.ts";
 import { createSyncScheduler, type SyncFlight } from "./sync.ts";
-import { equivalentCommand, LEGACY_OFFICE, resolveReadPath } from "./tools.ts";
+import { LEGACY_OFFICE, logReadCommand, resolveReadPath } from "./tools.ts";
 
 export { createNotices, TERMS_NOTICE };
 
@@ -916,7 +916,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				const abs = resolveReadPath(path, ctx.cwd);
 				// Described to Boost the way its own integrations describe a file
 				// read: `cat <abs>`, with the absolute path as `file_path`.
-				const toolInput = { path, file_path: abs, command: equivalentCommand("read", event.input, abs) };
+				const toolInput = { path, file_path: abs, command: logReadCommand(abs) };
 				outcome = await compactShellOutput(text, (body) =>
 					client.filter(hookMeta, body, { signal, toolInput }),
 				);

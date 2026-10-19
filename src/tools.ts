@@ -157,21 +157,13 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * The shell command a tool call is equivalent to, for `BOOST_HOOK_META`.
- *
- * On v0.15.4 the stdin filter picks its filter from the output itself and
- * mostly ignores `tool_input` (boost-surfaces 5), so this is kept for
- * attribution and for filters that do key on the command:
- * - a shell tool, or an `extraTools` tool with a `command`: that command;
- * - a whole `read` of a log (`readLogs`): `cat <abs>`, the way Boost's own
- *   integrations describe a file read.
- * Undefined for anything else.
+ * The command a whole `read` of a log (`readLogs`) is described by in
+ * `BOOST_HOOK_META`: `cat <abs>`, the way Boost's own integrations describe a
+ * file read. (Shell tools need no such thing: their input already carries
+ * the command.) On v0.15.4 the stdin filter picks its filter from the output
+ * itself and mostly ignores `tool_input` (boost-surfaces 5), so this is kept
+ * for attribution and for filters that do key on the command.
  */
-export function equivalentCommand(
-	toolName: string,
-	input: Readonly<Record<string, unknown>>,
-	absPath?: string,
-): string | undefined {
-	if (toolName === "read") return absPath ? `cat ${shellQuote(absPath)}` : undefined;
-	return typeof input.command === "string" ? input.command : undefined;
+export function logReadCommand(absPath: string): string {
+	return `cat ${shellQuote(absPath)}`;
 }

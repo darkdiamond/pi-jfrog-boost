@@ -11,10 +11,12 @@ import {
 	deferredTools,
 	durationMs,
 	hasStructured,
+	lastCustomEntry,
 	loadout,
 	mcpReachesRoute,
 	messageType,
 	parentToolCallId,
+	processSingleton,
 	structuredContentOf,
 } from "../src/compat.ts";
 import {
@@ -155,4 +157,40 @@ test("mcpReachesRoute: only an MCP tool pi declares, or tool_search can load, re
 		),
 		true,
 	);
+});
+
+const custom = (customType: string, data: unknown) => ({ type: "custom", customType, data });
+
+test("lastCustomEntry reads the newest accepted entry of its type on the branch", () => {
+	const parse = (data: unknown) => (typeof data === "number" ? data : undefined);
+	const branch = [custom("x", 1), custom("y", 9), custom("x", 2), custom("x", "bad"), { type: "message" }];
+	const sm = { getBranch: () => branch, getEntries: () => [custom("x", 99)] };
+	assert.equal(lastCustomEntry(sm, "x", parse), 2, "skips what parse rejects, and the other type");
+	assert.equal(
+		lastCustomEntry({ getBranch: () => [], getEntries: () => [custom("x", 99)] }, "x", parse),
+		undefined,
+	);
+	const throws = () => {
+		throw new Error("no branch");
+	};
+	assert.equal(lastCustomEntry({ getBranch: throws, getEntries: () => [custom("x", 3)] }, "x", parse), 3);
+	assert.equal(lastCustomEntry({ getEntries: throws }, "x", parse), undefined);
+	assert.equal(lastCustomEntry({ getBranch: () => "nope" }, "x", parse), undefined);
+	assert.equal(lastCustomEntry(undefined, "x", parse), undefined);
+});
+
+test("processSingleton keeps one value per name on globalThis under the registered key", () => {
+	const name = `test-${Math.random()}`;
+	let made = 0;
+	const first = processSingleton(name, () => ({ n: ++made }));
+	assert.equal(
+		processSingleton(name, () => ({ n: ++made })),
+		first,
+	);
+	assert.equal(made, 1);
+	assert.equal(
+		(globalThis as unknown as Record<symbol, unknown>)[Symbol.for(`pi-jfrog-boost.${name}`)],
+		first,
+	);
+	delete (globalThis as unknown as Record<symbol, unknown>)[Symbol.for(`pi-jfrog-boost.${name}`)];
 });

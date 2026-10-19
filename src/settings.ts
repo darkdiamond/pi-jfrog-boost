@@ -26,6 +26,8 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, wr
 import { homedir } from "node:os";
 import { dirname, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { lastCustomEntry, processSingleton, type SessionEntries } from "./compat.ts";
+import { normalizeWindowsShellPath } from "./tools.ts";
 
 export const SETTINGS_SCHEMA_URL =
 	"https://raw.githubusercontent.com/darkdiamond/pi-jfrog-boost/main/settings.schema.json";
@@ -121,25 +123,13 @@ export function isValidSetting<K extends SettingsKey>(key: K, value: unknown): v
 // Paths
 
 /**
- * Git Bash, MSYS, Cygwin and WSL drive paths (`/c/Users/me`, `/mnt/c/…`,
- * `/cygdrive/c/…`) as native Windows paths, as pi's
- * `normalizeWindowsShellPath` does; anything else unchanged.
- */
-function windowsShellPath(path: string): string {
-	if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return path;
-	const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
-	if (!match) return path;
-	return `${(match[1] ?? "").toUpperCase()}:\\${match[2]?.replaceAll("/", "\\") ?? ""}`;
-}
-
-/**
  * A configured path normalised the way pi 1.2's `normalizePath` treats
  * `$PI_CODING_AGENT_DIR` (shell drive paths on Windows, `~`, `file://`), so
  * this reads and saves the file in the directory pi itself uses.
  */
 function normalizeConfiguredPath(input: string, home: string, platform: NodeJS.Platform): string {
 	const windows = platform === "win32";
-	const path = windows ? windowsShellPath(input) : input;
+	const path = windows ? normalizeWindowsShellPath(input) : input;
 	if (path === "~") return home;
 	if (path.startsWith("~/") || path.startsWith("~\\")) return joinFor(platform)(home, path.slice(2));
 	if (path.startsWith("file://")) return fileURLToPath(path, { windows });
@@ -474,20 +464,9 @@ export interface SettingsStoreDeps {
 	fs?: SettingsFs;
 }
 
-/**
- * Warnings already given in this process (§10.4 `settings`: once per
- * process). Not a module-level set: pi loads extensions with jiti's module
- * cache off and rebuilds them for every `/new`, `/resume`, `/fork` and
- * `/reload`, which evaluates this module afresh and would empty such a set,
- * so the same bad key would warn on every session switch. Hung on
- * `globalThis` under a registered symbol instead, as status.ts does for the
- * other notices.
- */
+/** Warnings already given in this process (§10.4 `settings`: once per process). */
 function warnedInProcess(): Set<string> {
-	const key = Symbol.for("pi-jfrog-boost.settings-warned");
-	const store = globalThis as unknown as Record<symbol, Set<string> | undefined>;
-	store[key] ??= new Set<string>();
-	return store[key];
+	return processSingleton("settings-warned", () => new Set<string>());
 }
 
 function formatDefault(value: unknown): string {
@@ -604,25 +583,6 @@ export function createSettingsStore(deps: SettingsStoreDeps = {}): SettingsStore
  */
 export const SESSION_TOGGLE_ENTRY = "jfrog-boost-session";
 
-/** The parts of pi's session manager this reads; both exist from 0.86.1 on. */
-export interface SessionToggleEntries {
-	getBranch?: () => unknown;
-	getEntries?: () => unknown;
-}
-
-function lastToggle(entries: unknown): boolean | undefined {
-	if (!Array.isArray(entries)) return undefined;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
-		if (entry && entry.type === "custom" && entry.customType === SESSION_TOGGLE_ENTRY) {
-			const enabled = (entry.data as { enabled?: unknown } | null)?.enabled;
-			if (typeof enabled === "boolean") return enabled;
-			if (enabled === null) return undefined;
-		}
-	}
-	return undefined;
-}
-
 /**
  * The last `/boost on|off` on the current branch, or undefined for a session
  * where neither was used. pi rebuilds the extension (and with it the
@@ -632,19 +592,11 @@ function lastToggle(entries: unknown): boolean | undefined {
  * every entry, so a toggle on a sibling branch does not leak in;
  * `getEntries()` only when the branch cannot be read at all.
  */
-export function restoreSessionToggle(sessionManager: SessionToggleEntries | undefined): boolean | undefined {
-	if (!sessionManager) return undefined;
-	let branch: unknown;
-	try {
-		if (typeof sessionManager.getBranch === "function") branch = sessionManager.getBranch();
-	} catch {
-		branch = undefined;
-	}
-	if (Array.isArray(branch)) return lastToggle(branch);
-	try {
-		if (typeof sessionManager.getEntries === "function") return lastToggle(sessionManager.getEntries());
-	} catch {
-		/* nothing to restore from */
-	}
-	return undefined;
+export function restoreSessionToggle(sessionManager: SessionEntries | undefined): boolean | undefined {
+	// `{ enabled: null }` ends the scan: an older toggle was handed back.
+	const toggle = lastCustomEntry(sessionManager, SESSION_TOGGLE_ENTRY, (data) => {
+		const enabled = (data as { enabled?: unknown } | null)?.enabled;
+		return typeof enabled === "boolean" || enabled === null ? enabled : undefined;
+	});
+	return toggle ?? undefined;
 }

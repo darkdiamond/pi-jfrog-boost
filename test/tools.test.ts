@@ -4,10 +4,10 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
 	BINARY_DOCS,
-	equivalentCommand,
 	extensionOf,
 	isShell,
 	LEGACY_OFFICE,
+	logReadCommand,
 	normalizeWindowsShellPath,
 	readPathCandidates,
 	resolveReadPath,
@@ -21,18 +21,9 @@ test("only bash and powershell are shells", () => {
 		assert.equal(isShell(tool), false, tool);
 });
 
-test("shell tools are described to Boost by their own command", () => {
-	assert.equal(equivalentCommand("bash", { command: "npm test" }), "npm test");
-	assert.equal(equivalentCommand("powershell", { command: "Get-ChildItem" }), "Get-ChildItem");
-	assert.equal(equivalentCommand("fetch", { command: "x" }), "x", "an extraTools tool with a command");
-	assert.equal(equivalentCommand("bash", {}), undefined);
-	assert.equal(equivalentCommand("fetch", { url: "x" }), undefined);
-});
-
 test("a whole log read is described as `cat <abs>`", () => {
-	assert.equal(equivalentCommand("read", { path: "a.log" }, "/work/a.log"), "cat /work/a.log");
-	assert.equal(equivalentCommand("read", { path: "x" }, "/work/my app.log"), "cat '/work/my app.log'");
-	assert.equal(equivalentCommand("read", { path: "a.log" }), undefined, "no absolute path, no command");
+	assert.equal(logReadCommand("/work/a.log"), "cat /work/a.log");
+	assert.equal(logReadCommand("/work/my app.log"), "cat '/work/my app.log'");
 });
 
 test("arguments that could change a command's meaning are quoted", () => {

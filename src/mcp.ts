@@ -52,15 +52,9 @@
  */
 import { atLeast, type BoostVersion, MCP_MIN_VERSION } from "./boost-binary.ts";
 import { type BoostCall, MAX_INPUT_BYTES } from "./boost-client.ts";
-import {
-	type ContentBlock,
-	isMeaningfulReduction,
-	isPlainObject,
-	parseMarker,
-	textBlocks,
-} from "./content.ts";
+import { type ContentBlock, isMeaningfulReduction, isPlainObject, textBlocks } from "./content.ts";
 import { excludedBy } from "./settings.ts";
-import { type Compaction, type PiTempFileDeps, readPiTempFile } from "./shell.ts";
+import { type Compaction, compactionOf, type PiTempFileDeps, readPiTempFile } from "./shell.ts";
 
 /** pi names every MCP tool `mcp__<server>__<tool>` (`createMcpToolName`). */
 export const MCP_TOOL_PREFIX = "mcp__";
@@ -274,7 +268,6 @@ export async function compactMcpResult(
 	const reply = parseMcpReply(call.stdout);
 	if (reply === undefined || !isMeaningfulReduction(sentText, reply)) return { call };
 	const body = reply.trimEnd();
-	const marker = parseMarker(body);
 	let text = body;
 	if (fullPath !== undefined) {
 		// More than pi's own cap would hand the model more than pi meant it to
@@ -283,14 +276,5 @@ export async function compactMcpResult(
 		const lines = sentText.split("\n").length;
 		text = `${body}\n\n[Boost compacted the full ${lines}-line output. Full output: ${fullPath} (read it with offset/limit)]`;
 	}
-	return {
-		call,
-		compaction: {
-			text,
-			before: shown.length,
-			after: text.length,
-			...(marker ? { retrieveId: marker.id } : {}),
-			...(fullPath !== undefined ? { full: true as const } : {}),
-		},
-	};
+	return { call, compaction: compactionOf(text, shown.length, body, fullPath !== undefined) };
 }

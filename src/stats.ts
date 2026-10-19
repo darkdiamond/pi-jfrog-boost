@@ -19,6 +19,7 @@
  * estimate (§10.1). The fields keep the spec's `bytesIn`/`bytesOut` names;
  * for the ASCII that dominates tool output the two units agree.
  */
+import { lastCustomEntry, type SessionEntries } from "./compat.ts";
 import { documentMode } from "./documents.ts";
 import { isMcpTool } from "./mcp.ts";
 import { isShellLike } from "./router.ts";
@@ -174,45 +175,12 @@ export function parseSnapshot(data: unknown): StatsSnapshot | undefined {
 	return snapshot;
 }
 
-/** The parts of pi's session manager this reads; both exist from 0.86.1 on. */
-export interface SessionEntries {
-	getBranch?: () => unknown;
-	getEntries?: () => unknown;
-}
-
-function lastStatsEntry(entries: unknown): StatsSnapshot | undefined {
-	if (!Array.isArray(entries)) return undefined;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
-		if (entry && entry.type === "custom" && entry.customType === STATS_ENTRY) {
-			const parsed = parseSnapshot(entry.data);
-			if (parsed) return parsed;
-		}
-	}
-	return undefined;
-}
-
 /**
- * The last persisted snapshot on the current branch (§10.5). The branch, not
- * every entry: after `/tree` or a fork the numbers are the branch's own, not
- * those of a sibling that never happened here. `getEntries()` is only the
- * fallback for a session manager whose branch cannot be read at all.
+ * The last persisted snapshot on the current branch (§10.5), so after `/tree`
+ * or a fork the numbers are the branch's own.
  */
 export function restoreSnapshot(sessionManager: SessionEntries | undefined): StatsSnapshot | undefined {
-	if (!sessionManager) return undefined;
-	let branch: unknown;
-	try {
-		if (typeof sessionManager.getBranch === "function") branch = sessionManager.getBranch();
-	} catch {
-		branch = undefined;
-	}
-	if (Array.isArray(branch)) return lastStatsEntry(branch);
-	try {
-		if (typeof sessionManager.getEntries === "function") return lastStatsEntry(sessionManager.getEntries());
-	} catch {
-		/* no entries to restore from */
-	}
-	return undefined;
+	return lastCustomEntry(sessionManager, STATS_ENTRY, parseSnapshot);
 }
 
 export interface Stats {

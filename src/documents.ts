@@ -402,8 +402,8 @@ export const CACHE_MAX_BYTES = 32 * 1024 * 1024;
 export interface DocumentCache {
 	get(key: string): string | undefined;
 	set(key: string, text: string): void;
+	/** Entries held; read only by the tests. */
 	size(): number;
-	clear(): void;
 }
 
 /** The cache key: a file changed in place (new mtime or size) is converted again. */
@@ -452,10 +452,6 @@ export function createDocumentCache(
 			}
 		},
 		size: () => entries.size,
-		clear() {
-			entries.clear();
-			bytes = 0;
-		},
 	};
 }
 

@@ -21,9 +21,8 @@
  *   the client's `onExit` (exit, spawn failure, or the watchdog's kill).
  *   That is per process, not per scheduler: pi builds a fresh extension
  *   instance (and with it a fresh scheduler) for every `/new`, `/resume`,
- *   `/fork` and `/reload`, and evaluates this module afresh for the last, so
- *   the running child is tracked in a {@link SyncFlight} hung on
- *   `globalThis` under a registered symbol, as status.ts does for notices.
+ *   `/fork` and `/reload`, so the running child is tracked in a
+ *   process-wide {@link SyncFlight} (compat.ts `processSingleton`).
  *   A session-shutdown flush and the next session's first settle then share
  *   one flight instead of uploading side by side.
  * - **Bounded.** `boost sync --max-batches 20` (F3) caps one run's upload;
@@ -55,6 +54,7 @@
  */
 import type { BoostClient, HookMeta } from "./boost-client.ts";
 import { DEFAULT_TIMEOUTS } from "./boost-client.ts";
+import { processSingleton } from "./compat.ts";
 
 /** Matches the delay Boost's OpenCode plugin uses. */
 export const SYNC_DELAY_MS = 8_000;
@@ -85,12 +85,9 @@ export function createSyncFlight(): SyncFlight {
 	return { id: undefined, generation: 0, stuckTimer: undefined, rerun: undefined };
 }
 
-/** The process-wide flight; survives `/reload` re-evaluating this module. */
+/** The process-wide flight ({@link processSingleton}). */
 export function processSyncFlight(): SyncFlight {
-	const key = Symbol.for("pi-jfrog-boost.sync-flight");
-	const store = globalThis as unknown as Record<symbol, SyncFlight | undefined>;
-	store[key] ??= createSyncFlight();
-	return store[key];
+	return processSingleton("sync-flight", createSyncFlight);
 }
 
 export interface SyncScheduler {

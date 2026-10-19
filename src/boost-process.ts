@@ -97,7 +97,14 @@ export interface ProcessRunnerDeps {
 	concurrency?: number;
 }
 
-const NOT_RUN: RunResult = { code: null, stdout: "", ms: 0, timedOut: false, aborted: false };
+/** A call that started no process; spread it and add why. */
+export const NOT_RUN: Readonly<RunResult> = {
+	code: null,
+	stdout: "",
+	ms: 0,
+	timedOut: false,
+	aborted: false,
+};
 
 export function createProcessRunner(deps: ProcessRunnerDeps = {}): ProcessRunner {
 	const spawnFn = deps.spawn ?? spawn;

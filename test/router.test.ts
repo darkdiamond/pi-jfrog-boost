@@ -5,7 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isShellLike, MAX_ROUTE_BYTES, type Route, type RouteInput, route } from "../src/router.ts";
+import { MAX_INPUT_BYTES } from "../src/boost-client.ts";
+import { isShellLike, type Route, type RouteInput, route } from "../src/router.ts";
 
 const big = (bytes = 4096, line = "ok 1 - passes\n") => line.repeat(Math.ceil(bytes / line.length));
 const HTML = `<!doctype html>\n<html><body>${"<p>text</p>".repeat(400)}</body></html>`;
@@ -122,8 +123,8 @@ test("shell rows: the size window is minBytes…1 MiB, measured without pi's not
 		"small",
 		"the notice does not count towards the body",
 	);
-	assert.equal(reason(route(input({ text: "x".repeat(MAX_ROUTE_BYTES) }))), "shell");
-	assert.equal(reason(route(input({ text: "x".repeat(MAX_ROUTE_BYTES + 1) }))), "large");
+	assert.equal(reason(route(input({ text: "x".repeat(MAX_INPUT_BYTES) }))), "shell");
+	assert.equal(reason(route(input({ text: "x".repeat(MAX_INPUT_BYTES + 1) }))), "large");
 	assert.equal(reason(route(input({ text: "x".repeat(100), settings: settings({ minBytes: 0 }) }))), "shell");
 });
 
@@ -280,7 +281,7 @@ test("read: only whole reads of a log are routed", () => {
 
 test("read: a log needs the size window, no HTML and the shell gate", () => {
 	assert.equal(reason(route(read({ text: "x".repeat(100), settings: logsOn }))), "small");
-	assert.equal(reason(route(read({ text: "x".repeat(MAX_ROUTE_BYTES + 1), settings: logsOn }))), "large");
+	assert.equal(reason(route(read({ text: "x".repeat(MAX_INPUT_BYTES + 1), settings: logsOn }))), "large");
 	assert.equal(reason(route(read({ text: HTML, settings: logsOn }))), "html");
 	assert.equal(reason(route(read({ text: `\u001b[2m${HTML}`, settings: logsOn }))), "html");
 	assert.equal(reason(route(read({ shellOn: false, settings: logsOn }))), "shell-off");
@@ -335,8 +336,8 @@ test("MCP rows: the text must be 2 KiB to 1 MiB, without NUL", () => {
 	assert.equal(reason(route(mcp({ text: "x".repeat(2048) }))), "mcp");
 	// minBytes is the shell and log floor; MCP's is fixed at 2 KiB.
 	assert.equal(reason(route(mcp({ text: "x".repeat(2048), settings: settings({ minBytes: 8192 }) }))), "mcp");
-	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_ROUTE_BYTES) }))), "mcp");
-	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_ROUTE_BYTES + 1) }))), "large");
+	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_INPUT_BYTES) }))), "mcp");
+	assert.equal(reason(route(mcp({ text: "x".repeat(MAX_INPUT_BYTES + 1) }))), "large");
 	assert.equal(reason(route(mcp({ text: `${"x".repeat(4096)}\0` }))), "binary");
 });
 
