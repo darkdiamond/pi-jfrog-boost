@@ -673,13 +673,15 @@ test("the awareness block is a named prompt section when pi supports them", asyn
 		systemPromptOptions: { sections },
 	});
 	assert.equal(patched, undefined, "no whole-prompt replacement, so the prompt cache survives");
-	assert.match(sections["jfrog-boost"] ?? "", /retrieve <id> --query/);
+	// No Preview Agreement in this config: `boost retrieve` would exit 1.
+	assert.match(sections["jfrog-boost"] ?? "", /`boost retrieve` fails here/);
+	assert.doesNotMatch(sections["jfrog-boost"] ?? "", /retrieve <id>/);
 	assert.match(sections["jfrog-boost"] ?? "", /: `bash` output\./, "shell is the one active surface here");
 	assert.doesNotMatch(sections["jfrog-boost"] ?? "", /<jfrog-boost>/, "pi adds the tags itself");
 });
 
 test("the system prompt gains the Boost instructions when pi has no sections", async () => {
-	const { fire } = harness();
+	const { fire } = harness({ config: fixedConfig(TERMS) });
 	const patched = (await fire("before_agent_start", { systemPrompt: "base" })) as { systemPrompt: string };
 	assert.ok(patched.systemPrompt.startsWith("base\n\n<jfrog-boost>\n"));
 	assert.ok(patched.systemPrompt.includes("retrieve <id> --query"));
@@ -742,7 +744,11 @@ test("off PATH the model is given the quoted full path; on PATH plain `boost`", 
 		const exe = join(dir, process.platform === "win32" ? "boost.exe" : "boost");
 		writeFileSync(exe, "", { mode: 0o755 });
 		const sectionFor = async (env: NodeJS.ProcessEnv) => {
-			const { fire } = harness({ env, readiness: fixedReadiness(undefined, exe) });
+			const { fire } = harness({
+				env,
+				readiness: fixedReadiness(undefined, exe),
+				config: fixedConfig(TERMS),
+			});
 			const sections: Record<string, string> = {};
 			await fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: { sections } });
 			return sections["jfrog-boost"] ?? "";
@@ -1192,7 +1198,7 @@ test("a first turn that waited past the probe gets the awareness section", async
 			return { kind: "ready", version: [0, 15, 4] };
 		},
 	};
-	const h = harness({ readiness });
+	const h = harness({ readiness, config: fixedConfig(TERMS) });
 	await h.fire("session_start", { reason: "startup" });
 	const sections: Record<string, string> = {};
 	await h.fire("before_agent_start", { systemPrompt: "base", systemPromptOptions: { sections } });

@@ -44,8 +44,9 @@ Left alone, because Boost has nothing to take out or because it must stay exact:
 
 A shortened result ends with a marker such as
 `[Boost compressed ~85%. Get the full original output simply with: boost retrieve 147]`,
-and the model is told how to get back just the part it needs. If Boost is
-missing, slow or failing, the original output is used.
+and the model is told how to get back just the part it needs (`boost retrieve`
+needs the Preview Agreement; see below). If Boost is missing, slow or failing,
+the original output is used.
 
 ## Before you start
 
@@ -55,12 +56,16 @@ missing, slow or failing, the original output is used.
   pi alone: `/boost settings` → **Shell output: on**. That only sets an
   environment variable on pi's own Boost calls; Boost's config is never
   written.
-- **Documents need Boost's Preview Agreement.** PDF, Office and notebook
-  conversion (`boost read`) refuses to run until the
+- **Documents and `boost retrieve` need Boost's Preview Agreement.** PDF,
+  Office and notebook conversion (`boost read`) refuses to run until the
   [Preview Agreement](https://boost.jfrog.com/preview-agreement/) is accepted.
-  Shell and MCP compaction work without it. This package never accepts it for
-  you: run `boost init --dry-run`, then `boost init`, in a terminal (init also
-  offers to add Boost hooks to other agents).
+  Shell and MCP compaction run without it and still end shortened results
+  with a `boost retrieve` marker, but `boost retrieve` refuses too, so what
+  they dropped cannot be recovered: the only way back to a command's exact
+  output is re-running it with `DISABLE_BOOST=1`, and the model is told so.
+  This package never accepts it for you: run `boost init --dry-run`, then
+  `boost init`, in a terminal (init also offers to add Boost hooks to other
+  agents).
 
 ## Install
 
@@ -75,8 +80,8 @@ asks before doing anything and offers four choices:
 
 1. **Binary only (recommended).** Looks up the latest release on the GitHub
    API, downloads `boost-<os>-<arch>.tar.gz` from github.com/jfrog/boost,
-   checks it against the SHA-256 GitHub publishes for it (the confirm text says
-   so plainly if there is none), and puts the `boost` binary in `~/.local/bin`.
+   checks it against the SHA-256 GitHub publishes for it (with no published
+   digest it installs nothing and shows the manual steps), and puts the `boost` binary in `~/.local/bin`.
    That is all: it does not run JFrog's `install.sh`, change your shell
    startup files or PATH, run `boost init`, add hooks to other agents, or
    accept the Preview Agreement. macOS and Linux, amd64 and arm64.
@@ -262,6 +267,12 @@ What leaves your machine, and how to stop it:
   and response in its local database, and sync uploads them. Keep a server
   away from Boost with `mcpExclude` (e.g. `["mcp__secrets__*"]`) or turn MCP
   off with `mcp: false`.
+- **Shell and log output.** For every shell command (and, with `readLogs`,
+  log read) it filters, Boost stores the full original output and the command
+  line in its local database; that is what `boost retrieve` reads. Whether
+  sync uploads these rows has not been verified. Shell output: off (the
+  default while Boost's CLI filtering is off), `readLogs: false`, or
+  `DISABLE_BOOST=1` on one command keeps output away from Boost.
 - **Observe** is off by default. When on, it records session start, each
   tool's start and end (arguments and an output excerpt, each capped at 16k
   characters, and the duration), the assistant's last reply when the agent

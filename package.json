@@ -1,7 +1,7 @@
 {
 	"name": "pi-jfrog-boost",
 	"version": "0.4.0",
-	"description": "Cut pi's token use with JFrog Boost: compacts test/build and MCP output, converts PDF and Office files, keeps file reads exact. Fail-open, zero dependencies. Community project, not affiliated with JFrog.",
+	"description": "Cut pi's token use with JFrog Boost: converts PDF and Office files, and compacts MCP and (opt-in) test/build output; file reads stay exact. Fail-open, zero dependencies. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
 	"author": "DarkDiamonD (https://github.com/darkdiamond)",

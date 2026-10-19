@@ -33,15 +33,21 @@ When you need a detail it dropped, recover just that instead of re-running the c
 
 Boost learns from retrieves: after a few, it switches that filter off on this
 machine for every agent. Retrieve when you genuinely need the detail, narrowly.
-If there is no marker and you need everything, re-run with `DISABLE_BOOST=1`.
-If `boost` is not found, use the full path given in the system prompt.
+If there is no marker and you need everything, re-run with `DISABLE_BOOST=1`
+(see Exact output). If `boost retrieve` fails with an error about the Preview
+Agreement, the user has not accepted it and retrieve cannot work: re-run the
+command with `DISABLE_BOOST=1` instead, and do not accept the agreement yourself.
+If `boost` is not found, use the full path given in the system prompt; in
+PowerShell call it with `&`, e.g. `& "C:\…\boost.exe" retrieve 147`.
 
 ## Exact output
 
 - One shell command: `DISABLE_BOOST=1 <command>` (or `BOOST_DISABLED=1 <command>`).
+  In PowerShell: `$env:DISABLE_BOOST=1; <command>`.
   Commands that run `boost` themselves are never shortened.
 - Web pages: curl/wget output that is a whole HTML page may arrive as readable
-  text. `DISABLE_BOOST=1 curl …` gives raw HTML.
+  text. `DISABLE_BOOST=1 curl …` gives raw HTML (in PowerShell,
+  `$env:DISABLE_BOOST=1; curl …`).
 - Files: `read` is exact for text files. A notebook read with any `offset` or
   `limit` returns its raw JSON.
 

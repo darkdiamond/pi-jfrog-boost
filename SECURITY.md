@@ -24,8 +24,9 @@ access pi has. Concretely, it:
 - reads `~/.boost/config.toml` (feature flags, whether the Preview Agreement
   is recorded, filters Boost disabled) and **never writes it**;
 - writes only its own settings file (`~/.pi/agent/jfrog-boost.json`, and only
-  from `/boost settings`) and numbers-only `jfrog-boost-stats` entries in
-  the pi session, apart from a confirmed binary-only `/boost install`, which
+  from `/boost settings`), numbers-only `jfrog-boost-stats` entries and
+  `jfrog-boost-session` on/off entries (from `/boost on|off`) in the pi
+  session, apart from a confirmed binary-only `/boost install`, which
   downloads and extracts the release in a private temp directory, copies the
   binary to `~/.local/bin/boost.tmp-<pid>` and renames it to
   `~/.local/bin/boost`;
@@ -38,6 +39,12 @@ access pi has. Concretely, it:
 - causes Boost to store the full request and response of every MCP call it
   filters in its local database (sync uploads them too). `mcpExclude` and
   `mcp: false` keep a server, or all of MCP, away from Boost;
+- causes Boost to store the full original output of every shell command (and,
+  with `readLogs`, log read) it filters in its local database, together with
+  the command line; that is what `boost retrieve` reads. Whether `boost sync`
+  uploads these rows has not been verified. Shell output: off (the default
+  while Boost's CLI filtering is off), `readLogs: false` and `DISABLE_BOOST=1`
+  on a command keep that output away from Boost;
 - has **no network access of its own**, except a `/boost install` you
   confirm: the binary-only option calls the GitHub API for the latest
   release and downloads that asset from github.com/jfrog/boost, checking it

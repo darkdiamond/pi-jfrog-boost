@@ -26,6 +26,7 @@ const view = (over: Partial<AwarenessView> = {}): AwarenessView => ({
 	mcp: false,
 	documents: false,
 	notebooks: false,
+	retrieve: true,
 	boostCmd: "boost",
 	onPath: true,
 	callOperator: false,
@@ -125,18 +126,22 @@ function* combinations(): Generator<[string, AwarenessView]> {
 						[false, `"${LONG_WIN_PATH}"`, true],
 						[false, `& "${LONG_WIN_PATH}"`, false],
 					] as const) {
-						const v = view({
-							shellTools,
-							extraTools,
-							logs,
-							mcp,
-							documents,
-							notebooks,
-							onPath,
-							boostCmd,
-							callOperator,
-						});
-						yield [JSON.stringify(v), v];
+						// Documents need the agreement too, so no retrieve means no documents.
+						for (const retrieve of documents ? [true] : [true, false]) {
+							const v = view({
+								shellTools,
+								extraTools,
+								logs,
+								mcp,
+								documents,
+								notebooks,
+								retrieve,
+								onPath,
+								boostCmd,
+								callOperator,
+							});
+							yield [JSON.stringify(v), v];
+						}
 					}
 				}
 			}
@@ -167,13 +172,34 @@ test("each conditional line appears exactly when its surface is active", () => {
 		assert.equal(text.includes("`fetch`"), v.extraTools.length > 0, label);
 		assert.equal(text.includes("*.log/*.out"), v.logs, label);
 		assert.equal(text.includes("`read` of text files"), !v.logs, label);
-		assert.equal(text.includes("after `&`"), v.callOperator && !v.onPath, label);
+		assert.equal(text.includes("after `&`"), v.callOperator && !v.onPath && v.retrieve, label);
 		assert.equal(text.includes("arrive as converted text"), v.documents, label);
 		assert.equal(text.includes("notebooks read whole"), v.notebooks, label);
 		assert.equal(text.includes("offset=1"), v.notebooks, label);
-		assert.equal(text.includes("not on PATH"), !v.onPath, label);
-		assert.ok(text.includes(`\`${v.boostCmd} retrieve <id>`), label);
+		assert.equal(text.includes("not on PATH"), !v.onPath && v.retrieve, label);
+		assert.equal(text.includes(`\`${v.boostCmd} retrieve <id>`), v.retrieve, label);
+		assert.equal(text.includes("Preview Agreement is not accepted"), !v.retrieve, label);
 	}
+});
+
+test("without the Preview Agreement the text does not send the model to `boost retrieve`", () => {
+	// Boost's stdin filter compacts and prints the marker without the
+	// agreement, but `boost retrieve` exits 1 until it is accepted.
+	const shell = buildAwareness(view({ shellTools: ["bash"], retrieve: false })) ?? "";
+	assert.match(
+		shell,
+		/^- A result may end with `\[… boost retrieve 147\]`, but `boost retrieve` fails here \(Boost's Preview Agreement is not accepted\), so do not run it\. For a dropped detail, re-run the command for exact output as below\.$/m,
+	);
+	assert.doesNotMatch(shell, /retrieve <id>/);
+	assert.match(shell, /DISABLE_BOOST=1/);
+	// MCP alone has no exact-output re-run to offer, and an off-PATH binary
+	// is not named at all, since nothing tells the model to run it.
+	const mcp = buildAwareness(view({ mcp: true, retrieve: false, onPath: false, boostCmd: OFF_PATH })) ?? "";
+	assert.match(mcp, /so do not run it\.$/m);
+	assert.doesNotMatch(mcp, /re-run the command|not on PATH|\.local\/bin/);
+	// From the inputs: the view follows termsAccepted.
+	assert.equal(awarenessView(inputs({ termsAccepted: false }))?.retrieve, false);
+	assert.equal(awarenessView(inputs())?.retrieve, true);
 });
 
 test("the exact-output opt-out is spelled for each visible shell", () => {

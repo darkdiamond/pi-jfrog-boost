@@ -68,6 +68,14 @@ export interface AwarenessView {
 	documents: boolean;
 	/** `documents`, and whole reads of large notebooks are converted too. */
 	notebooks: boolean;
+	/**
+	 * `boost retrieve` works: the Preview Agreement is accepted. Without it
+	 * the stdin and MCP filters still shorten output and still print a
+	 * `boost retrieve <id>` marker, but `retrieve` itself exits 1 ("boost
+	 * requires accepting the Preview Agreement"), so the text must not send
+	 * the model to it.
+	 */
+	retrieve: boolean;
 	/** How the model should spell Boost in a shell: `boost`, or the quoted absolute path. */
 	boostCmd: string;
 	/** Whether `boost` typed in the model's shell finds this binary. */
@@ -209,6 +217,7 @@ export function awarenessView(r: AwarenessInputs): AwarenessView | undefined {
 		mcp,
 		documents,
 		notebooks,
+		retrieve: r.termsAccepted,
 		...boostCommand(r.binary, r.onPath, r.platform, visibleShells),
 		onPath: r.onPath,
 	};
@@ -248,7 +257,10 @@ export function buildAwareness(view: AwarenessView | undefined): string | undefi
 	const lines = [
 		`JFrog Boost shortens some tool output before you see it: ${joinList(surfaces)}. Everything else (${exact}, \`edit\`, \`write\`, …) is exact.`,
 		"- Shortened output is intentional and usually enough; prefer it.",
-		`- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${b} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.`,
+		view.retrieve
+			? `- If a result ends with \`[… boost retrieve 147]\` and you need a dropped detail, run \`${b} retrieve <id> --query "<term>"\` (or \`--lines 40-80\`) rather than re-running the tool. Retrieve narrowly: repeated retrieves turn that filter off for every agent on this machine.`
+			: // The marker is printed regardless; following it fails here.
+				`- A result may end with \`[… boost retrieve 147]\`, but \`boost retrieve\` fails here (Boost's Preview Agreement is not accepted), so do not run it.${view.shellTools.length > 0 ? " For a dropped detail, re-run the command for exact output as below." : ""}`,
 	];
 	if (view.shellTools.length > 0) {
 		// `DISABLE_BOOST=1 cmd` is a parse error in PowerShell ("The term
@@ -273,7 +285,8 @@ export function buildAwareness(view: AwarenessView | undefined): string | undefi
 			`- Documents${nb ? ", and notebooks read whole," : ""} arrive as converted text, paged like any read. Line numbers are not file lines; never \`edit\` from them.${nb ? " offset=1 gives a notebook's raw JSON." : ""}`,
 		);
 	}
-	if (!view.onPath) {
+	// The full path is only spelled in the retrieve line.
+	if (!view.onPath && view.retrieve) {
 		lines.push(
 			view.callOperator
 				? "- `boost` is not on PATH; use the full path above (in `powershell`, after `&`)."

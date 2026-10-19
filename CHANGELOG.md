@@ -71,6 +71,12 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   names documents and MCP results as still handled only when they really are
   (the setting is on, the terms are accepted for documents, Boost is ≥ 0.15.3
   for MCP).
+- The awareness text told a PowerShell-only model to prefix commands with
+  `DISABLE_BOOST=1`, which PowerShell cannot parse. It now gives
+  `$env:DISABLE_BOOST=1;` there, and both forms when both shells are visible.
+- Without the Preview Agreement, the awareness text sent the model to
+  `boost retrieve`, which then refused to run. It now says retrieve will fail
+  and points at the `DISABLE_BOOST=1` re-run instead.
 
 ### Changed
 
@@ -103,8 +109,10 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   `structuredContent`. `mcpExclude` keeps chosen servers away from Boost.
   On pi 1.x this applies only to tools the model calls directly
   (`"exposure": "direct"` or `"deferred"`); under pi's default `codemode`
-  exposure the calls are nested and their output is left alone. The README
-  says how to set it.
+  exposure the calls are nested and their output is left alone. With
+  `deferred`, the awareness text names MCP results from the prompt in which
+  `tool_search` loads an `mcp__*` tool, since they are shortened from that
+  call on. The README says how to set it.
 - Full-output re-filter: when pi truncated `bash` output, Boost filters pi's
   full output file, so early failures in a long run reach the model. On pi 1.x
   this covers every run; on pi 0.86 only runs that exit 0, since pi 0.86 does
@@ -125,9 +133,9 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   out, crashed or were very slow,
   abort support, at most four concurrent Boost processes, and size gates.
 - `/boost install`'s binary-only option: the release asset from GitHub,
-  checked against GitHub's published SHA-256 when GitHub publishes one (the
-  confirm text says when it does not), placed in `~/.local/bin`, with
-  no installer script, rc edits, hooks or terms.
+  checked against GitHub's published SHA-256 (with none published it
+  installs nothing and shows the manual steps), placed in `~/.local/bin`,
+  with no installer script, rc edits, hooks or terms.
 - A hermetic e2e suite with a tripwire on the real Boost state, run against
   pi 1.2.0 (`npm run test:e2e`) and 0.86.1 (`npm run test:e2e:min`). Part of
   it runs a real pi session on pi-ai's scripted faux model, so pi's own
@@ -140,7 +148,8 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 
 - The install consent text is accurate, and the default install path runs no
   third-party script and verifies what it downloads against GitHub's
-  published SHA-256 when one is published, and tells you when none is.
+  published SHA-256; with none published it installs nothing and shows the
+  manual steps.
 - README and SECURITY.md say what `boost sync` uploads, that Boost stores and
   syncs MCP bodies, and how to turn each off. The "makes no network requests"
   wording is replaced by the exact list of what the package can do.
@@ -157,13 +166,6 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
   was compacted anyway.
 - `boost retrieve` and other commands that run Boost are no longer compacted a
   second time, which replaced the recovered original with yet another marker.
-- The awareness text told a PowerShell-only model to prefix commands with
-  `DISABLE_BOOST=1`, which PowerShell cannot parse. It now gives
-  `$env:DISABLE_BOOST=1;` there, and both forms when both shells are visible.
-- With pi's `deferred` MCP exposure, the awareness text left MCP out for the
-  prompt in which `tool_search` loads an `mcp__*` tool, although its results
-  were already shortened. Deferred MCP tools now count once `tool_search` is
-  visible.
 
 ### Changed
 

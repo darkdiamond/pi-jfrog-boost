@@ -153,12 +153,12 @@ export function confirmText(view: ConfirmView): { title: string; message: string
 			"  • it does not run `boost init`, so no hooks are added to other agents",
 			"  • it does not accept JFrog's Preview Agreement for you",
 			"",
-			"MCP results are compacted right away (Boost ≥ 0.15.3) when pi calls MCP tools",
-			"directly or loads them with tool_search; calls made inside codemode scripts",
-			"(pi's default MCP exposure) are not. Shell-output compaction is off by",
-			"default in Boost; turn it on for pi with /boost settings → Shell output.",
-			"PDF/Office conversion needs the agreement: in a terminal run",
-			"`boost init --dry-run`, then `boost init`.",
+			"MCP results are compacted (Boost ≥ 0.15.3) only for tools pi calls directly",
+			"or loads with tool_search; calls made inside codemode scripts (pi 1.x's",
+			"default MCP exposure) are not. Shell-output compaction is off by default in",
+			"Boost; turn it on for pi with /boost settings → Shell output.",
+			"PDF/Office conversion and boost retrieve (recovering what was dropped) need",
+			"the agreement: in a terminal run `boost init --dry-run`, then `boost init`.",
 			`Terms: ${TERMS_URL}`,
 		].join("\n"),
 	};
@@ -627,7 +627,7 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 		if (shellOff) lines.push(shellOff);
 		if (ready && !host.termsAccepted()) {
 			lines.push(
-				"PDF/Office conversion needs Boost's Preview Agreement: in a terminal run `boost init --dry-run`, then `boost init`.",
+				"PDF/Office conversion and `boost retrieve` need Boost's Preview Agreement: in a terminal run `boost init --dry-run`, then `boost init`.",
 			);
 		}
 		say(ctx, lines.join("\n"), ready && !elsewhere ? "info" : "warning");

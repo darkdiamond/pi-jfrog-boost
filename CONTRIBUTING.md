@@ -165,9 +165,9 @@ issue or comments on the open one. Close the issue once a fix lands.
 CI does not run the e2e suite, so it skips there. That is a maintainer policy
 decision about JFrog's Preview Agreement, not a technical limit: the binary
 can be downloaded without its installer, and shell and MCP filtering work
-without the agreement recorded (only document conversion needs it). The
-question is whether running JFrog's preview binary in this project's CI is
-acceptable under its terms.
+without the agreement recorded (document conversion and `boost retrieve`
+need it). The question is whether running JFrog's preview binary in this
+project's CI is acceptable under its terms.
 
 The canary's `boost-e2e` job is ready for that decision and off until then.
 It runs only when the repository variable `BOOST_CANARY` is `true`: it
