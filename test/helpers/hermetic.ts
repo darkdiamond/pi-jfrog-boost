@@ -25,7 +25,9 @@
  *  3. Copies only the three terms lines, read-only, from
  *     `BOOST_E2E_TERMS_FROM` (default: the real `~/.boost/config.toml`), or
  *     the whole config from `BOOST_E2E_HOME/.boost/config.toml`. The suite
- *     never accepts the agreement itself; without terms, document cases skip.
+ *     never accepts the agreement itself; without terms from the implicit
+ *     default, document cases skip. A source named explicitly that is missing,
+ *     unreadable or unaccepted fails the suite instead (`termsRequired`).
  *  4. Points HOME/USERPROFILE, BOOST_DB_PATH, TMPDIR/TEMP/TMP and XDG_* into
  *     the temp HOME, and every proxy variable at a refused port
  *     (127.0.0.1:9) so Boost cannot reach the network for flags, updates or
@@ -313,6 +315,12 @@ export interface Hermetic {
 	readonly terms: readonly string[];
 	readonly termsSource: string | undefined;
 	readonly termsAvailable: boolean;
+	/**
+	 * Whether the terms source was named explicitly (`BOOST_E2E_HOME` or
+	 * `BOOST_E2E_TERMS_FROM`). Then missing terms fail the suite, as under
+	 * `PI_BOOST_E2E_STRICT=1`, instead of skipping the document cases.
+	 */
+	readonly termsRequired: boolean;
 	/** Why document cases cannot run, when `termsAvailable` is false. */
 	readonly termsMissingReason: string | undefined;
 	/** The full child environment for the default HOME. */
@@ -385,24 +393,38 @@ export function createHermetic(options: HermeticOptions = {}): Hermetic {
 	// 1. The binary, while HOME still points at the real home.
 	const binary = source.BOOST_BIN || resolveBoostBinary({ env: source, platform, home: realHome });
 
-	// 3. Terms, read-only.
+	// 3. Terms, read-only. A source named explicitly (BOOST_E2E_HOME or
+	// BOOST_E2E_TERMS_FROM) is required: a caller who pointed the suite at
+	// terms wants the document cases run, so a missing, unreadable or
+	// unaccepted file fails the suite instead of skipping them. Only the
+	// implicit default, the real ~/.boost/config.toml, may skip.
 	let terms: string[] = [];
-	let termsSource: string | undefined;
 	let wholeConfig: string | undefined;
-	if (source.BOOST_E2E_HOME) {
-		termsSource = join(source.BOOST_E2E_HOME, ".boost", "config.toml");
-		if (existsSync(termsSource)) {
-			wholeConfig = readFileSync(termsSource, "utf8");
-			terms = termsLinesFrom(wholeConfig);
-		}
+	let termsProblem: string | undefined;
+	const termsRequired = Boolean(source.BOOST_E2E_HOME || source.BOOST_E2E_TERMS_FROM);
+	const termsSource = source.BOOST_E2E_HOME
+		? join(source.BOOST_E2E_HOME, ".boost", "config.toml")
+		: source.BOOST_E2E_TERMS_FROM || join(realHome, ".boost", "config.toml");
+	if (!existsSync(termsSource)) {
+		termsProblem = `${termsSource} not found`;
 	} else {
-		termsSource = source.BOOST_E2E_TERMS_FROM || join(realHome, ".boost", "config.toml");
-		if (existsSync(termsSource)) terms = termsLinesFrom(readFileSync(termsSource, "utf8"));
+		try {
+			const text = readFileSync(termsSource, "utf8");
+			if (source.BOOST_E2E_HOME) wholeConfig = text;
+			terms = termsLinesFrom(text);
+		} catch (error) {
+			termsProblem = `cannot read ${termsSource}: ${(error as Error).message}`;
+		}
 	}
 	const termsAvailable = termsAccepted(terms);
+	const termsSetting = source.BOOST_E2E_HOME ? "BOOST_E2E_HOME" : "BOOST_E2E_TERMS_FROM";
 	const termsMissingReason = termsAvailable
 		? undefined
-		: `no accepted Boost Preview Agreement in ${termsSource}; set BOOST_E2E_TERMS_FROM to a config.toml that has one (the suite never accepts it for you)`;
+		: `${termsProblem ?? `no accepted Boost Preview Agreement in ${termsSource}`}; ${
+				termsRequired
+					? `${termsSetting} is set, so document cases must run`
+					: "set BOOST_E2E_TERMS_FROM to a config.toml that has one"
+			} (the suite never accepts it for you)`;
 
 	// 2. The temp root, outside anything that could be a real home.
 	const root = mkdtempSync(join(options.parent ?? tmpdir(), "pi-boost-hermetic-"));
@@ -482,6 +504,7 @@ export function createHermetic(options: HermeticOptions = {}): Hermetic {
 		terms,
 		termsSource,
 		termsAvailable,
+		termsRequired,
 		termsMissingReason,
 		env,
 		tripwire,

@@ -102,7 +102,9 @@ It is **hermetic** (`test/helpers/hermetic.ts`). Before anything spawns, it:
   `BOOST_E2E_HOME/.boost/config.toml`. The suite never accepts the agreement;
   without it the document and retrieve cases skip (`boost read` and
   `boost retrieve` refuse to run without it), or fail with
-  `PI_BOOST_E2E_STRICT=1`;
+  `PI_BOOST_E2E_STRICT=1`. A source you name yourself with
+  `BOOST_E2E_TERMS_FROM` or `BOOST_E2E_HOME` must exist and hold accepted
+  terms: if it does not, the suite fails and says why, rather than skipping;
 - points HOME/USERPROFILE, `BOOST_DB_PATH`, TMPDIR/TEMP/TMP and XDG_* into the
   temp HOME, every proxy variable at a refused port, and sets
   `BOOST_FEATURE_FLAGS_TTL=24h` and `PI_BOOST_SYNC=0`;

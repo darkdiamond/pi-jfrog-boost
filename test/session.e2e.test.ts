@@ -43,11 +43,14 @@ const SETTLE_MS = 30_000;
 const enabled = process.env.PI_BOOST_E2E === "1";
 const strict = process.env.PI_BOOST_E2E_STRICT === "1";
 const hermetic: Hermetic | undefined = enabled ? createHermetic() : undefined;
+/** Missing terms fail rather than skip: under STRICT, or when a terms source was named explicitly. */
+const termsStrict = strict || (hermetic?.termsRequired ?? false);
 const skip: string | false = hermetic
 	? false
 	: "real-Boost e2e is opt-in: run `npm run test:e2e` (sets PI_BOOST_E2E=1)";
 const termsSkip =
-	skip || (hermetic && !hermetic.termsAvailable && !strict ? (hermetic.termsMissingReason ?? true) : false);
+	skip ||
+	(hermetic && !hermetic.termsAvailable && !termsStrict ? (hermetic.termsMissingReason ?? true) : false);
 const line: PiLine = installedPiLine();
 const mcpSkip = skip || (line !== "1.2" ? "pi ≥ 0.99 only: 0.86 has no built-in MCP" : false);
 
@@ -121,8 +124,10 @@ const sessions: Session[] = [];
 before(async () => {
 	if (!hermetic) return;
 	if (!hermetic.binary) assert.fail("PI_BOOST_E2E=1 but no Boost binary was found (set BOOST_BIN)");
-	if (!hermetic.termsAvailable && strict)
-		assert.fail(`PI_BOOST_E2E_STRICT=1: ${hermetic.termsMissingReason}`);
+	if (!hermetic.termsAvailable && termsStrict)
+		assert.fail(
+			strict ? `PI_BOOST_E2E_STRICT=1: ${hermetic.termsMissingReason}` : hermetic.termsMissingReason,
+		);
 	restoreEnv = hermetic.apply();
 	hermetic.assertIsolated();
 

@@ -173,6 +173,60 @@ test("only the terms lines are copied, and the rest of the config is synthesized
 	}
 });
 
+test("a real home with no config at all says so, and may still skip", () => {
+	const real = fakeRealHome();
+	rmSync(join(real, ".boost", "config.toml"));
+	const hermetic = hermeticFor(real);
+	try {
+		assert.equal(hermetic.termsAvailable, false);
+		assert.equal(hermetic.termsRequired, false);
+		assert.match(hermetic.termsMissingReason ?? "", /config\.toml not found/);
+	} finally {
+		hermetic.dispose();
+	}
+});
+
+test("an explicit BOOST_E2E_TERMS_FROM that does not exist is required, not skipped", () => {
+	const missing = join(root, "no-such-dir", "config.toml");
+	const hermetic = hermeticFor(fakeRealHome(), { BOOST_E2E_TERMS_FROM: missing });
+	try {
+		assert.equal(hermetic.termsSource, missing);
+		assert.equal(hermetic.termsAvailable, false, "the real home's terms are not a fallback");
+		assert.equal(hermetic.termsRequired, true);
+		assert.match(hermetic.termsMissingReason ?? "", /not found/);
+		assert.doesNotMatch(hermetic.termsMissingReason ?? "", /no accepted Boost Preview Agreement/);
+		assert.match(hermetic.termsMissingReason ?? "", /BOOST_E2E_TERMS_FROM is set/);
+	} finally {
+		hermetic.dispose();
+	}
+});
+
+test("an explicit BOOST_E2E_TERMS_FROM without accepted terms is required, not skipped", () => {
+	const source = join(root, "unaccepted.toml");
+	writeFileSync(source, "[measurement]\n");
+	const hermetic = hermeticFor(fakeRealHome(), { BOOST_E2E_TERMS_FROM: source });
+	try {
+		assert.equal(hermetic.termsAvailable, false);
+		assert.equal(hermetic.termsRequired, true);
+		assert.match(hermetic.termsMissingReason ?? "", /no accepted Boost Preview Agreement/);
+	} finally {
+		hermetic.dispose();
+	}
+});
+
+test("an explicit BOOST_E2E_HOME without a config is required, not skipped", () => {
+	const empty = join(root, "empty-home");
+	mkdirSync(empty, { recursive: true });
+	const hermetic = hermeticFor(fakeRealHome(), { BOOST_E2E_HOME: empty });
+	try {
+		assert.equal(hermetic.termsAvailable, false);
+		assert.equal(hermetic.termsRequired, true);
+		assert.match(hermetic.termsMissingReason ?? "", /not found; BOOST_E2E_HOME is set/);
+	} finally {
+		hermetic.dispose();
+	}
+});
+
 test("BOOST_E2E_TERMS_FROM overrides where the terms come from", () => {
 	const real = fakeRealHome("[measurement]\n");
 	const source = join(root, "terms.toml");
@@ -181,6 +235,8 @@ test("BOOST_E2E_TERMS_FROM overrides where the terms come from", () => {
 	try {
 		assert.equal(hermetic.termsSource, source);
 		assert.deepEqual(hermetic.terms, ['accept_terms = "yes"', 'terms_version = "preview-9"']);
+		assert.equal(hermetic.termsRequired, true);
+		assert.equal(hermetic.termsMissingReason, undefined);
 	} finally {
 		hermetic.dispose();
 	}
@@ -190,6 +246,8 @@ test("without accepted terms, document cases get a reason to skip", () => {
 	const hermetic = hermeticFor(fakeRealHome("[measurement]\n"));
 	try {
 		assert.equal(hermetic.termsAvailable, false);
+		assert.equal(hermetic.termsRequired, false, "the implicit default may skip");
+		assert.match(hermetic.termsMissingReason ?? "", /no accepted Boost Preview Agreement/);
 		assert.match(hermetic.termsMissingReason ?? "", /BOOST_E2E_TERMS_FROM/);
 		const config = readFileSync(join(hermetic.home, ".boost", "config.toml"), "utf8");
 		assert.doesNotMatch(config, /accept_terms/);

@@ -29,8 +29,10 @@
  *
  * Point it at a specific binary or terms source with BOOST_BIN and
  * BOOST_E2E_TERMS_FROM (or BOOST_E2E_HOME); see CONTRIBUTING.md. Document and
- * retrieve cases skip when no accepted terms are available, or fail under
- * PI_BOOST_E2E_STRICT=1.
+ * retrieve cases skip when the real ~/.boost/config.toml has no accepted
+ * terms; they fail instead under PI_BOOST_E2E_STRICT=1, or when
+ * BOOST_E2E_TERMS_FROM / BOOST_E2E_HOME names a file that is missing,
+ * unreadable or has no accepted terms.
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
@@ -81,6 +83,8 @@ const strict = process.env.PI_BOOST_E2E_STRICT === "1";
 // Not built at all when the suite is off, so `npm test` creates no temp HOME
 // and reads no real Boost state.
 const hermetic: Hermetic | undefined = enabled ? createHermetic() : undefined;
+/** Missing terms fail rather than skip: under STRICT, or when a terms source was named explicitly. */
+const termsStrict = strict || (hermetic?.termsRequired ?? false);
 const skip: string | false = hermetic
 	? false
 	: "real-Boost e2e is opt-in: run `npm run test:e2e` (sets PI_BOOST_E2E=1)";
@@ -95,7 +99,8 @@ const h = (): Hermetic => {
  * the stdin filter works regardless (spec F2, NP3).
  */
 const termsSkip =
-	skip || (hermetic && !hermetic.termsAvailable && !strict ? (hermetic.termsMissingReason ?? true) : false);
+	skip ||
+	(hermetic && !hermetic.termsAvailable && !termsStrict ? (hermetic.termsMissingReason ?? true) : false);
 
 /** pi 1.x reports nested calls and structured output and returns failures; 0.86 throws them. */
 const line: PiLine = installedPiLine();
@@ -131,8 +136,10 @@ const handlers = new Map<string, Handler[]>();
 before(async () => {
 	if (!hermetic) return;
 	if (!hermetic.binary) assert.fail("PI_BOOST_E2E=1 but no Boost binary was found (set BOOST_BIN)");
-	if (!hermetic.termsAvailable && strict)
-		assert.fail(`PI_BOOST_E2E_STRICT=1: ${hermetic.termsMissingReason}`);
+	if (!hermetic.termsAvailable && termsStrict)
+		assert.fail(
+			strict ? `PI_BOOST_E2E_STRICT=1: ${hermetic.termsMissingReason}` : hermetic.termsMissingReason,
+		);
 
 	restoreEnv = hermetic.apply();
 	// Nothing below may spawn Boost unless this holds.
