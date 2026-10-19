@@ -149,7 +149,11 @@ export const tooOldNotice = (version: BoostVersion) =>
 export interface StillHandled {
 	/** The documents setting is on and Boost's Preview Agreement is accepted. */
 	documents: boolean;
-	/** The mcp setting is on, the flag does not forbid it and Boost is ≥ MCP_MIN_VERSION. */
+	/**
+	 * The mcp setting is on, the flag does not forbid it, Boost is ≥
+	 * MCP_MIN_VERSION and pi calls some MCP tool top-level, not only from
+	 * codemode scripts (compat.ts `mcpReachesRoute`).
+	 */
 	mcp: boolean;
 }
 

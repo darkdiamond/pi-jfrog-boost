@@ -1786,6 +1786,20 @@ test("the shell-off notice names only what is still handled", async () => {
 	await start(oldBoost.stub);
 	assert.deepEqual(oldBoost.noticeTexts(), [shellOffNotice({ documents: true, mcp: false })]);
 
+	// pi 1.x's default codemode exposure: every MCP call is nested inside the
+	// codemode tool and never compacted, so MCP is not said to be handled.
+	const codemode = uiExtension({ config: terms });
+	Object.assign(codemode.stub.pi, {
+		getAllTools: () => [
+			{ name: "codemode", exposure: "model-only" },
+			{ name: "mcp__slack__slack_get_users", exposure: "deferred" },
+		],
+		getActiveTools: () => ["read", "bash", "codemode"],
+	});
+	await start(codemode.stub);
+	assert.deepEqual(codemode.noticeTexts(), [shellOffNotice({ documents: true, mcp: false })]);
+	assert.doesNotMatch(codemode.noticeTexts()[0] ?? "", /MCP/);
+
 	// Both switched off in settings: nothing is said to be handled.
 	const neither = uiExtension({ config: terms, file: { documents: false, mcp: false } });
 	await start(neither.stub);

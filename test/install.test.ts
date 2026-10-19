@@ -9,6 +9,7 @@
  * never run anything; a checksum mismatch never leaves a binary behind.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -35,9 +36,10 @@ import {
 	defaultVerify,
 	downloadUrl,
 	findAsset,
-	INSTALL_COMMAND,
 	INSTALL_OPTIONS,
+	INSTALL_URL,
 	type InstallHost,
+	OFFICIAL_SCRIPT,
 	OFFICIAL_TIMEOUT_MS,
 	releasePlatform,
 	tildePath,
@@ -90,6 +92,8 @@ interface Setup {
 	body?: Buffer;
 	/** What the fake tar does: write a regular file (default), fail, a symlink, or nothing. */
 	tar?: "ok" | "fail" | "symlink" | "empty";
+	/** What `bash -c <official installer>` returns (default: exit 0). */
+	official?: { stdout: string; stderr: string; code: number; killed: boolean };
 	/** What the host's settled readiness says (default: missing). */
 	state?: ReadinessState;
 	binary?: string;
@@ -127,6 +131,7 @@ function setup(options: Setup = {}) {
 		...(options.ui ? { ui: options.ui } : {}),
 		...(options.signal ? { signal: options.signal } : {}),
 		exec: async (command, args) => {
+			if (command === "bash" && options.official) return options.official;
 			if (command !== "tar") return { stdout: "", stderr: "", code: 0, killed: false };
 			const into = args[args.indexOf("-C") + 1] as string;
 			const mode = options.tar ?? "ok";
@@ -429,10 +434,70 @@ test("the official installer is confirmed with what it really does, then run as 
 	assert.match(confirm, /Claude Code, Cursor, Codex, Copilot and\nOpenCode/);
 	const run = s.stub.execCalls[0];
 	assert.equal(run?.command, "bash");
-	assert.deepEqual(run?.args, ["-c", INSTALL_COMMAND]);
+	assert.deepEqual(run?.args, ["-c", OFFICIAL_SCRIPT]);
+	// Downloaded in full before bash runs it: never piped, and any failed
+	// step fails the command.
+	assert.match(OFFICIAL_SCRIPT, /^set -euo pipefail;/);
+	assert.doesNotMatch(OFFICIAL_SCRIPT, /\|\s*(ba)?sh/);
+	assert.match(confirm, /downloads it in full, then runs it with bash/);
+	assert.doesNotMatch(confirm, /\| bash/, "the confirm shows what really runs");
 	assert.equal((run?.options as { timeout?: number } | undefined)?.timeout, OFFICIAL_TIMEOUT_MS);
 	assert.equal(s.fetched.length, 0, "no GitHub lookup for this option");
 	assert.equal(s.refreshes(), 1);
+});
+
+test("a failed official installer is reported as a failure, even with an old Boost already there", async () => {
+	const s = setup({
+		ui: { select: [OFFICIAL], confirm: [true] },
+		binary: "/home/u/.local/bin/boost",
+		state: { kind: "too-old", version: [0, 12, 1] },
+		official: {
+			stdout: "",
+			stderr: "curl: (6) Could not resolve host: boost.jfrog.com\n",
+			code: 6,
+			killed: false,
+		},
+	});
+	await s.run();
+	const message = s.notices().at(-1) ?? "";
+	assert.match(message, /^JFrog Boost was not installed: the official installer failed \(exited 6\)/);
+	assert.match(message, /Could not resolve host/);
+	assert.doesNotMatch(s.notices().join("\n"), /Installed JFrog Boost/);
+	assert.equal(s.refreshes(), 0);
+});
+
+test("the official installer script runs nothing unless the whole download succeeded", (t) => {
+	if (process.platform === "win32") t.skip("bash and a shell-script curl stand-in");
+	const dir = mkdtempSync(join(root, "official-"));
+	const bin = join(dir, "bin");
+	mkdirSync(bin);
+	const ran = join(dir, "ran");
+	const curl = join(bin, "curl");
+	const run = (curlBody: string) => {
+		writeFileSync(curl, `#!/bin/sh\n${curlBody}\n`, { mode: 0o755 });
+		rmSync(ran, { force: true });
+		return spawnSync("bash", ["-c", OFFICIAL_SCRIPT], {
+			env: { PATH: `${bin}:/usr/bin:/bin`, RAN: ran },
+			encoding: "utf8",
+		});
+	};
+	// curl fails outright (DNS): piped, bash would read nothing and exit 0.
+	const dns = run('echo "curl: (6) Could not resolve host" >&2; exit 6');
+	assert.equal(dns.status, 6);
+	assert.equal(existsSync(ran), false);
+	// curl writes part of the script, then the transfer drops (18 = partial
+	// file): piped, bash would already have run that part.
+	const cut = run('while [ "$1" != "-o" ]; do shift; done; echo \'touch "$RAN"\' > "$2"; exit 18');
+	assert.equal(cut.status, 18);
+	assert.equal(existsSync(ran), false);
+	// A complete download runs, from a temp file that is removed afterwards.
+	const ok = run(
+		`[ "$2" = "${INSTALL_URL}" ] || exit 99; while [ "$1" != "-o" ]; do shift; done; echo 'echo "$0" > "$RAN"' > "$2"`,
+	);
+	assert.equal(ok.status, 0, ok.stderr);
+	const script = readFileSync(ran, "utf8").trim();
+	assert.ok(script.length > 0);
+	assert.equal(existsSync(script), false, "the temp file is removed");
 });
 
 test("declining the official installer's confirm runs nothing", async () => {

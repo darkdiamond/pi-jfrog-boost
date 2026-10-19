@@ -12,6 +12,7 @@ import {
 	durationMs,
 	hasStructured,
 	loadout,
+	mcpReachesRoute,
 	messageType,
 	parentToolCallId,
 	structuredContentOf,
@@ -113,5 +114,45 @@ test("deferredTools names only registered tools with deferred exposure", () => {
 			}),
 		),
 		[],
+	);
+});
+
+test("mcpReachesRoute: only an MCP tool pi declares, or tool_search can load, reaches the route", () => {
+	const pi = (getAllTools: unknown, active: string[] = ["read", "bash", "codemode"]) =>
+		({ getAllTools, getActiveTools: () => active }) as unknown as Parameters<typeof mcpReachesRoute>[0];
+	// pi 1.2 registers a `codemode`-exposure server's tools as `deferred`.
+	const codemodeServer = () => [
+		{ name: "read", exposure: "direct" },
+		{ name: "codemode", exposure: "model-only" },
+		{ name: "mcp__slack__slack_get_users", exposure: "deferred" },
+	];
+	assert.equal(mcpReachesRoute(pi(codemodeServer)), false, "default codemode exposure: every call is nested");
+	assert.equal(
+		mcpReachesRoute(pi(codemodeServer, ["read", "codemode", "tool_search"])),
+		true,
+		"tool_search can load it into the active set",
+	);
+	assert.equal(
+		mcpReachesRoute(pi(codemodeServer, ["read", "mcp__slack__slack_get_users"])),
+		true,
+		"already loaded",
+	);
+	assert.equal(
+		mcpReachesRoute(pi(() => [...codemodeServer(), { name: "mcp__gh__search", exposure: "direct" }])),
+		true,
+		"a direct tool",
+	);
+	assert.equal(mcpReachesRoute(pi(() => [{ name: "mcp__x__y", exposure: "hidden" }])), false);
+	assert.equal(mcpReachesRoute(pi(() => [{ name: "read", exposure: "direct" }])), false, "no MCP tool yet");
+	// 0.86: no codemode, so every MCP call is top-level.
+	assert.equal(mcpReachesRoute(pi(undefined)), true, "a pi without getAllTools");
+	assert.equal(mcpReachesRoute(pi(() => [{ name: "read" }])), true, "a pi without exposure");
+	assert.equal(
+		mcpReachesRoute(
+			pi(() => {
+				throw new Error("not bound yet");
+			}),
+		),
+		true,
 	);
 });

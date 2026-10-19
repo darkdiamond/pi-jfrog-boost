@@ -70,6 +70,7 @@ import {
 	deferredTools,
 	hasStructured,
 	loadout,
+	mcpReachesRoute,
 	parentToolCallId,
 	structuredContentOf,
 	type ToolResultPatch,
@@ -269,7 +270,9 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	/**
 	 * What still works while shell compaction is off, so the shell-off notice
 	 * names only what is active: documents need their setting and the terms,
-	 * MCP its setting, a flag that does not forbid it and Boost ≥ 0.15.3.
+	 * MCP its setting, a flag that does not forbid it, Boost ≥ 0.15.3 and an
+	 * MCP tool that pi calls top-level (`mcpReachesRoute`): under pi 1.x's
+	 * default codemode exposure every MCP call is nested and never compacted.
 	 */
 	const stillHandled = (version: BoostVersion): StillHandled => {
 		const effective = settings.effective();
@@ -279,7 +282,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			mcp:
 				effective.mcp &&
 				resolveFlag(cfg, MCP_FILTERING_FLAG, env).value !== false &&
-				atLeast(version, MCP_MIN_VERSION),
+				atLeast(version, MCP_MIN_VERSION) &&
+				mcpReachesRoute(pi),
 		};
 	};
 	const readiness =

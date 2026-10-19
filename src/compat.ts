@@ -109,6 +109,40 @@ export function deferredTools(pi: ExtensionAPI): string[] {
 	}
 }
 
+/**
+ * Whether an `mcp__*` call can reach the tool_result route as a top-level
+ * call. On pi 1.x the default MCP exposure is `codemode`: the tools are only
+ * called from codemode scripts, every such call is nested, and nested calls
+ * are never compacted. pi registers those tools with `deferred` exposure, so
+ * one counts only when it is declared (`direct`, or loaded into the active
+ * set) or when `tool_search` is active to load it. `false` while no MCP tool
+ * is registered on a pi that reports exposure: nothing is known to reach the
+ * route. A pi without `getAllTools` or exposure (0.86) has no codemode, so
+ * every call is top-level: `true`, as on a throw.
+ */
+export function mcpReachesRoute(pi: ExtensionAPI): boolean {
+	try {
+		const all = (pi as unknown as Bag).getAllTools;
+		if (typeof all !== "function") return true;
+		const tools: unknown = all.call(pi);
+		if (!Array.isArray(tools)) return true;
+		const registered = tools.map(bag);
+		if (!registered.some((tool) => typeof tool?.exposure === "string")) return true;
+		const getActive = (pi as unknown as Bag).getActiveTools;
+		const listed: unknown = typeof getActive === "function" ? getActive.call(pi) : [];
+		const active = new Set(strings(listed) ?? []);
+		const searchable = active.has("tool_search");
+		return registered.some((tool) => {
+			const name = tool?.name;
+			if (typeof name !== "string" || !name.startsWith("mcp__")) return false;
+			if (tool?.exposure === "direct" || active.has(name)) return true;
+			return tool?.exposure === "deferred" && searchable;
+		});
+	} catch {
+		return true;
+	}
+}
+
 /** Whether this pi can wrap tool rendering (pi ≥ 1.0.1), which badges need. */
 export function canRenderTools(pi: ExtensionAPI): boolean {
 	return typeof (pi as unknown as Bag).registerToolRenderer === "function";

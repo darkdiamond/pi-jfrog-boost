@@ -80,9 +80,10 @@ asks before doing anything and offers four choices:
    That is all: it does not run JFrog's `install.sh`, change your shell
    startup files or PATH, run `boost init`, add hooks to other agents, or
    accept the Preview Agreement. macOS and Linux, amd64 and arm64.
-2. **Official installer, unchanged.** Runs
-   `curl -fsSL https://boost.jfrog.com/install.sh | bash` in your real
-   environment. It may add `~/.local/bin` to your shell rc files, and if
+2. **Official installer, unchanged.** Downloads
+   `https://boost.jfrog.com/install.sh` in full, then runs it with `bash` in
+   your real environment (a failed or cut-off download runs nothing and is
+   reported as a failure). It may add `~/.local/bin` to your shell rc files, and if
    `~/.local/bin` is already on your PATH it runs `boost init --accept-terms`,
    which accepts the Preview Agreement on your behalf and installs Boost hooks
    for Claude Code, Cursor, Codex, Copilot and OpenCode.

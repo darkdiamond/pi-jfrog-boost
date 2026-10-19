@@ -38,6 +38,21 @@ import { classifyProbe, type ReadinessState } from "./health.ts";
 export const INSTALL_URL = "https://boost.jfrog.com/install.sh";
 export const INSTALL_DOCS = "https://boost.jfrog.com/llms-install.txt";
 export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_URL} | bash`;
+/**
+ * What the "Official installer" option actually runs: JFrog's install.sh,
+ * unchanged, but downloaded in full before bash sees a byte of it. Piped
+ * straight into bash, a transfer cut mid-stream runs a truncated script, and
+ * a failed curl (DNS, TLS, 404) leaves bash an empty stdin that exits 0, so a
+ * failure would be reported as an install. Here any failed step fails the
+ * whole command, and the temp file is removed either way.
+ */
+export const OFFICIAL_SCRIPT = [
+	"set -euo pipefail",
+	'f="$(mktemp)"',
+	"trap 'rm -f \"$f\"' EXIT",
+	`curl -fsSL ${INSTALL_URL} -o "$f"`,
+	'bash "$f"',
+].join("; ");
 export const RELEASES_API = "https://api.github.com/repos/jfrog/boost/releases/latest";
 export const RELEASES_PAGE = "https://github.com/jfrog/boost/releases/latest";
 /** Every asset URL must start with this; anything else falls back to the commands text. */
@@ -138,8 +153,10 @@ export function confirmText(view: ConfirmView): { title: string; message: string
 			"  • it does not run `boost init`, so no hooks are added to other agents",
 			"  • it does not accept JFrog's Preview Agreement for you",
 			"",
-			"MCP compaction works right away (Boost ≥ 0.15.3). Shell-output compaction is",
-			"off by default in Boost; turn it on for pi with /boost settings → Shell output.",
+			"MCP results are compacted right away (Boost ≥ 0.15.3) when pi calls MCP tools",
+			"directly or loads them with tool_search; calls made inside codemode scripts",
+			"(pi's default MCP exposure) are not. Shell-output compaction is off by",
+			"default in Boost; turn it on for pi with /boost settings → Shell output.",
 			"PDF/Office conversion needs the agreement: in a terminal run",
 			"`boost init --dry-run`, then `boost init`.",
 			`Terms: ${TERMS_URL}`,
@@ -149,9 +166,10 @@ export function confirmText(view: ConfirmView): { title: string; message: string
 
 /** What JFrog's installer does, said before it runs (NP7). */
 export const OFFICIAL_CONFIRM_MESSAGE = [
-	"This runs JFrog's official installer, unchanged, in your real environment:",
+	"This runs JFrog's official installer, unchanged, in your real environment.",
+	"pi-jfrog-boost downloads it in full, then runs it with bash:",
 	"",
-	`    ${INSTALL_COMMAND}`,
+	`    curl -fsSL ${INSTALL_URL} -o <temp file> && bash <temp file>`,
 	"",
 	"It installs the boost binary into ~/.local/bin and may add ~/.local/bin to your",
 	"shell rc files. If ~/.local/bin is already on your PATH, it also runs",
@@ -657,7 +675,7 @@ export function createInstaller(pi: ExtensionAPI, host: InstallHost, deps: Insta
 			return;
 		}
 		say(ctx, "Running JFrog's installer…");
-		const result = await pi.exec("bash", ["-c", INSTALL_COMMAND], {
+		const result = await pi.exec("bash", ["-c", OFFICIAL_SCRIPT], {
 			timeout: OFFICIAL_TIMEOUT_MS,
 			...(ctx.signal ? { signal: ctx.signal } : {}),
 		});
