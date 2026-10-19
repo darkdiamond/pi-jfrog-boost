@@ -8,7 +8,6 @@ import { test } from "node:test";
 import {
 	BUCKETS,
 	bucketFor,
-	bucketSavings,
 	createStats,
 	emptySnapshot,
 	formatStats,
@@ -80,14 +79,14 @@ test("a result that grew saves nothing, and does not cancel what others saved", 
 	// A .docx pi read as its one-line notice, converted to a long page.
 	stats.processed("documents", 5_000, 20_000, "converted");
 	const snap = stats.snapshot();
-	assert.equal(bucketSavings(snap.buckets.bash), 8_000);
-	assert.equal(bucketSavings(snap.buckets.documents), 0);
+	assert.equal(snap.buckets.bash.saved, 8_000);
+	assert.equal(snap.buckets.documents.saved, 0);
 	assert.equal(totals(snap).saved, 8_000, "not 8000 - 15000");
 	assert.equal(snap.buckets.documents.bytesOut, 20_000, "the sizes themselves stay as they were");
 });
 
-test("an entry written before `saved` existed falls back to its net; a bogus one is dropped", () => {
-	const legacy = {
+test("an entry without `saved`, or with more saved than went in, is dropped", () => {
+	const bucket = {
 		seen: 1,
 		compacted: 1,
 		converted: 0,
@@ -95,10 +94,16 @@ test("an entry written before `saved` existed falls back to its net; a bogus one
 		failed: 0,
 		bytesIn: 900,
 		bytesOut: 100,
+		saved: 800,
 	};
-	const restored = parseSnapshot({ v: 1, buckets: { bash: legacy } });
-	assert.equal(restored?.buckets.bash.saved, 800);
-	const inflated = parseSnapshot({ v: 1, buckets: { bash: { ...legacy, saved: 901 } } });
+	assert.equal(parseSnapshot({ v: 1, buckets: { bash: bucket } })?.buckets.bash.saved, 800);
+	const { saved: _saved, ...missing } = bucket;
+	assert.equal(
+		parseSnapshot({ v: 1, buckets: { bash: missing } })?.buckets.bash.seen,
+		0,
+		"`saved` is required",
+	);
+	const inflated = parseSnapshot({ v: 1, buckets: { bash: { ...bucket, saved: 901 } } });
 	assert.equal(inflated?.buckets.bash.seen, 0, "more saved than went in is not trusted");
 });
 

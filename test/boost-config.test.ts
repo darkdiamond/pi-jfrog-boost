@@ -166,8 +166,6 @@ test("the shell gate: on, off, and auto by flag and by Boost version", () => {
 
 test("the config path is always $HOME/.boost/config.toml", () => {
 	assert.equal(boostConfigPath(join("/h", "me")), join("/h", "me", ".boost", "config.toml"));
-	const reader = createConfigReader({ home: () => root });
-	assert.equal(reader.path(), join(root, ".boost", "config.toml"));
 });
 
 /** A ConfigFs over one real file that counts reads. */
@@ -201,13 +199,11 @@ test("the file is re-parsed only when its mtime or size changes", () => {
 	utimesSync(path, new Date(2031, 0, 1), new Date(2031, 0, 1));
 	assert.equal(reader.read().termsAccepted, false, "a changed file is read again");
 	assert.equal(counts.read, 2);
-	assert.equal(reader.mtimeMs(), statSync(path).mtimeMs);
 });
 
 test("a missing file is an empty config, and so is one over 1 MiB", () => {
 	const missing = createConfigReader({ path: join(root, "nope.toml") });
 	assert.equal(missing.read().termsAccepted, false);
-	assert.equal(missing.mtimeMs(), undefined);
 
 	const big = join(root, "big.toml");
 	writeFileSync(big, `accept_terms = "yes"\n# ${"x".repeat(MAX_CONFIG_BYTES)}\n`);

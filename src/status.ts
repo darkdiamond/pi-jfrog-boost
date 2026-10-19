@@ -21,7 +21,6 @@ import {
 	MIN_BOOST_VERSION,
 	VALIDATED_BOOST_VERSION,
 } from "./boost-binary.ts";
-import { FLAGS_TTL_MS, parseGoDuration } from "./boost-client.ts";
 import {
 	type BoostConfig,
 	CLI_FILTERING_FLAG,
@@ -30,8 +29,9 @@ import {
 	type ShellGate,
 } from "./boost-config.ts";
 import type { BadReason, BreakerState, ReadinessState } from "./health.ts";
+import { tildePath } from "./install.ts";
 import type { OffReason, Settings } from "./settings.ts";
-import { BUCKETS, bucketSavings, type StatsSnapshot, totals } from "./stats.ts";
+import { BUCKETS, percent, type StatsSnapshot, totals } from "./stats.ts";
 
 /**
  * pi's status slot; also what pi-powerline-footer's `customItems` match on:
@@ -51,11 +51,6 @@ export function formatTokens(tokens: number): string {
 
 /** Removed characters as an estimated token count, formatted. */
 export const tokensOf = (chars: number): string => formatTokens(chars / CHARS_PER_TOKEN);
-
-/** `41` for 41 %, rounded; 0 when nothing was measured. */
-export function percent(removed: number, original: number): number {
-	return original > 0 ? Math.round((removed / original) * 100) : 0;
-}
 
 // ---------------------------------------------------------------------------
 // Footer (§10.1)
@@ -121,8 +116,6 @@ export function footerText(view: FooterView): string | undefined {
  */
 export interface FooterPainter {
 	paint(ctx: ExtensionContext, text: string | undefined): void;
-	/** What is shown now, as far as this painter knows. */
-	current(): string | undefined;
 }
 
 export function createFooterPainter(): FooterPainter {
@@ -138,7 +131,6 @@ export function createFooterPainter(): FooterPainter {
 				/* fail open: a status line is never worth an error */
 			}
 		},
-		current: () => shown,
 	};
 }
 
@@ -200,7 +192,6 @@ const PAUSE_REASONS: Readonly<Record<BadReason, string>> = {
 export interface Notices {
 	/** Show `message` unless `id` was already shown. Returns whether it was shown now. */
 	show(ctx: ExtensionContext, id: NoticeId, message: string, level: NoticeLevel): boolean;
-	shown(id: NoticeId): boolean;
 }
 
 export function createNotices(): Notices {
@@ -218,7 +209,6 @@ export function createNotices(): Notices {
 				return false;
 			}
 		},
-		shown: (id) => given.has(id),
 	};
 }
 
@@ -233,31 +223,6 @@ export function processNotices(): Notices {
 	const store = globalThis as unknown as Record<symbol, Notices | undefined>;
 	store[key] ??= createNotices();
 	return store[key];
-}
-
-// ---------------------------------------------------------------------------
-// Flag freshness (§8.3 amendment)
-
-/**
- * How old Boost's fetched feature flags are, and whether that is past the
- * TTL in effect. pi's own hot-path calls never refresh stale flags (the
- * child env disables fetching for them, or every call would stall offline),
- * so this is what `/boost status` reports for the user to judge.
- * `ageMs` is undefined when the flags were never fetched or the timestamp is
- * unreadable.
- */
-export function flagsFreshness(
-	config: BoostConfig,
-	env: NodeJS.ProcessEnv,
-	now: number,
-): { stale: boolean; ageMs?: number } {
-	const at = config.flagsUpdatedAt ? Date.parse(config.flagsUpdatedAt) : Number.NaN;
-	if (Number.isNaN(at)) return { stale: true };
-	const ageMs = Math.max(0, now - at);
-	const userTtl = env.BOOST_FEATURE_FLAGS_TTL ? parseGoDuration(env.BOOST_FEATURE_FLAGS_TTL) : undefined;
-	// A TTL Go would parse but this cannot is the user's business; say nothing.
-	if (env.BOOST_FEATURE_FLAGS_TTL && userTtl === undefined) return { stale: false, ageMs };
-	return { stale: ageMs >= (userTtl ?? FLAGS_TTL_MS), ageMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,17 +264,10 @@ const LABEL_WIDTH = 10;
 const line = (label: string, text: string) => `  ${label.padEnd(LABEL_WIDTH)}${text}`;
 /** Fields that share a line are spaced like the §10.2 sample. */
 const GAP = "    ";
-const onOff = (value: boolean) => (value ? "on" : "off");
+export const onOff = (value: boolean) => (value ? "on" : "off");
 
 /** Skip reasons always listed, even at 0, so their absence is visible too. */
 const STANDING_SKIPS = ["small", "exact", "html", "bypass", "shell-off", "busy", "paused"];
-
-function tildePath(path: string, home: string): string {
-	if (home && (path === home || path.startsWith(`${home}/`) || path.startsWith(`${home}\\`))) {
-		return `~${path.slice(home.length)}`;
-	}
-	return path;
-}
 
 /** The one-word state in the report's title. */
 export function stateLabel(view: Pick<StatusView, "readiness" | "off" | "breaker">): string {
@@ -467,7 +425,7 @@ function sessionLine(view: StatusView): string {
 	// headline can never read less than its parts (stats.ts `saved`).
 	const removed = all.saved;
 	if (removed === 0) return "nothing saved yet";
-	const parts = BUCKETS.map((name) => [name, bucketSavings(view.stats.buckets[name])] as const)
+	const parts = BUCKETS.map((name) => [name, view.stats.buckets[name].saved] as const)
 		.filter(([, saved]) => saved > 0)
 		.map(([name, saved]) => `${name} ${tokensOf(saved)}`);
 	return `~${tokensOf(removed)} tokens saved (${percent(removed, all.bytesIn)}%) — ${parts.join(" · ")}`;

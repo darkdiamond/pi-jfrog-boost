@@ -20,6 +20,7 @@
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BoostCall } from "./boost-client.ts";
+import { envList } from "./boost-config.ts";
 import { stripAnsi } from "./content.ts";
 import type { ReadinessState } from "./health.ts";
 import {
@@ -33,6 +34,7 @@ import {
 	SHELL_MODES,
 	type ShellMode,
 } from "./settings.ts";
+import { onOff } from "./status.ts";
 
 export const SUBCOMMANDS = [
 	"status",
@@ -163,8 +165,6 @@ const LABELS: Readonly<Record<SettingsKey, string>> = {
 /** The keys edited with `ui.input` rather than cycled. */
 const INPUT_KEYS: ReadonlySet<SettingsKey> = new Set(["minBytes", "mcpExclude", "extraTools"]);
 
-const onOff = (value: boolean) => (value ? "on" : "off");
-
 function valueText(key: SettingsKey, settings: Settings, shellAuto: boolean | undefined): string {
 	const value = settings[key];
 	if (key === "shell") {
@@ -200,11 +200,7 @@ export const OBSERVE_CONFIRM =
 
 /** `a, b ,c` → `["a","b","c"]`; `none` → `[]`. */
 function parseList(text: string): string[] {
-	if (text.trim().toLowerCase() === "none") return [];
-	return text
-		.split(",")
-		.map((item) => item.trim())
-		.filter(Boolean);
+	return text.trim().toLowerCase() === "none" ? [] : envList(text);
 }
 
 /** The effective settings with their sources, for a session without a UI. */

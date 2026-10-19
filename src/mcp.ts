@@ -50,14 +50,17 @@
  * (§6.3), and replaced only when Boost's version of the whole output fits
  * within pi's 20 KiB; otherwise pi's truncated text stands.
  */
-import { realpathSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, sep } from "node:path";
 import { atLeast, type BoostVersion, MCP_MIN_VERSION } from "./boost-binary.ts";
 import { type BoostCall, MAX_INPUT_BYTES } from "./boost-client.ts";
-import { type ContentBlock, isMeaningfulReduction, isPlainObject, parseMarker } from "./content.ts";
+import {
+	type ContentBlock,
+	isMeaningfulReduction,
+	isPlainObject,
+	parseMarker,
+	textBlocks,
+} from "./content.ts";
 import { excludedBy } from "./settings.ts";
+import { type Compaction, type PiTempFileDeps, readPiTempFile } from "./shell.ts";
 
 /** pi names every MCP tool `mcp__<server>__<tool>` (`createMcpToolName`). */
 export const MCP_TOOL_PREFIX = "mcp__";
@@ -81,7 +84,7 @@ const PI_TRUNCATED = /^Warning: truncated output \(original token count: \d+\)\n
  * hex>.txt` (pi 1.2.0 `saveToTempFile` → `utils/output-files.js`
  * `createOutputFilePath("pi-mcp", ".txt")`).
  */
-const PI_MCP_OUTPUT_FILE = /^pi-mcp-[0-9a-f]{16}\.txt$/;
+export const PI_MCP_OUTPUT_FILE = /^pi-mcp-[0-9a-f]{16}\.txt$/;
 
 export function isMcpTool(toolName: string): boolean {
 	return toolName.startsWith(MCP_TOOL_PREFIX);
@@ -135,16 +138,6 @@ export function mcpSkip(r: McpGateInput): McpSkipReason | undefined {
 
 // ---------------------------------------------------------------------------
 // Payload and reply
-
-type TextBlock = Extract<ContentBlock, { type: "text" }>;
-
-const isTextBlock = (block: ContentBlock): block is TextBlock =>
-	block.type === "text" && typeof (block as { text?: unknown }).text === "string";
-
-/** The text of each text block, in order. */
-export function textBlocks(content: readonly ContentBlock[]): string[] {
-	return content.filter(isTextBlock).map((block) => block.text);
-}
 
 export interface McpPayloadFields {
 	sessionId: string;
@@ -200,16 +193,6 @@ export function parseMcpReply(stdout: string): string | undefined {
 // ---------------------------------------------------------------------------
 // pi's own truncation
 
-export interface FullOutputDeps {
-	/** Where pi writes its full-output files; defaults to `os.tmpdir()`, read per call. */
-	tmpdir?: () => string;
-	readFile?: (path: string) => Promise<string>;
-	realpath?: (path: string) => string;
-	stat?: (path: string) => { isFile(): boolean; size: number; uid?: number };
-	/** The current user's id, or undefined where there is none (Windows); defaults to `process.getuid`. */
-	uid?: () => number | undefined;
-}
-
 /**
  * The full-output file pi saved for a truncated MCP result, or `null` when
  * the result was truncated but its file cannot be used, or undefined when
@@ -221,60 +204,12 @@ export function piTruncatedPath(text: string, details: unknown): string | null |
 	return typeof path === "string" && path ? path : null;
 }
 
-/**
- * The text of pi's full-output file, or undefined when it must not be read.
- * `details` is the tool's to fill, and any `mcp__*` tool can fill it (on pi
- * 0.86 every one comes from an extension), so the path is checked before
- * anything in it goes to Boost — whose DB keeps it and whose sync uploads
- * it — or replaces the result. Only a file that is, after resolving links:
- *
- *   - inside the temp directory pi writes to;
- *   - named the way pi names these files (`pi-mcp-<16 hex>.txt`), so an
- *     unrelated temp file of another program's is never picked up;
- *   - a regular file owned by this user (pi creates it 0600), where the
- *     platform has user ids;
- *   - no larger than the 1 MiB every route is capped at.
- *
- * A pi release that names the file differently only costs the re-filter:
- * the result is then left as pi truncated it.
- */
-export async function readFullOutput(path: string, deps: FullOutputDeps = {}): Promise<string | undefined> {
-	const realpath = deps.realpath ?? realpathSync;
-	const stat = deps.stat ?? statSync;
-	const read = deps.readFile ?? ((p: string) => readFile(p, "utf8"));
-	try {
-		const root = realpath((deps.tmpdir ?? tmpdir)());
-		const real = realpath(path);
-		if (!real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) return undefined;
-		if (!PI_MCP_OUTPUT_FILE.test(basename(real))) return undefined;
-		const info = stat(real);
-		if (!info.isFile() || info.size > MCP_MAX_BYTES) return undefined;
-		const me = (deps.uid ?? (() => process.getuid?.()))();
-		if (me !== undefined && info.uid !== undefined && info.uid !== me) return undefined;
-		const text = await read(real);
-		return text.includes("\0") ? undefined : text;
-	} catch {
-		return undefined;
-	}
-}
-
 // ---------------------------------------------------------------------------
 // The route
 
-export interface McpCompaction {
-	/** The single text block that replaces every text block. */
-	text: string;
-	/** Characters of text before (what the model would have seen) and after. */
-	before: number;
-	after: number;
-	retrieveId?: number;
-	/** Built from pi's full-output file rather than its truncated text. */
-	full?: true;
-}
-
 export interface McpOutcome {
 	call?: BoostCall;
-	compaction?: McpCompaction;
+	compaction?: Compaction;
 	/**
 	 * Why the result was left alone, when that was decided here rather than by
 	 * the router or the client: `truncated` when pi's own truncated text
@@ -305,7 +240,7 @@ export interface McpRequest {
 export async function compactMcpResult(
 	request: McpRequest,
 	hook: (payload: string) => Promise<BoostCall>,
-	deps: FullOutputDeps = {},
+	deps: PiTempFileDeps = {},
 ): Promise<McpOutcome> {
 	const texts = textBlocks(request.content);
 	const shown = texts.join("\n");
@@ -314,7 +249,10 @@ export async function compactMcpResult(
 	const fullPath = piTruncatedPath(shown, request.details);
 	if (fullPath === null) return { skipped: "truncated" };
 	if (fullPath !== undefined) {
-		const full = await readFullOutput(fullPath, deps);
+		// Only a file named the way pi names these (`pi-mcp-<16 hex>.txt`) and
+		// within the 1 MiB every route is capped at; a pi release that names it
+		// differently only costs the re-filter.
+		const full = await readPiTempFile(fullPath, { maxBytes: MCP_MAX_BYTES, name: PI_MCP_OUTPUT_FILE }, deps);
 		if (full === undefined || Buffer.byteLength(full) < MCP_MIN_BYTES) return { skipped: "truncated" };
 		// pi saved the text blocks joined with "\n": one block says the same.
 		sent = [full];

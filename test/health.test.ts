@@ -337,8 +337,7 @@ test("call classification: non-zero exit is not bad, abort is neutral", () => {
 
 test("3 consecutive bad calls open the breaker for 5 min; a good one in between resets the count", () => {
 	let now = 0;
-	const opened: [string, number][] = [];
-	const breaker = createBreaker({ now: () => now, onOpen: (reason, ms) => opened.push([reason, ms]) });
+	const breaker = createBreaker({ now: () => now });
 	breaker.record(timeout, 0);
 	breaker.record(timeout, 0);
 	breaker.record(ran(), 0);
@@ -351,7 +350,6 @@ test("3 consecutive bad calls open the breaker for 5 min; a good one in between 
 	assert.equal(breaker.state().kind, "closed");
 	breaker.record(ran({ code: null, spawnError: true }), 0);
 	assert.deepEqual(breaker.state(), { kind: "open", until: BREAKER_OPEN_MS, reason: "error" });
-	assert.deepEqual(opened, [["error", BREAKER_OPEN_MS]]);
 	assert.equal(breaker.allow(), false);
 	now = BREAKER_OPEN_MS - 1;
 	assert.equal(breaker.allow(), false);
@@ -374,15 +372,22 @@ test("half-open lets exactly one trial through; a good trial closes", () => {
 
 test("a bad trial re-opens with the duration doubled, capped at 30 min", () => {
 	let now = 0;
-	const opened: number[] = [];
-	const breaker = createBreaker({ now: () => now, onOpen: (_reason, ms) => opened.push(ms) });
+	const breaker = createBreaker({ now: () => now });
+	/** How long the breaker is open for, from now; undefined when it is not open. */
+	const openFor = () => {
+		const state = breaker.state();
+		return state.kind === "open" ? state.until - now : undefined;
+	};
+	const opened: (number | undefined)[] = [];
 	for (let i = 0; i < 3; i++) breaker.record(timeout, 0);
+	opened.push(openFor());
 	for (let round = 0; round < 4; round++) {
 		const state = breaker.state();
 		assert.equal(state.kind, "open");
 		now = state.kind === "open" ? state.until : now;
 		assert.equal(breaker.allow(), true);
 		breaker.record(timeout, 0);
+		opened.push(openFor());
 	}
 	assert.deepEqual(
 		opened,
@@ -395,7 +400,7 @@ test("a bad trial re-opens with the duration doubled, capped at 30 min", () => {
 	assert.equal(breaker.allow(), true);
 	breaker.record(ran(), 0);
 	for (let i = 0; i < 3; i++) breaker.record(timeout, 0);
-	assert.equal(opened.at(-1), BREAKER_OPEN_MS);
+	assert.equal(openFor(), BREAKER_OPEN_MS);
 });
 
 test("a neutral trial (abort) hands the trial to the next call", () => {

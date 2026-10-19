@@ -22,7 +22,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { canRenderTools } from "./compat.ts";
 import { isPlainObject } from "./content.ts";
-import { formatTokens } from "./status.ts";
+import { percent } from "./stats.ts";
+import { tokensOf } from "./status.ts";
 import { LEGACY_OFFICE } from "./tools.ts";
 
 /** pi-tui's `Component`, as much of it as the wrapper touches. */
@@ -60,8 +61,6 @@ type Resolver = (
 	next: () => ToolRenderersLike | undefined,
 ) => ToolRenderersLike | undefined;
 
-const CHARS_PER_TOKEN = 4;
-
 /** `PDF` from `.pdf`. */
 const label = (ext: unknown) =>
 	typeof ext === "string" && ext ? ext.replace(/^\./, "").toUpperCase() : "file";
@@ -74,7 +73,7 @@ function saving(boost: Record<string, unknown>): string | undefined {
 	const after = num(boost.after);
 	if (before === undefined || after === undefined || before <= after) return undefined;
 	const removed = before - after;
-	return `−${formatTokens(removed / CHARS_PER_TOKEN)} tokens (${Math.round((removed / before) * 100)}%)`;
+	return `−${tokensOf(removed)} tokens (${percent(removed, before)}%)`;
 }
 
 const retrieve = (boost: Record<string, unknown>) => {

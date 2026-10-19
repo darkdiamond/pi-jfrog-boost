@@ -14,10 +14,12 @@ import {
 	isWebFetch,
 	programName,
 	programOf,
-	readFullOutputFile,
+	readPiTempFile,
 	splitSegments,
 	words,
 } from "../src/shell.ts";
+
+const SHELL_LIMITS = { maxBytes: FULL_OUTPUT_MAX_BYTES };
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -499,7 +501,7 @@ test("a path outside the temp directory is never read, even through a link", asy
 	// `<pi tmp>/../outside-…/x.log` is spelled under the temp directory but is not in it.
 	const dotted = `${PI_TMP}/../${outside.slice(TMP.length + 1)}`;
 	for (const path of [outside, link, dotted]) {
-		assert.equal(await readFullOutputFile(path, narrowed), undefined, path);
+		assert.equal(await readPiTempFile(path, SHELL_LIMITS, narrowed), undefined, path);
 		const boost = recorder(() => reply("tail summary"));
 		const outcome = await compactFullOutput(
 			{ text: truncated(path), path, htmlAllowed: false },
@@ -510,7 +512,7 @@ test("a path outside the temp directory is never read, even through a link", asy
 		assert.equal(outcome.fullSkipped, "unreadable");
 	}
 	// A file that is in the temp directory is read.
-	assert.equal(await readFullOutputFile(saved(FULL_RUN, PI_TMP), narrowed), FULL_RUN);
+	assert.equal(await readPiTempFile(saved(FULL_RUN, PI_TMP), SHELL_LIMITS, narrowed), FULL_RUN);
 });
 
 test("a relative path is never read, even one that names a file inside the temp directory", async () => {
@@ -523,23 +525,27 @@ test("a relative path is never read, even one that names a file inside the temp 
 		...narrowed,
 		realpath: (p: string) => realpathSync(resolve(PI_TMP, p)),
 	};
-	assert.equal(await readFullOutputFile(inside, fromTmp), FULL_RUN, "the absolute spelling is read");
-	assert.equal(await readFullOutputFile(basename(inside), fromTmp), undefined);
+	assert.equal(
+		await readPiTempFile(inside, SHELL_LIMITS, fromTmp),
+		FULL_RUN,
+		"the absolute spelling is read",
+	);
+	assert.equal(await readPiTempFile(basename(inside), SHELL_LIMITS, fromTmp), undefined);
 	// The same through the real cwd, where one relative spelling exists
 	// (not across Windows drives, where `relative` returns an absolute path).
 	const fromCwd = relative(process.cwd(), inside);
 	if (!isAbsolute(fromCwd)) {
 		assert.equal(realpathSync(fromCwd), realpathSync(inside), "the relative spelling does resolve to it");
-		assert.equal(await readFullOutputFile(fromCwd, narrowed), undefined, fromCwd);
+		assert.equal(await readPiTempFile(fromCwd, SHELL_LIMITS, narrowed), undefined, fromCwd);
 	}
 });
 
 test("a file over 2 MiB is not read", async () => {
 	const line = "ok 1 - case passes\n";
 	const fits = saved(line.repeat(Math.floor(FULL_OUTPUT_MAX_BYTES / line.length)));
-	assert.ok(await readFullOutputFile(fits));
+	assert.ok(await readPiTempFile(fits, SHELL_LIMITS));
 	const over = saved("x".repeat(FULL_OUTPUT_MAX_BYTES + 1));
-	assert.equal(await readFullOutputFile(over), undefined);
+	assert.equal(await readPiTempFile(over, SHELL_LIMITS), undefined);
 	const boost = recorder(() => reply("tail summary"));
 	const outcome = await compactFullOutput(
 		{ text: truncated(over), path: over, htmlAllowed: false },
@@ -552,9 +558,9 @@ test("a file over 2 MiB is not read", async () => {
 test("a file owned by another user is not read", async () => {
 	const path = saved(FULL_RUN);
 	const stat = () => ({ isFile: () => true, size: 10, uid: 4242 });
-	assert.equal(await readFullOutputFile(path, { stat, uid: () => 501 }), undefined);
+	assert.equal(await readPiTempFile(path, SHELL_LIMITS, { stat, uid: () => 501 }), undefined);
 	assert.equal(
-		await readFullOutputFile(path, { stat, uid: () => undefined }),
+		await readPiTempFile(path, SHELL_LIMITS, { stat, uid: () => undefined }),
 		FULL_RUN,
 		"no user ids (Windows)",
 	);

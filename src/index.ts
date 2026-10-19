@@ -59,6 +59,7 @@ import { type BoostCall, type BoostClient, createBoostClient, type HookMeta } fr
 import {
 	type ConfigReader,
 	createConfigReader,
+	flagsFreshness,
 	MCP_FILTERING_FLAG,
 	resolveFlag,
 	shellGate,
@@ -117,7 +118,6 @@ import {
 	createFooterPainter,
 	createNotices,
 	filtersDisabledNotice,
-	flagsFreshness,
 	footerText,
 	MISSING_NOTICE,
 	type Notices,
@@ -432,6 +432,16 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	}
 
+	/** The shell-off notice when Boost's flag or default (not the user's setting) has shell compaction off. */
+	const shellOffByBoost = (): string | undefined => {
+		const state = readiness.state();
+		if (state.kind !== "ready") return undefined;
+		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
+		return !gate.on && gate.reason !== "setting-off"
+			? shellOffNotice(stillHandled(state.version))
+			: undefined;
+	};
+
 	/**
 	 * Notices that depend on what the probe found (§10.4): a Boost too old to
 	 * use, shell compaction off on a working Boost, filters Boost switched off
@@ -447,10 +457,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		if (state.kind !== "ready") return;
 		// Only when the gate is off by Boost's flag or default: a user who set
 		// `shell: "off"` themselves needs no telling how to turn it on.
-		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
-		if (!gate.on && gate.reason !== "setting-off") {
-			notices.show(ctx, "shell-off", shellOffNotice(stillHandled(state.version)), "info");
-		}
+		const shellOff = shellOffByBoost();
+		if (shellOff) notices.show(ctx, "shell-off", shellOff, "info");
 		const disabled = config.read().disabledFilters;
 		if (disabled.length > 0) {
 			notices.show(ctx, "filters-disabled", filtersDisabledNotice(disabled), "info");
@@ -926,7 +934,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 */
 	function compactedPatch(
 		event: { content: ContentBlock[]; details?: unknown },
-		compaction: Compaction & { full?: true },
+		compaction: Compaction,
 		kind: "compacted" | "mcp" = "compacted",
 	): ToolResultPatch {
 		const patch: ToolResultPatch = { content: withText(event.content, compaction.text) };
@@ -1079,16 +1087,6 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		return uiState();
 	};
 
-	/** The shell-off notice when Boost's flag or default (not the user's setting) has shell compaction off. */
-	const shellOffByBoost = (): string | undefined => {
-		const state = readiness.state();
-		if (state.kind !== "ready") return undefined;
-		const gate = shellGate(settings.effective().shell, config.read(), env, state.version);
-		return !gate.on && gate.reason !== "setting-off"
-			? shellOffNotice(stillHandled(state.version))
-			: undefined;
-	};
-
 	const install = createInstaller(
 		pi,
 		{
@@ -1172,43 +1170,35 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		},
 		print,
 	};
-	const boostCommand = createBoostCommand(host);
+	/**
+	 * A command handler that never rejects: a dialog torn down mid-command (a
+	 * stale context) or a bug is said once, never left as an unhandled
+	 * rejection in pi. Print mode (`pi -p "/boost install"`) has no UI, and
+	 * silence there would look like success.
+	 */
+	const guarded =
+		(label: string, run: (args: string, ctx: ExtensionCommandContext) => Promise<void>) =>
+		async (args: string, ctx: ExtensionCommandContext) => {
+			try {
+				await run(args, ctx);
+			} catch (error) {
+				try {
+					const text = `pi-jfrog-boost: ${label} failed: ${(error as Error).message}`;
+					if (ctx.hasUI) ctx.ui.notify(text, "error");
+					else print(ctx, text);
+				} catch {
+					/* nothing more to do */
+				}
+			}
+		};
 	pi.registerCommand("boost", {
 		description: "JFrog Boost: status, on/off, settings, savings, install",
 		getArgumentCompletions: completions,
-		handler: async (args, ctx) => {
-			try {
-				await boostCommand(args, ctx);
-			} catch (error) {
-				// A dialog torn down mid-command (a stale context) or a bug: say
-				// so once, never as an unhandled rejection in pi.
-				try {
-					const text = `pi-jfrog-boost: /boost failed: ${(error as Error).message}`;
-					// Print mode (`pi -p "/boost install"`) has no UI, and silence
-					// there would look like success.
-					if (ctx.hasUI) ctx.ui.notify(text, "error");
-					else print(ctx, text);
-				} catch {
-					/* nothing more to do */
-				}
-			}
-		},
+		handler: guarded("/boost", createBoostCommand(host)),
 	});
 	pi.registerCommand("boost-install", {
 		description: "Alias for /boost install",
-		handler: async (args, ctx) => {
-			try {
-				await install(args, ctx);
-			} catch (error) {
-				try {
-					const text = `pi-jfrog-boost: install failed: ${(error as Error).message}`;
-					if (ctx.hasUI) ctx.ui.notify(text, "error");
-					else print(ctx, text);
-				} catch {
-					/* nothing more to do */
-				}
-			}
-		},
+		handler: guarded("install", install),
 	});
 
 	const extension: BoostExtension = {

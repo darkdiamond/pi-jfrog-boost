@@ -35,6 +35,7 @@ import {
 	FLAGS_MIN_VERSION,
 	VALIDATED_BOOST_VERSION,
 } from "./boost-binary.ts";
+import type { ShellMode } from "./settings.ts";
 
 /** Larger config files are skipped (treated as absent). */
 export const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -353,13 +354,6 @@ export interface ConfigFs {
 export interface ConfigReader {
 	/** The current config: re-read only when the file's mtime or size changed. */
 	read(): BoostConfig;
-	/** The path read, for status output. */
-	path(): string;
-	/**
-	 * The file's mtime when last read, or undefined when absent. Awareness
-	 * text is recomputed when it changes (§12).
-	 */
-	mtimeMs(): number | undefined;
 }
 
 export interface ConfigReaderOptions {
@@ -377,8 +371,6 @@ export function createConfigReader(options: ConfigReaderOptions = {}): ConfigRea
 	let cache: { path: string; mtimeMs: number; size: number; config: BoostConfig } | undefined;
 
 	return {
-		path: pathOf,
-		mtimeMs: () => cache?.mtimeMs,
 		read() {
 			const path = pathOf();
 			try {
@@ -410,7 +402,8 @@ export interface FlagResolution {
 	source: FlagSource;
 }
 
-function envList(value: string | undefined): string[] {
+/** A comma-separated list (`a, b ,c` → `["a","b","c"]`), empty items dropped. */
+export function envList(value: string | undefined): string[] {
 	return (value ?? "")
 		.split(",")
 		.map((item) => item.trim())
@@ -436,8 +429,6 @@ export function resolveFlag(config: BoostConfig, name: string, env: NodeJS.Proce
 	if (flag.remote !== undefined) return { value: flag.remote, source: "remote" };
 	return { value: "unknown", source: "unknown" };
 }
-
-export type ShellSetting = "auto" | "on" | "off";
 
 /** Why the shell route is on or off; `/boost status` explains it from this. */
 export type ShellGateReason =
@@ -470,7 +461,7 @@ export interface ShellGate {
  *   is not shadowed by this extension.
  */
 export function shellGate(
-	setting: ShellSetting,
+	setting: ShellMode,
 	config: BoostConfig,
 	env: NodeJS.ProcessEnv,
 	version: BoostVersion | undefined,
@@ -496,4 +487,72 @@ function newerThanValidatedLine(version: BoostVersion): boolean {
 			[VALIDATED_BOOST_VERSION[0], VALIDATED_BOOST_VERSION[1], 0],
 		) > 0
 	);
+}
+
+// ---------------------------------------------------------------------------
+// Flag freshness (§8.3 amendment)
+
+/** Default TTL for Boost's flag cache in pi's children, unless the user set one (Probe 3). */
+export const FLAGS_TTL = "24h";
+/** {@link FLAGS_TTL} in milliseconds: metadata older than this would make Boost refresh. */
+export const FLAGS_TTL_MS = 24 * 60 * 60 * 1000;
+
+const GO_DURATION_UNITS: Readonly<Record<string, number>> = {
+	ns: 1e-6,
+	us: 1e-3,
+	µs: 1e-3,
+	μs: 1e-3,
+	ms: 1,
+	s: 1_000,
+	m: 60_000,
+	h: 3_600_000,
+};
+
+/**
+ * A Go `time.ParseDuration` string (`24h`, `1h30m`, `90s`, `1.5h`, `0`) in
+ * milliseconds, or undefined when it is not one. Boost reads
+ * `BOOST_FEATURE_FLAGS_TTL` with Go's parser; this covers the same grammar
+ * except negative values, which no one sets as a cache lifetime. Like Go, it
+ * allows no whitespace.
+ */
+export function parseGoDuration(value: string): number | undefined {
+	const text = value.replace(/^\+/, "");
+	if (text === "0") return 0;
+	if (text === "") return undefined;
+	const part = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/y;
+	let total = 0;
+	let index = 0;
+	while (index < text.length) {
+		part.lastIndex = index;
+		const match = part.exec(text);
+		if (!match) return undefined;
+		total += Number(match[1]) * (GO_DURATION_UNITS[match[2] as string] ?? Number.NaN);
+		index = part.lastIndex;
+	}
+	return Number.isFinite(total) ? total : undefined;
+}
+
+/**
+ * How old Boost's fetched feature flags are, and whether that is past the
+ * TTL in effect — that is, whether Boost would try to refresh them on a call
+ * (and stall offline). The client turns fetching off for pi's hot-path calls
+ * when they are stale, so those never refresh them; `/boost status` reports
+ * the same answer for the user to judge. A missing or unparseable
+ * `last_updated_at` is stale (Boost cannot use it either); a user TTL this
+ * parser does not understand is left to the user and Boost (not stale).
+ * `ageMs` is undefined when the flags were never fetched or the timestamp is
+ * unreadable.
+ */
+export function flagsFreshness(
+	config: BoostConfig,
+	env: NodeJS.ProcessEnv,
+	now: number,
+): { stale: boolean; ageMs?: number } {
+	const at = config.flagsUpdatedAt ? Date.parse(config.flagsUpdatedAt) : Number.NaN;
+	if (Number.isNaN(at)) return { stale: true };
+	const ageMs = Math.max(0, now - at);
+	const userTtl = env.BOOST_FEATURE_FLAGS_TTL ? parseGoDuration(env.BOOST_FEATURE_FLAGS_TTL) : undefined;
+	// A TTL Go would parse but this cannot is the user's business; say nothing.
+	if (env.BOOST_FEATURE_FLAGS_TTL && userTtl === undefined) return { stale: false, ageMs };
+	return { stale: ageMs >= (userTtl ?? FLAGS_TTL_MS), ageMs };
 }

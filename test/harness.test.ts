@@ -123,7 +123,7 @@ test("the current extension loads on both stub lines", async () => {
 	for (const line of ["0.86", "1.2"] as const) {
 		const stub = createPiStub({ line, hasUI: false });
 		createBoostExtension(stub.pi, {
-			client: stubClient({ enabled: () => false, binary: () => undefined }),
+			client: stubClient({ binary: () => undefined }),
 			settings: memorySettings(),
 			config: fixedConfig(),
 		});

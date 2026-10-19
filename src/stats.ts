@@ -19,7 +19,10 @@
  * estimate (§10.1). The fields keep the spec's `bytesIn`/`bytesOut` names;
  * for the ASCII that dominates tool output the two units agree.
  */
-import { BINARY_DOCS, extensionOf, isShell, LEGACY_OFFICE, LOG_EXTENSIONS, NEVER_EXTRA } from "./tools.ts";
+import { documentMode } from "./documents.ts";
+import { isMcpTool } from "./mcp.ts";
+import { isShellLike } from "./router.ts";
+import { extensionOf, LOG_EXTENSIONS } from "./tools.ts";
 
 export const STATS_ENTRY = "jfrog-boost-stats";
 export const STATS_VERSION = 1;
@@ -81,9 +84,9 @@ export function emptySnapshot(): StatsSnapshot {
 	return { v: STATS_VERSION, buckets };
 }
 
-/** Characters a bucket's replacements removed: each result's own saving, never negative. */
-export function bucketSavings(bucket: Bucket): number {
-	return bucket.saved;
+/** `41` for 41 %, rounded; 0 when nothing was measured. */
+export function percent(removed: number, original: number): number {
+	return original > 0 ? Math.round((removed / original) * 100) : 0;
 }
 
 /** All buckets added together. */
@@ -103,9 +106,6 @@ export function totals(snapshot: StatsSnapshot): Bucket {
 	return sum;
 }
 
-/** Notebooks are converted on the document route too (spec §5). */
-const NOTEBOOK = ".ipynb";
-
 /**
  * Which bucket a tool result belongs to, from the tool and its input alone,
  * or undefined for results no route could ever change (`edit`, a `read` of
@@ -119,14 +119,13 @@ export function bucketFor(
 ): BucketName | undefined {
 	if (toolName === "bash") return "bash";
 	if (toolName === "powershell") return "powershell";
-	if (toolName.startsWith("mcp__")) return "mcp";
+	if (isMcpTool(toolName)) return "mcp";
 	if (toolName === "read") {
-		const ext = extensionOf(input.path);
-		if (LOG_EXTENSIONS.has(ext)) return "logs";
-		if (BINARY_DOCS.has(ext) || LEGACY_OFFICE.has(ext) || ext === NOTEBOOK) return "documents";
-		return undefined;
+		if (LOG_EXTENSIONS.has(extensionOf(input.path))) return "logs";
+		return documentMode(input.path) ? "documents" : undefined;
 	}
-	if (!isShell(toolName) && !NEVER_EXTRA.has(toolName) && extraTools.includes(toolName)) return "extra";
+	// The same rule the router applies, so a result is counted where it is routed.
+	if (isShellLike(toolName, extraTools)) return "extra";
 	return undefined;
 }
 
@@ -153,18 +152,13 @@ export function parseSnapshot(data: unknown): StatsSnapshot | undefined {
 		const fields = b as Record<string, unknown>;
 		const parsed = emptyBucket();
 		let valid = true;
-		for (const key of ["seen", "compacted", "converted", "failed", "bytesIn", "bytesOut"] as const) {
+		for (const key of ["seen", "compacted", "converted", "failed", "bytesIn", "bytesOut", "saved"] as const) {
 			const n = count(fields[key]);
 			if (n === undefined) valid = false;
 			else parsed[key] = n;
 		}
-		// `saved` came after the first entries of this version were written;
-		// one without it falls back to the bucket's net, the best it knew.
 		// Never more than went in: a larger number is not a real saving.
-		const saved =
-			fields.saved === undefined ? Math.max(0, parsed.bytesIn - parsed.bytesOut) : count(fields.saved);
-		if (saved === undefined || saved > parsed.bytesIn) valid = false;
-		else parsed.saved = saved;
+		if (parsed.saved > parsed.bytesIn) valid = false;
 		const skipped = fields.skipped;
 		if (typeof skipped === "object" && skipped !== null && !Array.isArray(skipped)) {
 			for (const [reason, value] of Object.entries(skipped)) {
@@ -293,15 +287,13 @@ export function formatStats(snapshot: StatsSnapshot, tokens: (chars: number) => 
 			.sort(([a], [c]) => a.localeCompare(c))
 			.map(([reason, n]) => `${reason} ${n}`)
 			.join(", ");
-		const saved = bucketSavings(b);
-		const share = b.bytesIn > 0 ? Math.round((saved / b.bytesIn) * 100) : 0;
 		return [
 			`${name.padEnd(11)}seen ${b.seen}`,
 			`compacted ${b.compacted}`,
 			`converted ${b.converted}`,
 			`skipped ${skipped || "none"}`,
 			`failed ${b.failed}`,
-			`${b.bytesIn} → ${b.bytesOut} chars (${share}% saved, ~${tokens(saved)} tokens)`,
+			`${b.bytesIn} → ${b.bytesOut} chars (${percent(b.saved, b.bytesIn)}% saved, ~${tokens(b.saved)} tokens)`,
 		].join(" · ");
 	};
 	const rows = BUCKETS.filter((name) => snapshot.buckets[name].seen > 0).map((name) =>

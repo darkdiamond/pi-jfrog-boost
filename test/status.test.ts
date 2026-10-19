@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { parseBoostConfig, resolveFlag, shellGate } from "../src/boost-config.ts";
+import { flagsFreshness, parseBoostConfig, resolveFlag, shellGate } from "../src/boost-config.ts";
 import type { ReadinessState } from "../src/health.ts";
 import { DEFAULT_SETTINGS, type Settings } from "../src/settings.ts";
 import { emptySnapshot } from "../src/stats.ts";
@@ -15,7 +15,6 @@ import {
 	createNotices,
 	type FooterView,
 	filtersDisabledNotice,
-	flagsFreshness,
 	footerText,
 	MISSING_NOTICE,
 	pausedNotice,
@@ -126,9 +125,12 @@ test("each notice is shown once, and only to a UI", () => {
 	const notices = createNotices();
 	const headless = uiContext(false);
 	assert.equal(notices.show(headless.ctx, "missing", MISSING_NOTICE, "info"), false);
-	assert.equal(notices.shown("missing"), false, "a session without a UI does not use it up");
 	const ui = uiContext();
-	assert.equal(notices.show(ui.ctx, "missing", MISSING_NOTICE, "info"), true);
+	assert.equal(
+		notices.show(ui.ctx, "missing", MISSING_NOTICE, "info"),
+		true,
+		"a session without a UI does not use it up",
+	);
 	assert.equal(notices.show(ui.ctx, "missing", MISSING_NOTICE, "info"), false);
 	assert.equal(notices.show(ui.ctx, "terms", TERMS_NOTICE, "info"), true);
 	assert.deepEqual(ui.notices, [

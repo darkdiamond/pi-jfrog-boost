@@ -7,9 +7,17 @@
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import {
 	type BoostCall,
@@ -29,12 +37,13 @@ import {
 	type McpGateInput,
 	type McpRequest,
 	mcpSkip,
+	PI_MCP_OUTPUT_FILE,
 	PI_MCP_OUTPUT_MAX_BYTES,
 	parseMcpReply,
 	piTruncatedPath,
-	readFullOutput,
 } from "../src/mcp.ts";
 import { excludedBy, globMatches } from "../src/settings.ts";
+import { readPiTempFile } from "../src/shell.ts";
 import { type Block, createPiStub, type PiLine, toolResultEvent } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
 
@@ -355,15 +364,15 @@ test("no usable full-output file: nothing is sent, pi's truncated text stands", 
 		assert.deepEqual(outcome, { skipped: "truncated" }, label);
 		assert.equal(h.payloads.length, 0, label);
 	}
-	assert.equal(await readFullOutput(elsewhere, { tmpdir: () => tmp }), undefined);
-	assert.equal(await readFullOutput(`${tmp}-sibling/x`, { tmpdir: () => tmp }), undefined);
+	assert.equal(await readMcpFile(elsewhere, { tmpdir: () => tmp }), undefined);
+	assert.equal(await readMcpFile(`${tmp}-sibling/x`, { tmpdir: () => tmp }), undefined);
 });
 
 test("only a file named and owned the way pi writes it is read", async () => {
 	const tmp = mkdtempSync(join(root, "tmp-"));
 	const good = join(tmp, piName());
 	writeFileSync(good, HUGE);
-	assert.equal(await readFullOutput(good, { tmpdir: () => tmp }), HUGE);
+	assert.equal(await readMcpFile(good, { tmpdir: () => tmp }), HUGE);
 	// Another program's temp file, though inside the temp dir and readable:
 	// any `mcp__*` tool can name a path in `details`.
 	for (const name of [
@@ -376,7 +385,7 @@ test("only a file named and owned the way pi writes it is read", async () => {
 	]) {
 		const path = join(tmp, name);
 		writeFileSync(path, HUGE);
-		assert.equal(await readFullOutput(path, { tmpdir: () => tmp }), undefined, name);
+		assert.equal(await readMcpFile(path, { tmpdir: () => tmp }), undefined, name);
 		const h = hook(both(SHORT));
 		const outcome = await compactMcpResult(truncatedRequest(HUGE, path), h, { tmpdir: () => tmp });
 		assert.deepEqual(outcome, { skipped: "truncated" }, name);
@@ -385,11 +394,40 @@ test("only a file named and owned the way pi writes it is read", async () => {
 	// A well-named file someone else owns (pi creates its own 0600).
 	const theirs = { isFile: () => true, size: 10, uid: 4242 };
 	const deps = { tmpdir: () => tmp, uid: () => 501, stat: () => theirs, readFile: async () => HUGE };
-	assert.equal(await readFullOutput(good, deps), undefined);
-	assert.equal(await readFullOutput(good, { ...deps, uid: () => 4242 }), HUGE);
+	assert.equal(await readMcpFile(good, deps), undefined);
+	assert.equal(await readMcpFile(good, { ...deps, uid: () => 4242 }), HUGE);
 	// No user ids (Windows): the name and place are what is checked.
-	assert.equal(await readFullOutput(good, { ...deps, uid: () => undefined }), HUGE);
+	assert.equal(await readMcpFile(good, { ...deps, uid: () => undefined }), HUGE);
 });
+
+test("the MCP route reads under the shell route's guards: absolute paths, size re-checked after the read", async () => {
+	const tmp = mkdtempSync(join(root, "tmp-"));
+	const good = join(tmp, piName());
+	writeFileSync(good, HUGE);
+	// A relative spelling is never resolved against whatever the cwd is.
+	const fromTmp = { tmpdir: () => tmp, realpath: (p: string) => realpathSync(join(tmp, p)) };
+	assert.equal(await readMcpFile(basename(good), fromTmp), undefined);
+	// A file that grew past the cap between the stat and the read.
+	const grown = "x".repeat(MCP_MAX_BYTES + 1);
+	const small = { isFile: () => true, size: 10 };
+	assert.equal(
+		await readMcpFile(good, { tmpdir: () => tmp, stat: () => small, readFile: async () => grown }),
+		undefined,
+	);
+	const h = hook(both(SHORT));
+	const outcome = await compactMcpResult(truncatedRequest(HUGE, good), h, {
+		tmpdir: () => tmp,
+		stat: () => small,
+		readFile: async () => grown,
+	});
+	assert.deepEqual(outcome, { skipped: "truncated" });
+	assert.equal(h.payloads.length, 0);
+});
+
+/** The guards the MCP route reads pi's full-output file under. */
+function readMcpFile(path: string, deps: Parameters<typeof readPiTempFile>[2]) {
+	return readPiTempFile(path, { maxBytes: MCP_MAX_BYTES, name: PI_MCP_OUTPUT_FILE }, deps);
+}
 
 // ---------------------------------------------------------------------------
 // Through the extension

@@ -19,13 +19,14 @@ function isText(block: ContentBlock): block is TextBlock {
 	return block.type === "text" && typeof block.text === "string";
 }
 
+/** The text of each text block, in order. */
+export function textBlocks(content: readonly ContentBlock[] | undefined): string[] {
+	return content ? content.filter(isText).map((block) => block.text) : [];
+}
+
 /** The concatenated text of a content array; "" when there is none. */
 export function textOf(content: readonly ContentBlock[] | undefined): string {
-	if (!content) return "";
-	return content
-		.filter(isText)
-		.map((block) => block.text)
-		.join("\n");
+	return textBlocks(content).join("\n");
 }
 
 /**

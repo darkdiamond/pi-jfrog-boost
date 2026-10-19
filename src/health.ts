@@ -306,8 +306,6 @@ export interface Breaker {
 
 export interface BreakerDeps {
 	now?: () => number;
-	/** Called each time the breaker opens (the paused notice and footer). */
-	onOpen?: (reason: BadReason, durationMs: number) => void;
 }
 
 export function createBreaker(deps: BreakerDeps = {}): Breaker {
@@ -322,11 +320,6 @@ export function createBreaker(deps: BreakerDeps = {}): Breaker {
 		reason = why;
 		openUntil = now() + openMs;
 		trialInFlight = false;
-		try {
-			deps.onOpen?.(why, openMs);
-		} catch {
-			/* a notice failing must not leave the breaker half-updated */
-		}
 	};
 
 	const state = (): BreakerState => {

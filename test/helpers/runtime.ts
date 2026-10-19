@@ -26,7 +26,6 @@ export function call(stdout: string, code: number | null = 0): BoostCall {
 /** A client whose every surface does nothing; tests override what they exercise. */
 export function stubClient(overrides: Partial<BoostClient> = {}): BoostClient {
 	return {
-		enabled: () => true,
 		binary: () => "/fake/boost",
 		refresh: () => {},
 		childEnv: () => ({}),
@@ -45,7 +44,7 @@ export function stubClient(overrides: Partial<BoostClient> = {}): BoostClient {
 /** A config reader that always returns `config` (TOML text or a parsed config). */
 export function fixedConfig(config: BoostConfig | string = EMPTY_CONFIG): ConfigReader {
 	const parsed = typeof config === "string" ? parseBoostConfig(config) : config;
-	return { read: () => parsed, path: () => "/fake/home/.boost/config.toml", mtimeMs: () => 1 };
+	return { read: () => parsed };
 }
 
 /** A readiness that reports `state` and records how it was driven. */

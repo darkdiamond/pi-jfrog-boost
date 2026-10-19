@@ -24,7 +24,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, sep } from "node:path";
+import { basename, isAbsolute, sep } from "node:path";
 import type { BoostCall } from "./boost-client.ts";
 import {
 	isMeaningfulReduction,
@@ -315,7 +315,7 @@ export function isWebFetch(command: unknown): boolean {
 
 /** What a compaction Boost's reply produced, when it was worth applying. */
 export interface Compaction {
-	/** The new text: Boost's reply, then pi's notices verbatim. */
+	/** The new text: Boost's reply, then (on the shell route) pi's notices verbatim. */
 	text: string;
 	/** Characters of the tool's text before, and of the new text after. */
 	before: number;
@@ -416,7 +416,7 @@ export function fullOutputNoticeIndex(notices: string, path: string): number {
 		.findIndex((notice) => notice.startsWith("[") && notice.endsWith(`Full output: ${path}]`));
 }
 
-export interface FullOutputFileDeps {
+export interface PiTempFileDeps {
 	/** Where pi writes its full-output files; defaults to `os.tmpdir()`, read per call. */
 	tmpdir?: () => string;
 	readFile?: (path: string) => Promise<string>;
@@ -426,26 +426,38 @@ export interface FullOutputFileDeps {
 	uid?: () => number | undefined;
 }
 
+/** The limits {@link readPiTempFile} applies on top of its fixed guards. */
+export interface PiTempFileLimits {
+	/** The largest file read, checked on the stat and again on what was read. */
+	maxBytes: number;
+	/** The basename pi gives this kind of file, when the route knows it. */
+	name?: RegExp;
+}
+
 /**
- * The text of a full-output file, or undefined when it must not be read.
- * The path comes from the result's `details` or `structuredContent`, which
- * the tool fills — and an `extraTools` tool is anyone's code — while what is
- * read goes to Boost (whose DB keeps it and whose sync uploads it) and
- * replaces the result. So it is read only when, after resolving links, it is:
+ * The text of a file pi saved its full output to, or undefined when it must
+ * not be read. The path comes from the result's `details` or
+ * `structuredContent`, which the tool fills — an `extraTools` tool is anyone's
+ * code, and any `mcp__*` tool can fill `details` — while what is read goes to
+ * Boost (whose DB keeps it and whose sync uploads it) and replaces the
+ * result. So it is read only when, after resolving links, it is:
  *
  *   - an absolute path inside the temp directory pi writes to (pi's
  *     `createOutputFilePath` joins `os.tmpdir()`); never anywhere else;
+ *   - named as `limits.name` says, when given, so an unrelated temp file of
+ *     another program's is never picked up;
  *   - a regular file owned by this user (pi creates it 0600), where the
  *     platform has user ids;
- *   - no larger than {@link FULL_OUTPUT_MAX_BYTES};
+ *   - no larger than `limits.maxBytes`;
  *   - text: a NUL means binary on stdout, which Boost does not filter.
  *
  * Never throws: a file that vanished, a dangling link or an unreadable
  * temp directory is simply not used.
  */
-export async function readFullOutputFile(
+export async function readPiTempFile(
 	path: string,
-	deps: FullOutputFileDeps = {},
+	limits: PiTempFileLimits,
+	deps: PiTempFileDeps = {},
 ): Promise<string | undefined> {
 	const realpath = deps.realpath ?? realpathSync;
 	const stat = deps.stat ?? statSync;
@@ -455,13 +467,14 @@ export async function readFullOutputFile(
 		const root = realpath((deps.tmpdir ?? tmpdir)());
 		const real = realpath(path);
 		if (!real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) return undefined;
+		if (limits.name && !limits.name.test(basename(real))) return undefined;
 		const info = stat(real);
-		if (!info.isFile() || info.size > FULL_OUTPUT_MAX_BYTES) return undefined;
+		if (!info.isFile() || info.size > limits.maxBytes) return undefined;
 		const me = (deps.uid ?? (() => process.getuid?.()))();
 		if (me !== undefined && info.uid !== undefined && info.uid !== me) return undefined;
 		const text = await read(real);
 		// Checked on what was read too: the file may have grown since the stat.
-		if (Buffer.byteLength(text) > FULL_OUTPUT_MAX_BYTES || text.includes("\0")) return undefined;
+		if (Buffer.byteLength(text) > limits.maxBytes || text.includes("\0")) return undefined;
 		return text;
 	} catch {
 		return undefined;
@@ -484,7 +497,7 @@ export interface FullOutcome extends CompactOutcome {
 	/**
 	 * Why the full output was not used and the tail route ran instead:
 	 * `unreadable` when the file failed the checks of
-	 * {@link readFullOutputFile} (or the result names no such file), `html`
+	 * {@link readPiTempFile} (or the result names no such file), `html`
 	 * when the run is a whole HTML page the router would have kept exact,
 	 * `unfit` when Boost answered but its version of the whole run was no
 	 * meaningful reduction or would not fit pi's page.
@@ -511,7 +524,7 @@ export interface FullOutputRequest {
  * model got is mostly passing tests; Boost given the whole run keeps the
  * failures and drops the passes.
  *
- * 1. The file is read under the guards of {@link readFullOutputFile},
+ * 1. The file is read under the guards of {@link readPiTempFile},
  *    stripped of terminal escapes, and filtered.
  * 2. The reply is used only when it is a meaningful reduction of the whole
  *    run and fits pi's own page, so the model never gets more than pi would
@@ -546,7 +559,7 @@ export interface FullOutputRequest {
 export async function compactFullOutput(
 	request: FullOutputRequest,
 	filter: (body: string) => Promise<BoostCall>,
-	deps: FullOutputFileDeps = {},
+	deps: PiTempFileDeps = {},
 ): Promise<FullOutcome> {
 	const { text, path } = request;
 	// On `unfit` the full call is not returned: it ran to completion and
@@ -562,7 +575,7 @@ export async function compactFullOutput(
 	const parts = notices.split("\n\n");
 	const at = fullOutputNoticeIndex(notices, path);
 	if (at < 0) return tail("unreadable");
-	const full = await readFullOutputFile(path, deps);
+	const full = await readPiTempFile(path, { maxBytes: FULL_OUTPUT_MAX_BYTES }, deps);
 	const stripped = full === undefined ? "" : stripAnsi(full);
 	if (!stripped.trim()) return tail("unreadable");
 	if (!request.htmlAllowed && looksLikeHtmlDocument(stripped)) return tail("html");

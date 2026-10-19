@@ -49,7 +49,14 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { type ResolveOptions, resolveBoostBinary } from "./boost-binary.ts";
-import { type BoostConfig, CLI_FILTERING_FLAG, createConfigReader } from "./boost-config.ts";
+import {
+	type BoostConfig,
+	CLI_FILTERING_FLAG,
+	createConfigReader,
+	envList,
+	FLAGS_TTL,
+	flagsFreshness,
+} from "./boost-config.ts";
 import {
 	createProcessRunner,
 	type Launcher,
@@ -81,11 +88,6 @@ const EXEC_STDOUT_CAP = 2 * 1024 * 1024;
  * E2BIG, which the breaker would count as Boost failing.
  */
 const MAX_META_TOOL_INPUT = 16 * 1024;
-
-/** Default TTL for Boost's flag cache in pi's children, unless the user set one (Probe 3). */
-export const FLAGS_TTL = "24h";
-/** {@link FLAGS_TTL} in milliseconds: metadata older than this would make Boost refresh. */
-export const FLAGS_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Boost subcommands this extension must never run (invariant 4). */
 export const FORBIDDEN_SUBCOMMANDS: ReadonlySet<string> = new Set([
@@ -187,8 +189,6 @@ export interface BoostClientDeps {
 }
 
 export interface BoostClient {
-	/** Live env kill switch: re-read on every call so `DISABLE_BOOST=1` takes effect at once. */
-	enabled(): boolean;
 	/** The resolved binary, or undefined when Boost is not installed. Cached until refresh(). */
 	binary(): string | undefined;
 	/** Drop the cached binary so the next call resolves it again. */
@@ -230,48 +230,6 @@ function fileSize(path: string): number {
 	} catch {
 		return 0;
 	}
-}
-
-const GO_DURATION_UNITS: Readonly<Record<string, number>> = {
-	ns: 1e-6,
-	us: 1e-3,
-	µs: 1e-3,
-	μs: 1e-3,
-	ms: 1,
-	s: 1_000,
-	m: 60_000,
-	h: 3_600_000,
-};
-
-/**
- * A Go `time.ParseDuration` string (`24h`, `1h30m`, `90s`, `1.5h`, `0`) in
- * milliseconds, or undefined when it is not one. Boost reads
- * `BOOST_FEATURE_FLAGS_TTL` with Go's parser; this covers the same grammar
- * except negative values, which no one sets as a cache lifetime. Like Go, it
- * allows no whitespace.
- */
-export function parseGoDuration(value: string): number | undefined {
-	const text = value.replace(/^\+/, "");
-	if (text === "0") return 0;
-	if (text === "") return undefined;
-	const part = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/y;
-	let total = 0;
-	let index = 0;
-	while (index < text.length) {
-		part.lastIndex = index;
-		const match = part.exec(text);
-		if (!match) return undefined;
-		total += Number(match[1]) * (GO_DURATION_UNITS[match[2] as string] ?? Number.NaN);
-		index = part.lastIndex;
-	}
-	return Number.isFinite(total) ? total : undefined;
-}
-
-function list(value: string | undefined): string[] {
-	return (value ?? "")
-		.split(",")
-		.map((item) => item.trim())
-		.filter(Boolean);
 }
 
 export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
@@ -333,21 +291,6 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 	 * - sync: no flag overrides, so the idle-time sync is where Boost may
 	 *   refresh stale flags, off every tool's critical path.
 	 */
-	/** Whether Boost would try to refresh its flags on this call (and stall offline). */
-	const flagsNeedRefresh = (): boolean => {
-		const updated = readConfig().flagsUpdatedAt;
-		if (!updated) return true;
-		let ttlMs = FLAGS_TTL_MS;
-		if (env.BOOST_FEATURE_FLAGS_TTL) {
-			const parsed = parseGoDuration(env.BOOST_FEATURE_FLAGS_TTL);
-			// A TTL this parser does not understand is left to the user and Boost.
-			if (parsed === undefined) return false;
-			ttlMs = parsed;
-		}
-		const at = Date.parse(updated);
-		// Unparseable: Boost cannot use it either, so treat it as missing.
-		return Number.isNaN(at) || wallClock() - at >= ttlMs;
-	};
 
 	const childEnv = (surface: Surface, meta?: HookMeta, toolInput?: unknown): NodeJS.ProcessEnv => {
 		const out: NodeJS.ProcessEnv = { ...env, BOOST_AGENT_TYPE: AGENT_TYPE };
@@ -371,11 +314,14 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 		if (surface === "sync") return out;
 		if (!env.BOOST_FEATURE_FLAGS_TTL) out.BOOST_FEATURE_FLAGS_TTL = FLAGS_TTL;
 		if (surface === "exec") return out;
-		if (env.BOOST_FEATURE_FLAGS_DISABLE === undefined && flagsNeedRefresh()) {
+		if (
+			env.BOOST_FEATURE_FLAGS_DISABLE === undefined &&
+			flagsFreshness(readConfig(), env, wallClock()).stale
+		) {
 			out.BOOST_FEATURE_FLAGS_DISABLE = "1";
 		}
 		if (shellMode() === "on") {
-			const forced = list(env.BOOST_FEATURE_FLAGS_FORCE_ENABLED);
+			const forced = envList(env.BOOST_FEATURE_FLAGS_FORCE_ENABLED);
 			if (!forced.includes(CLI_FILTERING_FLAG)) forced.push(CLI_FILTERING_FLAG);
 			out.BOOST_FEATURE_FLAGS_FORCE_ENABLED = forced.join(",");
 		}
@@ -425,7 +371,6 @@ export function createBoostClient(deps: BoostClientDeps = {}): BoostClient {
 	const detachedBinary = (): string | undefined => (enabled() ? resolveOnce() : undefined);
 
 	return {
-		enabled,
 		binary: resolveOnce,
 		refresh() {
 			binary = null;

@@ -22,12 +22,11 @@ import { after, test } from "node:test";
 import {
 	type BoostClientDeps,
 	createBoostClient,
-	FLAGS_TTL,
 	filterTimeoutMs,
 	type HookMeta,
 	MAX_INPUT_BYTES,
-	parseGoDuration,
 } from "../src/boost-client.ts";
+import { FLAGS_TTL, parseGoDuration } from "../src/boost-config.ts";
 import { createProcessRunner, type ProcessRunner, type RunResult } from "../src/boost-process.ts";
 import { createBreaker } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
@@ -375,7 +374,6 @@ for (const [name, value] of [
 	test(`${name}=${value} stops every call without touching the binary`, async () => {
 		const log = logFile();
 		const client = clientFor({ [name]: value, FAKE_BOOST_LOG: log });
-		assert.equal(client.enabled(), false);
 		assert.equal((await client.filter(meta, "output")).skipped, "off");
 		assert.equal((await client.convert(meta, "/a.pdf")).skipped, "off");
 		assert.equal((await client.mcp(meta, "{}")).skipped, "off");
