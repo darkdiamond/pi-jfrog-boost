@@ -155,6 +155,15 @@ export function withBadge(inner: RenderComponent, badge: string, theme: ThemeLik
 	return wrapper;
 }
 
+/**
+ * Set on every `renderResult` this extension returns. A process-wide symbol,
+ * not module state: two copies of the package (a global install plus
+ * `pi -e ./`) each load their own module, and pi chains their resolvers, so
+ * the outer copy would otherwise wrap the inner copy's wrapper and every
+ * changed row would end with the same badge twice.
+ */
+const BADGED = Symbol.for("pi-jfrog-boost.badge");
+
 const safely = (enabled: () => boolean): boolean => {
 	try {
 		return enabled();
@@ -171,12 +180,17 @@ const safely = (enabled: () => boolean): boolean => {
  * `rebuild…(context.lastComponent ?? new Container())`). That would be this
  * wrapper, which they do not know, so the inner component is put back in its
  * place before the inner renderer runs.
+ *
+ * A renderer another copy of this extension already wrapped is returned
+ * unchanged (`BADGED`).
  */
 export function badgeResolver(enabled: () => boolean): Resolver {
 	return (_toolName, next) => {
 		const renderers = next();
 		const inner = renderers?.renderResult;
 		if (!renderers || typeof inner !== "function") return renderers;
+		// Another copy of this extension already wraps it: one badge is enough.
+		if ((inner as unknown as Record<symbol, unknown>)[BADGED] === true) return renderers;
 		// Off when the row is created: pi's own renderers, untouched. Checked
 		// again on each render below, for rows created while it was on.
 		if (!safely(enabled)) return renderers;
@@ -197,6 +211,7 @@ export function badgeResolver(enabled: () => boolean): Resolver {
 			}
 			return badge && component ? withBadge(component, badge, theme) : component;
 		};
+		Object.defineProperty(renderResult, BADGED, { value: true });
 		return { ...renderers, renderResult };
 	};
 }

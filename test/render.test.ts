@@ -149,6 +149,28 @@ test("without a result renderer, or with badges off, next() is returned unchange
 	assert.deepEqual(resolved?.renderResult?.({ content: [], details }, {}, theme, {}).render(80), ["inner"]);
 });
 
+test("two copies of the extension draw one badge, not two", () => {
+	// pi chains resolvers in load order: copy A's next() is copy B's result.
+	// Each copy is its own module (own innerOf), so only the global mark tells.
+	const copyA = badgeResolver(() => true);
+	const copyB = badgeResolver(() => true);
+	const base = { renderResult: () => component(["out"]).c };
+	const fromB = copyB("bash", () => base);
+	const fromA = copyA("bash", () => fromB);
+	assert.equal(fromA, fromB, "the outer copy leaves the inner copy's renderers alone");
+	assert.deepEqual(fromA?.renderResult?.({ content: [], details }, {}, theme, {}).render(80), [
+		"out",
+		"<dim>boost −1.8k tokens (88%)</dim>",
+	]);
+	// Inner copy off: the outer one still badges.
+	const fromOff = badgeResolver(() => false)("bash", () => base);
+	const outer = copyA("bash", () => fromOff);
+	assert.deepEqual(outer?.renderResult?.({ content: [], details }, {}, theme, {}).render(80), [
+		"out",
+		"<dim>boost −1.8k tokens (88%)</dim>",
+	]);
+});
+
 test("a badge appears through a fake registerToolRenderer", () => {
 	const stub = createPiStub({ line: "1.2" });
 	assert.equal(
