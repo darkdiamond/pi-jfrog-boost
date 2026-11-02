@@ -15,7 +15,7 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -30,6 +30,7 @@ import { FLAGS_TTL, parseGoDuration } from "../src/boost-config.ts";
 import { createProcessRunner, type ProcessRunner, type RunResult } from "../src/boost-process.ts";
 import { createBreaker } from "../src/health.ts";
 import { fixedConfig } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const FAKE = join(import.meta.dirname, "fixtures", "fake-boost.mjs");
 const launcher = (exe: string) => ({ file: process.execPath, args: [exe] });
@@ -39,7 +40,7 @@ const FRESH = fixedConfig('[feature_flags._metadata]\nlast_updated_at = "2026-10
 const NOW = Date.parse("2026-10-01T01:00:00Z");
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 let logs = 0;
 /** A fresh invocation log for one test. */

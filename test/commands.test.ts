@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,7 @@ import { createSettingsStore, SESSION_TOGGLE_ENTRY, type SettingsFs, settingsPat
 import { MISSING_NOTICE, shellOffNotice } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memoryFs, stubClient } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const CLI_OFF = `[feature_flags."boost-cli-filtering"]\nuser = false\n`;
 const HOME = "/fake/home";
@@ -401,7 +402,10 @@ test("stats and help print without a UI", async () => {
 	await s.run("bogus", s.noUi());
 	assert.match(s.printed[0] ?? "", /^JFrog Boost — savings this session\nnothing seen yet\ntotal/);
 	assert.match(s.printed[1] ?? "", /pi --no-boost=true/);
-	assert.ok((s.printed[1] ?? "").includes("https://github.com/darkdiamond/pi-jfrog-boost"));
+	assert.match(
+		s.printed[1] ?? "",
+		/(?:^|\s)https:\/\/github\.com\/darkdiamond\/pi-jfrog-boost#readme(?:\s|$)/m,
+	);
 	assert.match(s.printed[2] ?? "", /^Unknown \/boost subcommand "bogus"/);
 });
 
@@ -694,7 +698,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 		assert.match(stub.ui.notices.at(-1)?.message ?? "", /^Installed JFrog Boost v0\.16\.11 at /);
 		assert.equal(stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "repainted by the install itself");
 	} finally {
-		rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+		removeTempDir(dir);
 	}
 });
 

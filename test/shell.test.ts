@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -18,6 +18,7 @@ import {
 	splitSegments,
 	words,
 } from "../src/shell.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const SHELL_LIMITS = { maxBytes: FULL_OUTPUT_MAX_BYTES };
 
@@ -348,7 +349,7 @@ const TMP = mkdtempSync(join(tmpdir(), "jfrog-boost-full-"));
 const PI_TMP = mkdtempSync(join(TMP, "pi-"));
 const OUTSIDE = mkdtempSync(join(TMP, "outside-"));
 const narrowed = { tmpdir: () => PI_TMP };
-after(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(TMP));
 
 let fileId = 0;
 function saved(text: string, dir = TMP): string {

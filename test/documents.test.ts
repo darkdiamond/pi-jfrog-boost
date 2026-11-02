@@ -10,7 +10,7 @@
  * its paging before a user does.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -37,9 +37,10 @@ import {
 import { shellQuote } from "../src/tools.ts";
 import { docx } from "./helpers/docx.ts";
 import { call } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-boost-documents-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 /** Numbered lines `line 1` … `line n`, joined by `\n`. */
 const numbered = (n: number, width = 0) =>

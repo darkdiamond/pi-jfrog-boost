@@ -11,7 +11,6 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
-	rmSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
@@ -35,9 +34,10 @@ import {
 	settingsPath,
 } from "../src/settings.ts";
 import { memoryFs, memorySettings } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-settings-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 const home = join(root, "home");
 
 test("the file is $PI_JFROG_BOOST_SETTINGS, else <agentDir>/jfrog-boost.json", () => {

@@ -18,9 +18,10 @@ import {
 	resolveBoostBinary,
 	VALIDATED_BOOST_VERSION,
 } from "../src/boost-binary.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-bin-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 /**
  * Pretend every path in `present` is an executable file and nothing else is.

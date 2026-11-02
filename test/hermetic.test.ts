@@ -16,9 +16,10 @@ import {
 	termsAccepted,
 	termsLinesFrom,
 } from "./helpers/hermetic.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-boost-hermetic-test-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 let homes = 0;
 /** A fake real home with a Boost config, a macOS-style history DB and nothing else. */

@@ -4,7 +4,7 @@
  * reader never writes, which is invariant 4.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,11 +21,12 @@ import {
 	shellGate,
 	telemetryOn,
 } from "../src/boost-config.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "config");
 const fixture = (name: string) => readFileSync(join(FIXTURES, name), "utf8");
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-config-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 test("a v0.15.4 config: terms, metadata, remote flags, measurement", () => {
 	const config = parseBoostConfig(fixture("v0.15.4.toml"));

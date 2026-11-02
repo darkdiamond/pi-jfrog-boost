@@ -7,15 +7,7 @@
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { after, test } from "node:test";
@@ -46,6 +38,7 @@ import { excludedBy, globMatches } from "../src/settings.ts";
 import { readPiTempFile } from "../src/shell.ts";
 import { type Block, createPiStub, type PiLine, toolResultEvent } from "./helpers/harness.ts";
 import { call, fixedConfig, fixedReadiness, memorySettings, stubClient } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const FIXTURES = join(import.meta.dirname, "fixtures");
 const FAKE = join(FIXTURES, "fake-boost.mjs");
@@ -63,7 +56,7 @@ const SLACK = fixture("mcp-slack.json");
 const SNAPSHOT = fixture("mcp-snapshot.json");
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-mcp-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 const MARKER = "[Boost compressed ~70%. Get the full original output simply with: boost retrieve 42]";
 const BIG = Array.from(

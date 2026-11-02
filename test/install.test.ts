@@ -48,9 +48,10 @@ import {
 import { shellOffNotice } from "../src/status.ts";
 import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call } from "./helpers/runtime.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-install-test-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 let n = 0;
 
 const GOLDEN = readFileSync(

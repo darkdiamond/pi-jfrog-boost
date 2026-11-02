@@ -53,7 +53,6 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
-	rmSync,
 	type Stats,
 	statSync,
 	writeFileSync,
@@ -61,6 +60,7 @@ import {
 import { tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveBoostBinary } from "../../src/boost-binary.ts";
+import { removeTempDir } from "./tmp.ts";
 
 export type HomeVariant = "default" | "user-false" | "no-metadata" | "no-terms" | "mcp-unset";
 
@@ -521,7 +521,7 @@ export function createHermetic(options: HermeticOptions = {}): Hermetic {
 		},
 		assertIsolated,
 		dispose() {
-			rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+			removeTempDir(root);
 		},
 	};
 }

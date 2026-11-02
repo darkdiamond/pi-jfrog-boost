@@ -5,16 +5,17 @@
  */
 import "./helpers/spawn-spy.ts";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createProcessRunner, type RunOptions } from "../src/boost-process.ts";
+import { removeTempDir } from "./helpers/tmp.ts";
 
 const FAKE = join(import.meta.dirname, "fixtures", "fake-boost.mjs");
 const launcher = (exe: string) => ({ file: process.execPath, args: [exe] });
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-proc-"));
-after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+after(() => removeTempDir(root));
 
 let logs = 0;
 const logFile = () => join(root, `proc-${logs++}.jsonl`);
