@@ -7,6 +7,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
+Validated against Boost v0.16.11 and v0.15.4, and pi 1.4.0 and 1.2.0; the
+oldest supported pi is now 0.86.1. Boost 0.13.13 is still the oldest Boost
+accepted. Boost 0.16 keeps CLI filtering opt-in, and its Half Boost
+experiment does not affect pi; pi 1.3 and 1.4 change nothing this extension
+relies on.
+
+### Fixed
+
+- On pi 1.x, compacting a result dropped its `structuredContent`, and tool
+  calls made from inside codemode were compacted as well. `structuredContent`
+  now always passes through, and nested calls are left alone.
+- `read index.html` and `bash cat index.html` reached the model as Boost's
+  Markdown rendering of the page, so the model could not see or `edit` the
+  real file. HTML is now passed through unless the command is a web fetch
+  (`curl`, `wget`, …).
+- Converted documents were unbounded, ignored `offset`/`limit`, and were
+  converted even after pi had refused the read. They are now paged exactly
+  like pi's `read` (2000 lines / 50 KB, `offset` continues, from a cache), and
+  a refused read stays refused.
+- Document paths starting with `~`, `@` or `-` were resolved wrongly or taken
+  as Boost options.
+- Boost's advisory for legacy `.doc`/`.xls`/`.ppt` files was presented to the
+  model as if it were the file's text. It is now an error that says what to
+  ask the user for.
+- `/path/to/boost retrieve …` (a path-qualified Boost command) was compacted
+  again, replacing the recovered original with another marker.
+- Offline, every Boost call stalled about 5 s on a feature-flag refresh that
+  could not succeed, and a slow first `boost version` turned the extension off
+  for the rest of the session. pi's calls now skip the refresh when the cached
+  flags are missing or older than their TTL (24 h, or your own
+  `BOOST_FEATURE_FLAGS_TTL`), readiness is checked without blocking any tool,
+  and a Boost that did not answer is retried. Flags are refreshed by the
+  idle-time `boost sync` or by other Boost integrations instead; with sync off
+  (`sync: false`, `PI_BOOST_SYNC=0`) and no other Boost agent on the machine
+  they are not refreshed until you run Boost yourself, and `/boost status`
+  says so.
+- `/boost-install`'s confirmation described JFrog's installer as only
+  installing the binary. It can also edit shell rc files and run
+  `boost init --accept-terms`, which accepts the Preview Agreement and adds
+  hooks to other agents; the new `/boost install` says so, and its default
+  option no longer runs the installer at all.
+- **The 0.3.0 e2e suite was not isolated, contrary to its changelog entry.**
+  It redirected only `XDG_DATA_HOME`, which Boost ignores on macOS, so each run
+  wrote the maintainer's real Boost history and config, and its retrieve
+  counted towards Boost switching a filter off for every agent on the machine.
+  The suite is now hermetic (a throwaway HOME, DB and temp dir, refused
+  proxies) and fails if the real Boost state changes. **If you ran
+  `npm run test:e2e` from 0.3.0, check `~/.boost/config.toml` for a
+  `[filters] disabled` list; `/boost status` shows it** (re-enable with
+  `boost filters enable <name>`).
+- A reply that differed only in whitespace or ANSI colour was applied as a
+  "compaction". A reply must now save at least 256 bytes and 5%, and when it
+  does not, the original bytes, colour included, are kept.
+- With two copies of the extension loaded into one pi (a global install plus
+  a local path, or `pi -e` while developing), the second sent the first's
+  compacted output through Boost again and could drop its `boost retrieve`
+  marker. A result already changed by pi-jfrog-boost is now left alone.
+- Moving to another point with `/tree` kept the previous branch's savings in
+  the footer and wrote them onto the new branch.
+- The binary-only install confirm promised that shell compaction works right
+  away, but Boost ≥ 0.14.6 has it off by default. It now says so and how to
+  turn it on for pi. The shell-off notice, at startup and after an install,
+  names documents and MCP results as still handled only when they really are
+  (the setting is on, the terms are accepted for documents, Boost is ≥ 0.15.3
+  for MCP).
+- The awareness text told a PowerShell-only model to prefix commands with
+  `DISABLE_BOOST=1`, which PowerShell cannot parse. It now gives
+  `$env:DISABLE_BOOST=1;` there, and both forms when both shells are visible.
+- Without the Preview Agreement, the awareness text sent the model to
+  `boost retrieve`, which then refused to run. It now says retrieve will fail
+  and points at the `DISABLE_BOOST=1` re-run instead.
+
+### Changed
+
+- File reads are exact: `read` of text files (source, JSON, Markdown, HTML,
+  CSV; logs unless you opt in with `readLogs`) is never changed, and `grep`, `find` and `ls` are no longer
+  filtered (pi's output for them never compacts on Boost 0.15.4).
+- Shell compaction follows Boost's `boost-cli-filtering` flag, which has been
+  off by default since Boost 0.14.6; with it off, shell output is not even
+  sent. `/boost settings` → Shell output: on turns it on for pi alone, through
+  the environment of pi's own Boost calls (Boost's config is never written).
+- Legacy `.doc`, `.xls` and `.ppt` produce an advisory error; `.csv`, `.html`,
+  `.htm` and `.rtf` are no longer converted (lossy with no retrieve, or
+  already text).
+- `boost sync` runs when the agent settles (`agent_settled`), single-flight,
+  with `--max-batches 20` and a 120 s watchdog, and can be turned off.
+- Observe events moved to `tool_execution_start`/`end`, gained compaction
+  events and durations, and skip nested calls. The daily tip and the
+  "recorded as claude_code" observe warning are gone (Boost v0.15.4 keeps pi's
+  span attribution; see the README's attribution table, which replaces the
+  v0.13.24 one).
+- The largest output sent to Boost is 1 MiB (was 4 MiB), with timeouts that
+  scale with size instead of a flat 15 s.
+- The oldest supported pi is 0.86.1. Only types are imported from pi, and
+  1.x features are detected at runtime.
+
+### Added
+
+- `/boost status` says when Boost's own telemetry opt-out
+  (`boost init --no-telemetry`, `BOOST_TELEMETRY=0`) leaves `boost sync`
+  nothing to upload.
+- MCP compaction: `mcp__*` results go through Boost's MCP filters (Slack,
+  GitHub, browser snapshots and more), keeping images and
+  `structuredContent`. `mcpExclude` keeps chosen servers away from Boost.
+  On pi 1.x this applies only to tools the model calls directly
+  (`"exposure": "direct"` or `"deferred"`); under pi's default `codemode`
+  exposure the calls are nested and their output is left alone. With
+  `deferred`, the awareness text names MCP results from the prompt in which
+  `tool_search` loads an `mcp__*` tool, since they are shortened from that
+  call on. The README says how to set it.
+- Full-output re-filter: when pi truncated `bash` output, Boost filters pi's
+  full output file, so early failures in a long run reach the model. On pi 1.x
+  this covers every run; on pi 0.86 only runs that exit 0, since pi 0.86 does
+  not record the file's path for a failed command, which keeps pi's tail.
+- Notebook conversion for whole reads of `.ipynb` files of 16 KiB or more
+  (`offset=1` returns the raw JSON; a converted notebook longer than one page
+  says how to page the rest with `boost read … | sed`, since an `offset` read
+  is the raw JSON), and opt-in compaction of whole `*.log`/
+  `*.out` reads (`readLogs`).
+- The `/boost` hub (`status`, `on`, `off`, `settings`, `stats`, `report`,
+  `doctor`, `install`, `help`, with completions), a footer that always shows
+  the state, per-result transcript badges (pi ≥ 1.0.1), and savings that
+  persist across resume.
+- A global settings file (`~/.pi/agent/jfrog-boost.json`, with
+  `settings.schema.json`), the `--no-boost` flag, `BOOST_DISABLED=1` as a
+  second kill switch, and `BOOST_EXE` as an alias of `BOOST_BIN`.
+- A circuit breaker that pauses Boost after three calls in a row that timed
+  out, crashed or were very slow,
+  abort support, at most four concurrent Boost processes, and size gates.
+- `/boost install`'s binary-only option: the release asset from GitHub,
+  checked against GitHub's published SHA-256 (with none published it
+  installs nothing and shows the manual steps), placed in `~/.local/bin`,
+  with no installer script, rc edits, hooks or terms.
+- A hermetic e2e suite with a tripwire on the real Boost state, run against
+  pi 1.2.0 (`npm run test:e2e`) and 0.86.1 (`npm run test:e2e:min`). Part of
+  it runs a real pi session on pi-ai's scripted faux model, so pi's own
+  runner, loadout and built-in MCP (direct, deferred and codemode exposure,
+  against a stub stdio server) are exercised, not simulated. A CI
+  matrix over pi 0.86.1 and ^1.2.0; and a weekly canary against pi@latest
+  that opens a `canary` issue when it fails.
+
+### Security
+
+- The install consent text is accurate, and the default install path runs no
+  third-party script and verifies what it downloads against GitHub's
+  published SHA-256; with none published it installs nothing and shows the
+  manual steps.
+- README and SECURITY.md say what `boost sync` uploads, that Boost stores and
+  syncs MCP bodies, and how to turn each off. The "makes no network requests"
+  wording is replaced by the exact list of what the package can do.
+
 ## [0.3.0] - 2026-09-23
 
 ### Fixed
@@ -158,7 +311,8 @@ outside npm, so an actual release is the only test.
   because Boost has no `pi` agent type and would file pi's sessions under
   Claude Code.
 
-[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/darkdiamond/pi-jfrog-boost/compare/v0.2.2...v0.2.3

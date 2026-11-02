@@ -1,68 +1,75 @@
 ---
 name: boost
-description: Use JFrog Boost to recover output it compacted, read documents pi cannot open, measure token savings, bypass filtering for a command that needs exact output, or diagnose the Boost install. Use when you see a "boost retrieve <id>" marker, when output looks compacted or truncated, or when asked about Boost, token savings, or context waste.
+description: Use JFrog Boost in pi to recover output it shortened, read PDF and Office files, get exact output for one command, check token savings, or find out why Boost is idle. Use when a result ends with a "boost retrieve <id>" line, when output looks shortened, or when asked about Boost, token savings or context use.
 ---
 
-# JFrog Boost
+# JFrog Boost in pi
 
-Boost compacts noisy tool output before it reaches the model. In pi it filters
-the results of `bash`, `powershell`, `read`, `grep`, `find`, and `ls` after the
-tool runs. `edit` and `write` are untouched.
+pi-jfrog-boost hands some tool output to JFrog Boost after the tool runs and gives
+you Boost's shorter version. The `jfrog-boost` section of your system prompt says
+what is active in this session. At most:
+
+- `bash` / `powershell` output, when Boost's shell filtering is on;
+- MCP tool results (`mcp__<server>__<tool>`) you call directly, when Boost has a
+  filter for the tool (calls made from inside `codemode` are never changed);
+- `read` of PDF, Word, Excel, PowerPoint and OpenDocument files, and of large
+  notebooks read whole, which arrive as converted text;
+- whole `read`s of `*.log` / `*.out`, when the user turned on `readLogs` (re-read with
+  `offset`/`limit` for exact lines).
+
+Ordinary reads (source, JSON, Markdown, HTML, CSV), `edit`, `write`, `grep`,
+`find` and `ls` are never changed. Plenty of output passes through unchanged; that
+is normal.
 
 ## Recovering what was dropped
 
-Compacted output is intentional and normally complete enough — prefer it.
-When it ends in a marker like `boost retrieve 147` and you need a detail it
-dropped, recover that instead of re-running the original command:
+Shortened output is intentional and usually enough; prefer it. A shortened result
+may end with `[Boost compressed ~84%. Get the full original output simply with: boost retrieve 147]`.
+When you need a detail it dropped, recover just that instead of re-running the command:
 
-```sh
-boost retrieve 147                     # the whole original output
-boost retrieve 147 --query "timeout"   # BM25 search within it
-boost retrieve 147 --lines 40-80       # a 1-indexed line range
-```
+    boost retrieve 147 --query "timeout"   # matching lines only
+    boost retrieve 147 --lines 40-80       # a 1-indexed range
+    boost retrieve 147                     # everything (last resort)
 
-Prefer `--query` or `--lines` over a full dump: the point is to spend fewer
-tokens, not to undo the compaction.
+Boost learns from retrieves: after a few, it switches that filter off on this
+machine for every agent. Retrieve when you genuinely need the detail, narrowly.
+If there is no marker and you need everything, re-run with `DISABLE_BOOST=1`
+(see Exact output). If `boost retrieve` fails with an error about the Preview
+Agreement, the user has not accepted it and retrieve cannot work: re-run the
+command with `DISABLE_BOOST=1` instead, and do not accept the agreement yourself.
+If `boost` is not found, use the full path given in the system prompt; in
+PowerShell call it with `&`, e.g. `& "C:\…\boost.exe" retrieve 147`.
 
-## Reading documents
+## Exact output
 
-pi's `read` tool cannot decode PDFs or Office files — on its own it returns their
-raw bytes. Reading one is converted through Boost automatically, but you can
-also ask directly:
+- One shell command: `DISABLE_BOOST=1 <command>` (or `BOOST_DISABLED=1 <command>`).
+  In PowerShell: `$env:DISABLE_BOOST=1; <command>`.
+  Commands that run `boost` themselves are never shortened.
+- Web pages: curl/wget output that is a whole HTML page may arrive as readable
+  text. `DISABLE_BOOST=1 curl …` gives raw HTML (in PowerShell,
+  `$env:DISABLE_BOOST=1; curl …`).
+- Files: `read` is exact for text files. A notebook read with any `offset` or
+  `limit` returns its raw JSON.
 
-```sh
-boost read ./quarterly-report.xlsx
-boost read --max-lines 200 ./long-spec.pdf
-```
+## Documents
 
-Converted text is not source lines — do not cite line numbers from it.
+Converted documents start with a `[Converted from … by JFrog Boost …]` line and are
+paged like any read: use `offset` to continue. Line numbers refer to the
+conversion, not the file; never `edit` from converted text. Legacy `.doc`, `.xls`
+and `.ppt` cannot be converted; ask the user for a modern or text export. For
+formats `read` does not convert, you may run `boost read <file>` yourself, e.g.
+`boost read page.html` (article text, not source) or `boost read data.csv` (only
+the first 40 lines: a preview, not the data).
 
-## Turning it off for one command
+## Savings and diagnosis
 
-When a command must return exact, unfiltered output, prefix it:
+The user can run `/boost status`, `/boost stats` and `/boost report` in pi. In the
+shell: `boost report -t` (measured savings), `boost doctor`, `boost filters show`.
+Never run `boost init` or edit `~/.boost/config.toml` for the user.
 
-```sh
-DISABLE_BOOST=1 diff -u expected.txt actual.txt
-```
+## Limits
 
-Start pi with `DISABLE_BOOST=1` to turn the integration off for a whole session.
-`boost` commands themselves, such as `boost retrieve`, are never compacted.
-
-## Measuring and diagnosing
-
-```sh
-boost report -t   # token savings and what slowed the session down
-boost doctor      # check the local install, hooks, and data paths
-boost filters     # list, enable, and disable individual filters
-```
-
-## Limits worth knowing
-
-- Never prefix a command with `boost` yourself; the integration handles it.
-- Boost decides what to compact. Plenty of output passes through unchanged, and
-  that is normal — not a sign the integration is broken.
-- Boost wraps commands. It does not sandbox them or make them safe.
-- Redaction is best effort, not a security boundary. Binary output and partial
-  reads may still contain secrets.
-- Everything fails open: if Boost is missing or errors, the original output is
-  what you get.
+- Never pipe a command into `boost` yourself; pi already sends output to it.
+- Boost wraps output; it does not sandbox commands. Secret redaction is best
+  effort, not a security boundary.
+- If Boost is missing, slow or failing, you get the original output.

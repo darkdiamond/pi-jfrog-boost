@@ -6,7 +6,10 @@ body:
     attributes:
       value: |
         Boost decides what to compact — output passing through unchanged is
-        normal and usually not a bug. `boost doctor` is a good first check.
+        normal and usually not a bug. Shell compaction is off by default since
+        Boost 0.14.6 (`/boost settings` → Shell output), and file reads, `grep`,
+        `find` and `ls` are never compacted. `/boost status` in pi and
+        `boost doctor` in a terminal are good first checks.
   - type: textarea
     id: what
     attributes:
@@ -22,6 +25,18 @@ body:
         3. ...
     validations: { required: true }
   - type: textarea
+    id: status
+    attributes:
+      label: /boost status
+      description: |
+        Run `/boost status` in pi (the session where it happened, if you can) and
+        paste the output. It shows the Boost binary and version, which surfaces
+        are on and why, the breaker, and this session's skip and error counters.
+        It contains no tool output, but it does show your binary and settings
+        paths; trim anything you'd rather not share.
+      render: text
+    validations: { required: true }
+  - type: textarea
     id: versions
     attributes:
       label: Versions
@@ -33,4 +48,4 @@ body:
     attributes:
       label: Fail-open check
       options:
-        - label: I confirmed the behaviour goes away with `DISABLE_BOOST=1`
+        - label: I confirmed the behaviour goes away with `DISABLE_BOOST=1` (or `pi --no-boost=true`)

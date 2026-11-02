@@ -1,0 +1,19 @@
+# Constructs the parser must survive without losing the keys around them.
+title = """multi
+line"""
+bad line without equals
+[[plugins]]
+name = "ignored"
+
+[ feature_flags . "boost-cli-filtering" ]
+user = false
+remote = true
+weird = { a = 1, b = [1, 2], c = "x" }
+count = 1_000
+broken = [1, 2
+ratio = 0.5
+"quoted.key" = "kept"
+escaped = "tab\tquote\"unicode\u00e9"
+
+[feature_flags."boost-mcp-filtering"]
+user = false

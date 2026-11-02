@@ -14,14 +14,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Formatting and lint rules do not vary by OS, Node or pi; once is enough.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
   check:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         # The lowest Node pi supports, and current. Both run TypeScript
         # directly, which is how pi loads this extension.
-        os: [ubuntu-latest, windows-latest]
         node: ["22.19", "24"]
+        # dev: the devDependency (pi ^1.4.0, the validated line).
+        # min: pi 0.86.1, the oldest supported release. Only types are
+        # imported from pi, so the extension must typecheck and pass its unit
+        # tests against both API shapes; see src/compat.ts.
+        pi: [dev, min]
+        exclude:
+          # min x 22.19 runs on Linux only: the Node-version risk is already
+          # covered by the dev legs, and the pi-version risk by min x 24.
+          - pi: min
+            os: windows-latest
+            node: "22.19"
+          - pi: min
+            os: macos-latest
+            node: "22.19"
+    name: check (${{ matrix.os }}, node ${{ matrix.node }}, pi ${{ matrix.pi }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,8 +63,14 @@ jobs:
       # .npmrc makes this fail on any git/remote dependency or any install
       # script not reviewed in package.json's allowScripts.
       - run: npm ci
-      - run: npm run lint
+      # Swaps the oldest supported pi in without touching the lockfile. No
+      # install scripts, as in `npm ci`.
+      - if: matrix.pi == 'min'
+        run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@0.86.1 # zizmor: ignore[adhoc-packages] an exact pin, no scripts; testing the floor is this leg's purpose
       - run: npm run typecheck
+      # Unit tests use a Node stand-in for Boost (test/fixtures/fake-boost.mjs),
+      # so the real-process tests run on every OS. The e2e suite skips here:
+      # see CONTRIBUTING.md, "Running Boost in CI".
       - run: npm test
 
   package:
@@ -52,8 +87,10 @@ jobs:
       # Every installed package's registry signature and provenance
       # attestation must verify.
       - run: npm audit signatures
-      # The tarball ships TypeScript sources; make sure nothing else sneaks in.
-      - run: npm pack --dry-run
+      # The tarball ships TypeScript sources that run inside every user's pi:
+      # exactly src/, skills/, the settings schema and the docs, no install
+      # scripts, no runtime dependencies.
+      - run: npm run check:pack
 
   dependency-review:
     if: github.event_name == 'pull_request'

@@ -1,91 +1,97 @@
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { bypassesBoost, equivalentCommand, isDocument, isFiltered } from "../src/tools.ts";
+import { pathToFileURL } from "node:url";
+import {
+	BINARY_DOCS,
+	extensionOf,
+	isShell,
+	LEGACY_OFFICE,
+	logReadCommand,
+	normalizeWindowsShellPath,
+	readPathCandidates,
+	resolveReadPath,
+	shellQuote,
+} from "../src/tools.ts";
 
-test("every tool whose output can be noisy is filtered", () => {
-	for (const tool of ["bash", "powershell", "read", "grep", "find", "ls"]) {
-		assert.equal(isFiltered(tool), true, tool);
-	}
+test("only bash and powershell are shells", () => {
+	assert.equal(isShell("bash"), true);
+	assert.equal(isShell("powershell"), true);
+	for (const tool of ["read", "grep", "edit", "constructor", "toString"])
+		assert.equal(isShell(tool), false, tool);
 });
 
-test("tools pi already summarises are left alone", () => {
-	for (const tool of ["edit", "write", "unknown_extension_tool"]) {
-		assert.equal(isFiltered(tool), false, tool);
-	}
-});
-
-test("isFiltered does not inherit from Object.prototype", () => {
-	assert.equal(isFiltered("constructor"), false);
-	assert.equal(isFiltered("toString"), false);
-});
-
-test("shell tools are described to Boost by their own command", () => {
-	assert.equal(equivalentCommand("bash", { command: "npm test" }), "npm test");
-	assert.equal(equivalentCommand("powershell", { command: "Get-ChildItem" }), "Get-ChildItem");
-	assert.equal(equivalentCommand("bash", {}), undefined);
-});
-
-test("in-process tools are described as the command they stand in for", () => {
-	assert.equal(equivalentCommand("read", { path: "/tmp/a.txt" }), "cat /tmp/a.txt");
-	assert.equal(equivalentCommand("ls", { path: "/usr/lib" }), "ls -la /usr/lib");
-	assert.equal(equivalentCommand("find", { pattern: "*.ts", path: "src" }), "find src -name '*.ts'");
-	assert.equal(equivalentCommand("grep", { pattern: "TODO" }), "grep -rn TODO .");
-	assert.equal(equivalentCommand("edit", { path: "/tmp/a" }), undefined);
+test("a whole log read is described as `cat <abs>`", () => {
+	assert.equal(logReadCommand("/work/a.log"), "cat /work/a.log");
+	assert.equal(logReadCommand("/work/my app.log"), "cat '/work/my app.log'");
 });
 
 test("arguments that could change a command's meaning are quoted", () => {
-	assert.equal(equivalentCommand("ls", { path: "/tmp/a; rm -rf ~" }), "ls -la '/tmp/a; rm -rf ~'");
+	assert.equal(shellQuote("/tmp/a; rm -rf ~"), "'/tmp/a; rm -rf ~'");
+	assert.equal(shellQuote("it's"), `'it'\\''s'`);
+	assert.equal(shellQuote("/plain/path-1.log"), "/plain/path-1.log");
 });
 
-test("a quote in an argument cannot close the quoting", () => {
-	assert.equal(equivalentCommand("grep", { pattern: "it's", path: "." }), `grep -rn 'it'\\''s' .`);
+test("read paths resolve the way pi's read resolves them", () => {
+	const cwd = resolve("/work/project");
+	const home = resolve("/home/me");
+	assert.equal(resolveReadPath("logs/a.log", cwd, home), join(cwd, "logs", "a.log"));
+	assert.equal(resolveReadPath("@logs/a.log", cwd, home), join(cwd, "logs", "a.log"));
+	assert.equal(resolveReadPath("~/a.log", cwd, home), join(home, "a.log"));
+	assert.equal(resolveReadPath("~", cwd, home), home);
+	assert.equal(resolveReadPath(resolve("/var/log/a.log"), cwd, home), resolve("/var/log/a.log"));
+	// pi normalises Unicode spaces before anything else (`@` included).
+	assert.equal(resolveReadPath("@my\u00a0file.pdf", cwd, home), join(cwd, "my file.pdf"));
+	assert.equal(resolveReadPath("a\u202Fb.pdf", cwd, home), join(cwd, "a b.pdf"));
+	const abs = resolve("/var/docs/q3.pdf");
+	assert.equal(resolveReadPath(pathToFileURL(abs).href, cwd, home), abs);
 });
 
-test("pi's grep options carry over to the equivalent command", () => {
-	assert.equal(
-		equivalentCommand("grep", {
-			pattern: "todo",
-			path: "src",
-			ignoreCase: true,
-			literal: true,
-			glob: "*.ts",
-		}),
-		"grep -rniF --include='*.ts' todo src",
-	);
+test("`~\\` is the home directory on win32 only; elsewhere it is a file name", () => {
+	const cwd = resolve("/work/project");
+	const home = resolve("/home/me");
+	assert.equal(resolveReadPath("~\\a.pdf", cwd, home, "linux"), join(cwd, "~\\a.pdf"));
+	assert.equal(resolveReadPath("~\\a.pdf", cwd, home, "darwin"), join(cwd, "~\\a.pdf"));
+	assert.equal(resolveReadPath("~\\a.pdf", cwd, home, "win32"), join(home, "a.pdf"));
 });
 
-test("commands that opt out or already run Boost bypass the filter", () => {
-	for (const command of [
-		"DISABLE_BOOST=1 diff -u a b",
-		"make && DISABLE_BOOST=1 cat out.txt",
-		"$env:DISABLE_BOOST=1; Get-Content a.txt",
-		"boost retrieve 12 --query timeout",
-		"npm test | boost",
-	]) {
-		assert.equal(bypassesBoost(command), true, command);
+test("MSYS, Cygwin and WSL drive paths become Windows paths, as pi does on win32", () => {
+	assert.equal(normalizeWindowsShellPath("/c/Users/x/doc.pdf"), "C:\\Users\\x\\doc.pdf");
+	assert.equal(normalizeWindowsShellPath("/mnt/d/a.pdf"), "D:\\a.pdf");
+	assert.equal(normalizeWindowsShellPath("/cygdrive/e"), "E:\\");
+	for (const unchanged of ["/usr/lib/a.pdf", "//server/share", "rel/a.pdf", "/c\\x"]) {
+		assert.equal(normalizeWindowsShellPath(unchanged), unchanged);
 	}
+	const cwd = resolve("/work/project");
+	assert.equal(resolveReadPath("/c/x.pdf", cwd, "/h", "linux"), resolve("/c/x.pdf"), "not off win32");
 });
 
-test("ordinary commands, including ones that mention boost, are filtered", () => {
-	for (const command of [
-		"npm test",
-		"grep -rn boost src",
-		"cat boost.toml",
-		"DISABLE_BOOST=0 ls",
-		undefined,
-	]) {
-		assert.equal(bypassesBoost(command), false, String(command));
-	}
+test("the look-alike names pi tries, in pi's order, without duplicates", () => {
+	assert.deepEqual(readPathCandidates("/a/plain.pdf"), ["/a/plain.pdf"]);
+	assert.deepEqual(readPathCandidates("/a/Shot 1.02 PM.pdf"), [
+		"/a/Shot 1.02 PM.pdf",
+		"/a/Shot 1.02\u202FPM.pdf",
+	]);
+	const typed = "/a/d'\u00e9cran.pdf";
+	const nfd = typed.normalize("NFD");
+	assert.deepEqual(readPathCandidates(typed), [
+		typed,
+		nfd,
+		"/a/d\u2019\u00e9cran.pdf",
+		nfd.replace("'", "\u2019"),
+	]);
 });
 
-test("documents Boost can convert are recognised, case-insensitively", () => {
-	for (const path of ["/a/report.pdf", "b.DOCX", "./sheet.xlsx", "page.html"]) {
-		assert.equal(isDocument(path), true, path);
-	}
+test("extensions are lower-cased, and dotfiles have none", () => {
+	assert.equal(extensionOf("/a/Report.PDF"), ".pdf");
+	assert.equal(extensionOf("C:\\logs\\build.out"), ".out");
+	assert.equal(extensionOf(".bashrc"), "");
+	assert.equal(extensionOf("Makefile"), "");
+	assert.equal(extensionOf("dir.d/file"), "");
+	assert.equal(extensionOf(undefined), "");
 });
 
-test("source files and non-strings are not documents", () => {
-	for (const path of ["index.ts", "README.md", "noextension", ".pdfrc", "", undefined, 42]) {
-		assert.equal(isDocument(path), false, String(path));
-	}
+test("the document tables match the spec: no CSV, RTF or HTML", () => {
+	assert.deepEqual([...BINARY_DOCS].sort(), [".docx", ".odp", ".ods", ".odt", ".pdf", ".pptx", ".xlsx"]);
+	assert.deepEqual([...LEGACY_OFFICE].sort(), [".doc", ".ppt", ".xls"]);
 });

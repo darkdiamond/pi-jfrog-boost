@@ -1,0 +1,126 @@
+name: Canary
+
+# Early warning for upstream changes that CI cannot see. CI pins pi to the
+# validated ^1.4.0 line (the lockfile) and to the 0.86.1 floor; this checks the
+# extension against whatever pi is `latest` on npm today, once a week, so a
+# breaking pi release shows up as one open `canary` issue instead of as a user
+# report. The extension imports only types from pi, so "typechecks and passes
+# its unit tests against pi@latest" is exactly the compatibility promise.
+#
+# The optional boost-e2e job runs the hermetic e2e suite against a pinned Boost
+# release. It is off unless the repository variable BOOST_CANARY is "true":
+# running JFrog's preview binary in this project's CI is a maintainer policy
+# decision about its Preview Agreement, not a technical limit (CONTRIBUTING.md,
+# "Running Boost in CI").
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+jobs:
+  pi-latest:
+    name: pi@latest typecheck and unit tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pi: ${{ steps.pi.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache: a scheduled job should test what the registry
+      # serves today, and there is nothing to gain from sharing a cache with
+      # the release path.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - run: npm ci
+      # Swaps in today's pi without touching the lockfile, and with no install
+      # scripts, as CI's min leg does.
+      - run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@latest # zizmor: ignore[adhoc-packages] testing the unpinned release is this workflow's purpose
+      # Read from disk, not require(): pi's `exports` map does not expose
+      # package.json, so require() throws ERR_PACKAGE_PATH_NOT_EXPORTED, and
+      # inside `$(...)` that failure would not stop the step. Assigned first
+      # and tested, so an empty version fails here instead of reaching the
+      # issue as "unknown".
+      - id: pi
+        run: |
+          v="$(node -p 'JSON.parse(require("node:fs").readFileSync("node_modules/@earendil-works/pi-coding-agent/package.json", "utf8")).version')"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - run: npm run typecheck
+      - run: npm test
+
+  boost-e2e:
+    name: hermetic e2e against Boost v0.16.11 (no terms)
+    if: vars.BOOST_CANARY == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # A pinned release, never `latest` and never install.sh: the tarball is
+      # checked against the SHA-256 GitHub published for it when this pin was
+      # recorded. Bump all three together.
+      BOOST_VERSION: v0.16.11
+      BOOST_ASSET: boost-linux-amd64.tar.gz
+      BOOST_SHA256: 883dbfa13020f5805cbcbe5e14ff7324e15c49941fc2ccfce43032a6434aae5b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - run: npm ci
+      - run: npm install --no-save --ignore-scripts @earendil-works/pi-coding-agent@latest # zizmor: ignore[adhoc-packages] testing the unpinned release is this workflow's purpose
+      - name: Download and verify Boost
+        run: |
+          dir="$RUNNER_TEMP/boost"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$BOOST_ASSET" \
+            "https://github.com/jfrog/boost/releases/download/$BOOST_VERSION/$BOOST_ASSET"
+          echo "$BOOST_SHA256  $dir/$BOOST_ASSET" | sha256sum -c -
+          tar -xzf "$dir/$BOOST_ASSET" -C "$dir" boost
+          chmod 0755 "$dir/boost"
+          echo "BOOST_BIN=$dir/boost" >> "$GITHUB_ENV"
+      # The suite builds its own throwaway HOME (test/helpers/hermetic.ts) and
+      # never accepts the Preview Agreement. There are no terms lines to copy
+      # on a runner, so the document and retrieve cases skip with their reason;
+      # shell and MCP filtering work without the agreement.
+      - run: npm run test:e2e
+
+  report:
+    name: open or update the canary issue
+    needs: [pi-latest, boost-e2e]
+    if: always() && (needs.pi-latest.result == 'failure' || needs.boost-e2e.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # the only job that writes anything
+    steps:
+      # Everything that comes from outside this file reaches the script through
+      # env, never through `${{ }}` inside it, so nothing can be injected.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PI_VERSION: ${{ needs.pi-latest.outputs.pi }}
+          PI_RESULT: ${{ needs.pi-latest.result }}
+          BOOST_RESULT: ${{ needs.boost-e2e.result }}
+        run: |
+          body="$(printf 'The weekly canary failed: %s\n\n- pi@latest (%s): %s\n- Boost e2e: %s\n' \
+            "$RUN_URL" "${PI_VERSION:-unknown}" "$PI_RESULT" "$BOOST_RESULT")"
+          gh label create canary --color FBCA04 \
+            --description "Weekly canary against pi@latest / pinned Boost" 2>/dev/null || true
+          number="$(gh issue list --label canary --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Canary failing" --label canary --body "$body"
+          fi

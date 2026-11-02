@@ -1,7 +1,7 @@
 {
 	"name": "pi-jfrog-boost",
-	"version": "0.3.0",
-	"description": "JFrog Boost integration for the pi coding agent — compacts noisy tool output to save tokens and context. Community project, not affiliated with JFrog.",
+	"version": "0.4.0",
+	"description": "Cut pi's token use with JFrog Boost: converts PDF and Office files, and compacts MCP and (opt-in) test/build output; file reads stay exact. Fail-open, zero dependencies. Community project, not affiliated with JFrog.",
 	"type": "module",
 	"license": "MIT",
 	"author": "DarkDiamonD (https://github.com/darkdiamond)",
@@ -12,7 +12,10 @@
 		"boost",
 		"token-optimization",
 		"agent",
-		"hooks"
+		"hooks",
+		"mcp",
+		"context",
+		"tokens"
 	],
 	"repository": {
 		"type": "git",
@@ -26,6 +29,7 @@
 	"files": [
 		"src",
 		"skills",
+		"settings.schema.json",
 		"README.md",
 		"LICENSE",
 		"CHANGELOG.md"
@@ -38,8 +42,10 @@
 		"format": "biome check --write .",
 		"lint": "biome ci .",
 		"typecheck": "tsc --noEmit",
-		"test": "node --test \"test/*.test.ts\"",
-		"test:e2e": "PI_BOOST_E2E=1 node --test test/e2e.test.ts",
+		"test": "node --import ./test/helpers/spawn-spy.ts --test \"test/*.test.ts\"",
+		"test:e2e": "node scripts/e2e.mjs",
+		"test:e2e:min": "node scripts/e2e-min.mjs",
+		"check:pack": "node scripts/check-pack.mjs",
 		"check": "npm run lint && npm run typecheck && npm test",
 		"prepublishOnly": "npm run check"
 	},
@@ -57,7 +63,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.14",
-		"@earendil-works/pi-coding-agent": "^0.86.1",
+		"@earendil-works/pi-coding-agent": "^1.4.0",
 		"@types/node": "^26.6.1",
 		"typescript": "^7.0.2"
 	},

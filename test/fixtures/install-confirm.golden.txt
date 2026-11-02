@@ -1,0 +1,17 @@
+Install JFrog Boost v0.15.4 for darwin/arm64?
+
+pi-jfrog-boost will download boost-darwin-arm64.tar.gz (14.2 MB) from github.com/jfrog/boost,
+check it against the SHA-256 GitHub publishes for it,
+and place the boost binary at ~/.local/bin/boost. That is all it does:
+  • it does not run JFrog's install.sh
+  • it does not change your shell startup files or PATH
+  • it does not run `boost init`, so no hooks are added to other agents
+  • it does not accept JFrog's Preview Agreement for you
+
+MCP results are compacted (Boost ≥ 0.15.3) only for tools pi calls directly
+or loads with tool_search; calls made inside codemode scripts (pi 1.x's
+default MCP exposure) are not. Shell-output compaction is off by default in
+Boost; turn it on for pi with /boost settings → Shell output.
+PDF/Office conversion and boost retrieve (recovering what was dropped) need
+the agreement: in a terminal run `boost init --dry-run`, then `boost init`.
+Terms: https://boost.jfrog.com/preview-agreement/

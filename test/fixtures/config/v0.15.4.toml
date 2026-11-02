@@ -1,0 +1,20 @@
+# Shaped like the config.toml Boost v0.15.4 writes after `boost init` and a
+# flag refresh (values synthetic). Used by test/boost-config.test.ts.
+accept_terms = "yes"
+accept_terms_at = "2026-10-01T09:00:00Z"
+terms_version = "preview-1"
+
+[measurement]
+boost_off_sessions = false
+
+[feature_flags._metadata]
+last_updated_at = "2026-10-13T05:06:56.458022Z"
+
+[feature_flags."boost-auto-update"]
+remote = true
+
+[feature_flags."boost-cli-filtering"]
+remote = false
+
+[feature_flags."boost-mcp-filtering"]
+remote = true

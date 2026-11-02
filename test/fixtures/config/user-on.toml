@@ -1,0 +1,9 @@
+# The user turned CLI filtering on with `boost feature-flags`; remote says off.
+accept_terms = "yes"
+
+[feature_flags._metadata]
+last_updated_at = "2026-10-13T05:06:56Z"
+
+[feature_flags."boost-cli-filtering"]
+user = true
+remote = false
