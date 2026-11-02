@@ -211,7 +211,7 @@ test("/boost off and on toggle the session, repaint the footer and reset the bre
 
 test("/boost on in a session that started off wakes it: footer after the probe, notices, honest reply", async () => {
 	// The probe settles only when waited for, as a real one ~150 ms later.
-	const ready: ReadinessState = { kind: "ready", version: [0, 15, 4] };
+	const ready: ReadinessState = { kind: "ready", version: [0, 16, 11] };
 	let state: ReadinessState = { kind: "probing" };
 	let starts = 0;
 	const readiness: Readiness = {
@@ -633,7 +633,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 		const dest = join(home, ".local", "bin", "boost");
 		const archive = Buffer.from("fake archive");
 		const asset = "boost-darwin-arm64.tar.gz";
-		const url = `https://github.com/jfrog/boost/releases/download/v0.15.4/${asset}`;
+		const url = `https://github.com/jfrog/boost/releases/download/v0.16.11/${asset}`;
 		const stub = createPiStub({
 			ui: { select: [INSTALL_OPTIONS[0]], confirm: [true] },
 			exec: async (_command, args) => {
@@ -651,7 +651,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 			wait: async () => state,
 			lastKnown: () => state,
 			retry() {
-				state = binary() ? { kind: "ready", version: [0, 15, 4] } : { kind: "missing" };
+				state = binary() ? { kind: "ready", version: [0, 16, 11] } : { kind: "missing" };
 			},
 			binary,
 			version: () => ("version" in state ? state.version : undefined),
@@ -670,11 +670,11 @@ test("after /boost install the footer is repainted at once, not at the next tool
 				home,
 				dest,
 				tmpdir: dir,
-				verify: async () => call("boost v0.15.4\n"),
+				verify: async () => call("boost v0.16.11\n"),
 				fetch: (async (target: string | URL) =>
 					String(target).includes("api.github.com")
 						? Response.json({
-								tag_name: "v0.15.4",
+								tag_name: "v0.16.11",
 								assets: [
 									{
 										name: asset,
@@ -691,7 +691,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 		await stub.fire("session_start", { type: "session_start", reason: "startup" });
 		assert.equal(stub.ui.statuses.at(-1)?.text, "boost: not installed (/boost install)");
 		await stub.command("boost", "install");
-		assert.match(stub.ui.notices.at(-1)?.message ?? "", /^Installed JFrog Boost v0\.15\.4 at /);
+		assert.match(stub.ui.notices.at(-1)?.message ?? "", /^Installed JFrog Boost v0\.16\.11 at /);
 		assert.equal(stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "repainted by the install itself");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

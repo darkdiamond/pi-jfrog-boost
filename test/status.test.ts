@@ -27,7 +27,7 @@ import {
 	tooOldNotice,
 } from "../src/status.ts";
 
-const READY: ReadinessState = { kind: "ready", version: [0, 15, 4] };
+const READY: ReadinessState = { kind: "ready", version: [0, 16, 11] };
 
 const footer = (over: Partial<FooterView> = {}) =>
 	footerText({
@@ -238,7 +238,7 @@ function view(over: Partial<StatusView> = {}, settings: Partial<Settings> = {}):
 		settings: effective,
 		settingsPath: "/Users/me/.pi/agent/jfrog-boost.json",
 		home: "/Users/me",
-		gate: shellGate(effective.shell, config, {}, [0, 15, 4]),
+		gate: shellGate(effective.shell, config, {}, [0, 16, 11]),
 		mcpFlag: resolveFlag(config, "boost-mcp-filtering", {}),
 		config,
 		flags: flagsFreshness(config, {}, NOW),
@@ -255,7 +255,7 @@ test("the status report matches the §10.2 layout", () => {
 		statusReport(view()),
 		[
 			"JFrog Boost — ready",
-			"  binary    /Users/me/.local/bin/boost  v0.15.4 (validated) — not on PATH; the model is given the full path",
+			"  binary    /Users/me/.local/bin/boost  v0.16.11 (validated) — not on PATH; the model is given the full path",
 			"  shell     auto → off (Boost flag boost-cli-filtering: remote=false). /boost settings → Shell output: on",
 			"  documents on (Preview Agreement accepted 2026-10-01)    notebooks on    readLogs off",
 			"  mcp       on (boost-mcp-filtering: default)    exclude: none",
@@ -354,8 +354,8 @@ test("the title, binary and breaker lines follow the state", () => {
 		/^JFrog Boost — not installed\n {2}binary {4}not installed \(\/boost install\)\n/,
 	);
 	assert.match(
-		statusReport(view({ readiness: { kind: "ready", version: [0, 16, 0] }, onPath: true })),
-		/ {2}binary {4}\/Users\/me\/\.local\/bin\/boost {2}v0\.16\.0 \(newer than validated v0\.15\.4\)\n/,
+		statusReport(view({ readiness: { kind: "ready", version: [0, 17, 0] }, onPath: true })),
+		/ {2}binary {4}\/Users\/me\/\.local\/bin\/boost {2}v0\.17\.0 \(newer than validated v0\.16\.11\)\n/,
 	);
 	const open = statusReport(
 		view({ breaker: { kind: "open", until: NOW + 4.5 * 60_000, reason: "timeout" } }),

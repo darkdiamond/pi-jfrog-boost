@@ -19,7 +19,7 @@ export const MIN_BOOST_VERSION: BoostVersion = [0, 13, 13];
  * A newer Boost still works; `/boost status` says it is newer than validated,
  * and the shell gate lets Boost decide an unset CLI-filtering flag (§8.4).
  */
-export const VALIDATED_BOOST_VERSION: BoostVersion = [0, 15, 4];
+export const VALIDATED_BOOST_VERSION: BoostVersion = [0, 16, 11];
 /** From here on CLI filtering is behind the opt-in `boost-cli-filtering` flag. */
 export const FLAGS_MIN_VERSION: BoostVersion = [0, 14, 6];
 /** First release whose `boost hook claude` filters MCP tool results. */

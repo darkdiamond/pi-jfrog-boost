@@ -29,7 +29,7 @@ export function stubClient(overrides: Partial<BoostClient> = {}): BoostClient {
 		binary: () => "/fake/boost",
 		refresh: () => {},
 		childEnv: () => ({}),
-		version: async () => call("boost v0.15.4\n"),
+		version: async () => call("boost v0.16.11\n"),
 		filter: async () => call("", 0),
 		convert: async () => call("", 1),
 		mcp: async () => call("", 0),
@@ -49,7 +49,7 @@ export function fixedConfig(config: BoostConfig | string = EMPTY_CONFIG): Config
 
 /** A readiness that reports `state` and records how it was driven. */
 export function fixedReadiness(
-	state: ReadinessState = { kind: "ready", version: [0, 15, 4] },
+	state: ReadinessState = { kind: "ready", version: [0, 16, 11] },
 	binary: string | undefined = "/fake/boost",
 ): Readiness & { starts: number; checks: number } {
 	const r = {

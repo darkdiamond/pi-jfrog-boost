@@ -1146,7 +1146,7 @@ test("session_start kicks off the readiness probe without waiting for it", async
 		probe: () => {
 			probes++;
 			return new Promise((resolve) => {
-				release = () => resolve(call("boost v0.15.4\n"));
+				release = () => resolve(call("boost v0.16.11\n"));
 			});
 		},
 	});
@@ -1192,10 +1192,10 @@ test("a first turn that waited past the probe gets the awareness section", async
 	let ready = false;
 	const readiness: Readiness = {
 		...fixedReadiness(),
-		check: () => (ready ? { kind: "ready", version: [0, 15, 4] } : { kind: "probing" }),
+		check: () => (ready ? { kind: "ready", version: [0, 16, 11] } : { kind: "probing" }),
 		wait: async () => {
 			ready = true;
-			return { kind: "ready", version: [0, 15, 4] };
+			return { kind: "ready", version: [0, 16, 11] };
 		},
 	};
 	const h = harness({ readiness, config: fixedConfig(TERMS) });
@@ -1557,7 +1557,7 @@ test("with the shell gate off, not a single Boost process starts", async () => {
 	assert.equal(off.patch, undefined);
 	assert.deepEqual(off.spawns, [], "user = false: zero spawns");
 	const unknown = await gateRun("", {});
-	assert.deepEqual(unknown.spawns, [], "flag unrecorded on v0.15.4: Boost's default is off, zero spawns");
+	assert.deepEqual(unknown.spawns, [], "flag unrecorded on v0.16.11: Boost's default is off, zero spawns");
 	const settingOff = await gateRun(CLI_ON, { PI_BOOST_SHELL: "off" });
 	assert.deepEqual(settingOff.spawns, [], "shell: off wins over the flag");
 });
@@ -2030,7 +2030,7 @@ test("/boost status is built from the live state without spawning", async () => 
 		toolResultEvent("1.2", { toolName: "bash", input: { command: "ls" }, content: "a" }),
 	);
 	const report = ext.statusReport();
-	assert.match(report, /^JFrog Boost — ready\n {2}binary {4}\/fake\/boost {2}v0\.15\.4 \(validated\)/);
+	assert.match(report, /^JFrog Boost — ready\n {2}binary {4}\/fake\/boost {2}v0\.16\.11 \(validated\)/);
 	assert.match(report, /\n {2}shell {5}auto → on \(Boost flag boost-cli-filtering: user=true\)\n/);
 	assert.match(report, /\n {2}skipped {3}small 1 · exact 0/);
 	assert.deepEqual(spawned, []);

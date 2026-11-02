@@ -456,7 +456,8 @@ export interface ShellGate {
  * - `off`: never.
  * - `auto`: the flag's resolved value. When nothing records it, Boost's
  *   built-in default decides: on before v0.14.6, off ("CLI filtering remains
- *   opt-in") from v0.14.6 through the validated 0.15.x, and for a Boost newer
+ *   opt-in") from v0.14.6 through the validated 0.16.x (still `remote = false`
+ *   on v0.16.11), and for a Boost newer
  *   than that the call is made and Boost decides, so a future default change
  *   is not shadowed by this extension.
  */
@@ -479,7 +480,7 @@ export function shellGate(
 	return { on: false, reason: "unknown-default-off", flag };
 }
 
-/** Newer than the validated major.minor line (0.15.x), not merely a later patch. */
+/** Newer than the validated major.minor line (0.16.x), not merely a later patch. */
 function newerThanValidatedLine(version: BoostVersion): boolean {
 	return (
 		compareVersions(

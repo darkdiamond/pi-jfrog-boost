@@ -148,13 +148,14 @@ test("the shell gate: on, off, and auto by flag and by Boost version", () => {
 		[false, "unknown-default-off"],
 		"0.14.6 made it opt-in",
 	);
+	assert.equal(shellGate("auto", none, {}, v(15, 9)).on, false, "an older line keeps the opt-in default");
 	assert.equal(
-		shellGate("auto", none, {}, v(15, 9)).on,
+		shellGate("auto", none, {}, v(16, 40)).on,
 		false,
-		"a later 0.15.x patch is still the validated line",
+		"a later 0.16.x patch is still the validated line",
 	);
 	assert.deepEqual(
-		[shellGate("auto", none, {}, v(16, 0)).on, shellGate("auto", none, {}, v(16, 0)).reason],
+		[shellGate("auto", none, {}, v(17, 0)).on, shellGate("auto", none, {}, v(17, 0)).reason],
 		[true, "unknown-newer-than-validated"],
 		"newer than validated: Boost decides",
 	);

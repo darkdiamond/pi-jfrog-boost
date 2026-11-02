@@ -355,7 +355,7 @@ test("binaryStamp changes when the binary is replaced, and is undefined when it 
 });
 
 test("the version constants and comparisons", () => {
-	assert.deepEqual(VALIDATED_BOOST_VERSION, [0, 15, 4]);
+	assert.deepEqual(VALIDATED_BOOST_VERSION, [0, 16, 11]);
 	assert.deepEqual(FLAGS_MIN_VERSION, [0, 14, 6]);
 	assert.deepEqual(MCP_MIN_VERSION, [0, 15, 3]);
 	assert.ok(compareVersions([0, 15, 4], [0, 15, 3]) > 0);
