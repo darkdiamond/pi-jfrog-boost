@@ -63,7 +63,7 @@ const SLACK = fixture("mcp-slack.json");
 const SNAPSHOT = fixture("mcp-snapshot.json");
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-mcp-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 const MARKER = "[Boost compressed ~70%. Get the full original output simply with: boost retrieve 42]";
 const BIG = Array.from(

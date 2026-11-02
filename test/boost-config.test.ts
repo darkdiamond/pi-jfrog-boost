@@ -25,7 +25,7 @@ import {
 const FIXTURES = join(import.meta.dirname, "fixtures", "config");
 const fixture = (name: string) => readFileSync(join(FIXTURES, name), "utf8");
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-config-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 test("a v0.15.4 config: terms, metadata, remote flags, measurement", () => {
 	const config = parseBoostConfig(fixture("v0.15.4.toml"));

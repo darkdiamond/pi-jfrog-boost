@@ -296,7 +296,7 @@ test("a filter that throws leaves the original result untouched", async () => {
 // Documents (spec §7.1)
 
 const docRoot = mkdtempSync(join(tmpdir(), "pi-boost-ext-docs-"));
-after(() => rmSync(docRoot, { recursive: true, force: true }));
+after(() => rmSync(docRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 const TERMS = `accept_terms = "yes"\n${CLI_ON}`;
 const DOCX_PATH = join(docRoot, "q3.docx");
 writeFileSync(DOCX_PATH, docx(["Quarterly report"]));
@@ -763,7 +763,7 @@ test("off PATH the model is given the quoted full path; on PATH plain `boost`", 
 		assert.ok(on.includes("`boost retrieve <id> --query"), on);
 		assert.doesNotMatch(on, /not on PATH/);
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 	}
 });
 
@@ -1249,7 +1249,7 @@ test("an invalid settings key is reported once, as a warning naming the key", as
 // With the real client and the Node stand-in: proves the kill switch holds
 // at the process level, version probe included, not just in the stubs.
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-ext-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 test("with DISABLE_BOOST=1 not a single Boost process starts, probe included", async () => {
 	const log = join(root, "kill-switch.jsonl");
@@ -1575,7 +1575,7 @@ test("shell: on forces CLI filtering for pi's own Boost call only", async () => 
 // The full-output re-filter (spec §6.3), wired
 
 const fullRoot = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-full-"));
-after(() => rmSync(fullRoot, { recursive: true, force: true }));
+after(() => rmSync(fullRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 test("a bash result pi truncated is re-filtered from its full-output file", async () => {
 	const path = join(fullRoot, "pi-bash-00000000000000aa.log");

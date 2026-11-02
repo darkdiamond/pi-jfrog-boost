@@ -348,7 +348,7 @@ const TMP = mkdtempSync(join(tmpdir(), "jfrog-boost-full-"));
 const PI_TMP = mkdtempSync(join(TMP, "pi-"));
 const OUTSIDE = mkdtempSync(join(TMP, "outside-"));
 const narrowed = { tmpdir: () => PI_TMP };
-after(() => rmSync(TMP, { recursive: true, force: true }));
+after(() => rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 let fileId = 0;
 function saved(text: string, dir = TMP): string {

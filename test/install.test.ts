@@ -50,7 +50,7 @@ import { createPiStub, type PiStubOptions } from "./helpers/harness.ts";
 import { call } from "./helpers/runtime.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-install-test-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 let n = 0;
 
 const GOLDEN = readFileSync(

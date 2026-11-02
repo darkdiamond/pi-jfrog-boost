@@ -14,7 +14,7 @@ import { createProcessRunner, type RunOptions } from "../src/boost-process.ts";
 const FAKE = join(import.meta.dirname, "fixtures", "fake-boost.mjs");
 const launcher = (exe: string) => ({ file: process.execPath, args: [exe] });
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-proc-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 let logs = 0;
 const logFile = () => join(root, `proc-${logs++}.jsonl`);

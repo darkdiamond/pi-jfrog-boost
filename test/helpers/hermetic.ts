@@ -521,7 +521,7 @@ export function createHermetic(options: HermeticOptions = {}): Hermetic {
 		},
 		assertIsolated,
 		dispose() {
-			rmSync(root, { recursive: true, force: true });
+			rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 		},
 	};
 }

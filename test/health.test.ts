@@ -30,7 +30,7 @@ import { fixedConfig } from "./helpers/runtime.ts";
 
 const FAKE = join(import.meta.dirname, "fixtures", "fake-boost.mjs");
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-health-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 const ran = (over: Partial<RunResult> = {}): RunResult => ({
 	code: 0,

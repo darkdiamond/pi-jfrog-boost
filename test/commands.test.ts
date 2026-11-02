@@ -694,7 +694,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 		assert.match(stub.ui.notices.at(-1)?.message ?? "", /^Installed JFrog Boost v0\.16\.11 at /);
 		assert.equal(stub.ui.statuses.at(-1)?.text, "boost ✓ shell off", "repainted by the install itself");
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 	}
 });
 

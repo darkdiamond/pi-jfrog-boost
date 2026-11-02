@@ -20,7 +20,7 @@ import {
 } from "../src/boost-binary.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-bin-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 /**
  * Pretend every path in `present` is an executable file and nothing else is.

@@ -39,7 +39,7 @@ const FRESH = fixedConfig('[feature_flags._metadata]\nlast_updated_at = "2026-10
 const NOW = Date.parse("2026-10-01T01:00:00Z");
 
 const root = mkdtempSync(join(tmpdir(), "pi-jfrog-boost-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 let logs = 0;
 /** A fresh invocation log for one test. */

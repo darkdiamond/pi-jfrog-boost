@@ -39,7 +39,7 @@ import { docx } from "./helpers/docx.ts";
 import { call } from "./helpers/runtime.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-boost-documents-"));
-after(() => rmSync(root, { recursive: true, force: true }));
+after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 /** Numbered lines `line 1` … `line n`, joined by `\n`. */
 const numbered = (n: number, width = 0) =>
