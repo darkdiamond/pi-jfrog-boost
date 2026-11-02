@@ -468,9 +468,11 @@ test("a converted notebook over one page says how to reach the rest of the conve
 	assert.equal(bytes.kind, "page");
 	if (bytes.kind !== "page") return;
 	assert.deepEqual(bytes.lines, [1, 51, 300]);
-	assert.match(
-		bytes.text,
-		/\n\n\[Showing lines 1-51 of 300 of the converted notebook \(50\.0KB limit\)\. To continue, use bash: boost read -- \S+wide\.ipynb \| sed -n '52,102p'\. A read with offset returns the raw notebook JSON instead\.\]$/,
+	assert.ok(
+		bytes.text.endsWith(
+			`\n\n[Showing lines 1-51 of 300 of the converted notebook (50.0KB limit). To continue, use bash: boost read -- ${shellQuote(join(root, "wide.ipynb"))} | sed -n '52,102p'. A read with offset returns the raw notebook JSON instead.]`,
+		),
+		bytes.text.slice(-300),
 	);
 
 	// A PDF keeps pi's own notice: its offset reads do page the converted text.

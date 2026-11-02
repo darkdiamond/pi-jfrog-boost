@@ -152,7 +152,7 @@ function setup(options: Setup = {}) {
 	const api = options.api === undefined ? release() : options.api;
 	const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
 		fetched.push(String(url));
-		if (String(url).includes("api.github.com")) {
+		if (new URL(String(url)).host === "api.github.com") {
 			return typeof api === "function"
 				? (api as (init?: RequestInit) => Response | Promise<Response>)(init)
 				: Response.json(api);
@@ -359,7 +359,7 @@ test("a checksum mismatch aborts before tar, leaves no binary and cleans up", as
 	assert.equal(s.refreshes(), 0);
 	const message = s.notices().at(-1) ?? "";
 	assert.match(message, /checksum failed/);
-	assert.match(message, /https:\/\/boost\.jfrog\.com\/llms-install\.txt/);
+	assert.ok(message.includes("https://boost.jfrog.com/llms-install.txt"));
 	assert.equal(s.stub.ui.notices.at(-1)?.level, "error");
 });
 
@@ -467,7 +467,10 @@ test("a failed official installer is reported as a failure, even with an old Boo
 });
 
 test("the official installer script runs nothing unless the whole download succeeded", (t) => {
-	if (process.platform === "win32") t.skip("bash and a shell-script curl stand-in");
+	if (process.platform === "win32") {
+		t.skip("bash and a shell-script curl stand-in");
+		return;
+	}
 	const dir = mkdtempSync(join(root, "official-"));
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
@@ -715,7 +718,10 @@ test("a GitHub lookup that never answers times out to the commands text", async 
 });
 
 test("the default verify runs `<binary> version` with flag fetching disabled", async (t) => {
-	if (process.platform === "win32") t.skip("a shell script stands in for boost");
+	if (process.platform === "win32") {
+		t.skip("a shell script stands in for boost");
+		return;
+	}
 	const dir = join(root, `verify-${++n}`);
 	mkdirSync(dir);
 	const script = join(dir, "boost");

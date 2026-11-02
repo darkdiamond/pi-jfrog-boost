@@ -15,6 +15,7 @@ import {
 	createConfigReader,
 	MAX_CONFIG_BYTES,
 	parseBoostConfig,
+	parseGoDuration,
 	parseToml,
 	resolveFlag,
 	shellGate,
@@ -285,4 +286,9 @@ test("telemetry: [tracing] telemetry, overridden by BOOST_TELEMETRY, on by defau
 	for (const value of ["0", "false", "f", "no", "off", "on", "yes", "maybe", " 1", " true "]) {
 		assert.equal(telemetryOn(none, { BOOST_TELEMETRY: value }), false, JSON.stringify(value));
 	}
+});
+
+test("parseGoDuration refuses absurdly long input instead of scanning it", () => {
+	assert.equal(parseGoDuration(`${"9".repeat(100)}h`), undefined);
+	assert.equal(parseGoDuration("1h30m"), 90 * 60_000);
 });

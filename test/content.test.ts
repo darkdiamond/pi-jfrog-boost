@@ -253,3 +253,13 @@ test("escape stripping stays linear on unterminated OSC sequences", () => {
 	// Terminated sequences are still removed, unterminated ones left as text.
 	assert.equal(stripAnsi("a\u001b]0;t\u0007b\u001b]8;;x"), "ab\u001b]8;;x");
 });
+
+test("the HTML sniff is linear on repeated comment openers (no ReDoS)", () => {
+	const hostile = `<!--${"--><!--".repeat(5000)}`;
+	const started = performance.now();
+	assert.equal(looksLikeHtmlDocument(hostile), false);
+	assert.ok(performance.now() - started < 200, "the old pattern took minutes here");
+	assert.equal(looksLikeHtmlDocument("<!-- a -->\n<!-- b --> <!DOCTYPE html><html></html>"), true);
+	assert.equal(looksLikeHtmlDocument("<!-- unterminated <!DOCTYPE html>"), false);
+	assert.equal(looksLikeHtmlDocument("<!-- a --> text <html>"), false, "a comment ends at its first -->");
+});

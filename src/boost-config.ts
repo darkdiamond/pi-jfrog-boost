@@ -540,6 +540,9 @@ const GO_DURATION_UNITS: Readonly<Record<string, number>> = {
  * allows no whitespace.
  */
 export function parseGoDuration(value: string): number | undefined {
+	// No real TTL is this long; bounding it keeps the scan below linear on
+	// whatever the environment holds.
+	if (value.length > 64) return undefined;
 	const text = value.replace(/^\+/, "");
 	if (text === "0") return 0;
 	if (text === "") return undefined;

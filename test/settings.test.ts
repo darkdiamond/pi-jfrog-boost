@@ -83,7 +83,7 @@ test("configured paths are normalised as pi's getAgentDir() does: Windows shell 
 });
 
 test("a UTF-8 byte order mark does not make the file unreadable", () => {
-	const path = "/fake/home/.pi/agent/jfrog-boost.json";
+	const path = join("/fake/home", ".pi", "agent", "jfrog-boost.json");
 	const fs = memoryFs(new Map([[path, '\ufeff{"sync":false,"mcp":false}']]));
 	const store = createSettingsStore({ env: {}, home: () => "/fake/home", fs });
 	assert.deepEqual(store.load(), [], "no 'could not read' warning");
@@ -293,7 +293,9 @@ test("save writes through a symlinked file and keeps its permission bits", () =>
 		shell: "off",
 		footer: false,
 	});
-	assert.equal(statSync(real).mode & 0o777, 0o600, "a 0600 file stays 0600");
+	// Windows has no POSIX permission bits to keep.
+	if (process.platform !== "win32")
+		assert.equal(statSync(real).mode & 0o777, 0o600, "a 0600 file stays 0600");
 	assert.deepEqual(readdirSync(dotfiles), ["jfrog-boost.json"], "no temp file left behind");
 	assert.deepEqual(readdirSync(agent), ["jfrog-boost.json"]);
 });

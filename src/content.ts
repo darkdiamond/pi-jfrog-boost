@@ -141,13 +141,31 @@ function contentStart(text: string): number {
 		at = ANSI_AT.lastIndex;
 	}
 }
+/** A doctype or `<html>` tag at the start of the text. */
+const HTML_OPENING = /^(?:<!doctype\s+html|<html[\s>])/i;
+
 /**
  * Boost's own trigger for turning HTML into article text (NP1): a document
  * that opens, after any comments, with a doctype or an `<html>` tag. Anchored,
  * so a fragment, or a page quoted inside other output, does not match —
  * Boost leaves those alone too.
+ *
+ * Scanned by hand rather than as `^(<!--[\s\S]*?-->\s*)*(<!doctype…)`: that
+ * pattern backtracks exponentially on `<!--` followed by repeated `--><!--`
+ * (26 repetitions took 230 ms, each one doubling it), and it runs on the head
+ * of every shell result, so a command printing a few hundred such bytes
+ * would hang pi. Each comment ends at its first `-->`, as in HTML.
  */
-const HTML_DOCUMENT = /^(<!--[\s\S]*?-->\s*)*(<!doctype\s+html|<html[\s>])/i;
+function opensHtmlDocument(head: string): boolean {
+	let at = 0;
+	while (head.startsWith("<!--", at)) {
+		const end = head.indexOf("-->", at + 4);
+		if (end < 0) return false;
+		at = end + 3;
+		while (at < head.length && /\s/.test(head[at] as string)) at++;
+	}
+	return HTML_OPENING.test(head.slice(at));
+}
 
 /**
  * Whether Boost would turn this text into readable article text. It does that
@@ -168,7 +186,7 @@ export function looksLikeHtmlDocument(text: string): boolean {
 	const start = contentStart(text);
 	if (start < 0) return false;
 	const head = stripAnsi(text.slice(start, start + HTML_SNIFF_CHARS)).trimStart();
-	return HTML_DOCUMENT.test(head);
+	return opensHtmlDocument(head);
 }
 
 /**

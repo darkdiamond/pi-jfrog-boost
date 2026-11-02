@@ -742,7 +742,8 @@ test("an MCP result pi truncated is re-filtered from pi's full-output file", { s
 	assert.ok(Buffer.byteLength(full) > 4 * PI_MCP_OUTPUT_MAX_BYTES);
 	// Named as pi 1.2.0 names it: the route reads no other file.
 	const path = join(tmpdir(), `pi-mcp-${randomBytes(8).toString("hex")}.txt`);
-	writeFileSync(path, full);
+	// Created new and private, as pi creates its own (0600).
+	writeFileSync(path, full, { flag: "wx", mode: 0o600 });
 	const half = PI_MCP_OUTPUT_MAX_BYTES / 2;
 	const truncated = `Warning: truncated output (original token count: ${Math.ceil(Buffer.byteLength(full) / 4)})\nTotal output lines: ${full.split("\n").length}\n\n${full.slice(0, half)}\u2026${full.length - 2 * half} chars truncated\u2026${full.slice(-half)}\n\n[Full output: ${path} (read it with offset/limit)]`;
 	const outcome = await emitMcp({

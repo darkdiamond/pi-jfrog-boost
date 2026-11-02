@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { withAwareness } from "../src/awareness.ts";
@@ -41,6 +41,7 @@ import {
 	tooOldNotice,
 } from "../src/status.ts";
 import { createSyncFlight, type SyncFlight } from "../src/sync.ts";
+import { logReadCommand } from "../src/tools.ts";
 import { docx } from "./helpers/docx.ts";
 import {
 	agentSettledEvent,
@@ -636,11 +637,12 @@ test("with readLogs on, a whole log read is filtered as `cat <abs>`", async () =
 	const log = (input: Record<string, unknown>) =>
 		result("read", { input, content: [{ type: "text", text: NOISY }] });
 	assert.ok(await fire("tool_result", log({ path: "logs/app.log" })));
-	const abs = join("/work", "logs", "app.log");
+	// Resolved as pi resolves it: on Windows `/work` gains the current drive.
+	const abs = resolve("/work", "logs", "app.log");
 	assert.deepEqual(filterCalls(calls)[0]?.fields, {
 		path: "logs/app.log",
 		file_path: abs,
-		command: `cat ${abs}`,
+		command: logReadCommand(abs),
 	});
 	assert.equal(
 		await fire("tool_result", log({ path: "logs/app.log", offset: 5 })),

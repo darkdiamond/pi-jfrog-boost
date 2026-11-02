@@ -401,7 +401,7 @@ test("stats and help print without a UI", async () => {
 	await s.run("bogus", s.noUi());
 	assert.match(s.printed[0] ?? "", /^JFrog Boost — savings this session\nnothing seen yet\ntotal/);
 	assert.match(s.printed[1] ?? "", /pi --no-boost=true/);
-	assert.match(s.printed[1] ?? "", /github\.com\/darkdiamond\/pi-jfrog-boost/);
+	assert.ok((s.printed[1] ?? "").includes("https://github.com/darkdiamond/pi-jfrog-boost"));
 	assert.match(s.printed[2] ?? "", /^Unknown \/boost subcommand "bogus"/);
 });
 
@@ -672,7 +672,7 @@ test("after /boost install the footer is repainted at once, not at the next tool
 				tmpdir: dir,
 				verify: async () => call("boost v0.16.11\n"),
 				fetch: (async (target: string | URL) =>
-					String(target).includes("api.github.com")
+					new URL(String(target)).host === "api.github.com"
 						? Response.json({
 								tag_name: "v0.16.11",
 								assets: [
