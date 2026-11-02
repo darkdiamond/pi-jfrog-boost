@@ -204,12 +204,20 @@ interface Truncation extends PiTruncation {
 
 const piTruncation = ({ content: _content, ...numbers }: Truncation): PiTruncation => numbers;
 
+/**
+ * pi's `splitLinesForCounting` (truncate.js): a trailing newline ends the
+ * last line rather than starting one, and "" has no lines.
+ */
+export function splitLinesForCounting(text: string): string[] {
+	const lines = text.length === 0 ? [] : text.split("\n");
+	if (text.endsWith("\n")) lines.pop();
+	return lines;
+}
+
 /** pi's `truncateHead` (truncate.js) with its default limits, field for field. */
 function truncateHead(content: string): Truncation {
 	const totalBytes = Buffer.byteLength(content, "utf-8");
-	// pi's splitLinesForCounting: a trailing newline ends the last line rather than starting one.
-	const lines = content.length === 0 ? [] : content.split("\n");
-	if (content.endsWith("\n")) lines.pop();
+	const lines = splitLinesForCounting(content);
 	const totalLines = lines.length;
 	const limits = {
 		totalLines,

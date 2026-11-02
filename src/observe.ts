@@ -49,7 +49,7 @@
  * sent is simply not sent.
  */
 import type { HookMeta, HookPayload } from "./boost-client.ts";
-import { aborted, durationMs, parentToolCallId } from "./compat.ts";
+import { aborted, type Bag, bag, durationMs, parentToolCallId } from "./compat.ts";
 import { type ContentBlock, OBSERVE_TEXT_LIMIT, textOf, truncateForObserve } from "./content.ts";
 
 /**
@@ -92,10 +92,6 @@ export interface Observer {
 	preCompact(event: unknown, meta: MetaOf): void;
 	postCompact(meta: MetaOf): void;
 }
-
-type Bag = Record<string, unknown>;
-const bag = (value: unknown): Bag | undefined =>
-	typeof value === "object" && value !== null ? (value as Bag) : undefined;
 
 /** How long one string in oversized arguments may stay. */
 export const OBSERVE_ARG_STRING_LIMIT = 2_000;

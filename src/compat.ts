@@ -16,9 +16,11 @@
 import type { ExtensionAPI, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import type { ContentBlock } from "./content.ts";
 
-type Bag = Record<string, unknown>;
+/** An unknown value read as a record of unknown fields. */
+export type Bag = Record<string, unknown>;
 
-function bag(value: unknown): Bag | undefined {
+/** `value` as a {@link Bag} when it is an object, for reading fields that may not be there. */
+export function bag(value: unknown): Bag | undefined {
 	return typeof value === "object" && value !== null ? (value as Bag) : undefined;
 }
 

@@ -2120,7 +2120,9 @@ test("an idle extension writes no stats entry: Boost off, missing, or a nested c
 	await start(working.stub);
 	await working.stub.emitToolResult(bash());
 	await settle(working.stub);
-	assert.equal(statsEntries(working.stub).length, 1);
+	assert.equal(statsEntries(working.stub).length, 0, "a skip alone is not worth an entry per turn");
+	await working.stub.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+	assert.equal(statsEntries(working.stub).length, 1, "but is kept when the session ends");
 });
 
 test("/boost off is carried to the branch /tree moves to, so a later /reload keeps it", async () => {

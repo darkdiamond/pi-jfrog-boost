@@ -387,7 +387,8 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	 * Whether Boost's stdin filter will filter shell output at all (spec §8.4),
 	 * decided from settings, config.toml and the environment without spawning.
 	 */
-	const shellOn = () => shellGate(settings.effective().shell, config.read(), env, readiness.version()).on;
+	const shellOn = (shell = settings.effective().shell) =>
+		shellGate(shell, config.read(), env, readiness.version()).on;
 
 	/** Readiness as the UI reports it: `disabled` whenever an off switch is active. */
 	const uiState = (): ReadinessState => (isOff() ? { kind: "disabled" } : readiness.state());
@@ -479,10 +480,17 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		}
 	}
 
-	/** Persist this session's savings (§10.5), numbers only, when they changed. */
-	function saveStats(): void {
+	/**
+	 * Persist this session's savings (§10.5), numbers only. After a turn only
+	 * when Boost processed something since the last save: on a default v0.15
+	 * install every shell result is skipped (`shell-off`), and an entry per
+	 * prompt would grow the session file while recording nothing saved.
+	 * Leaving the branch or the session (`all`) writes any change, so the
+	 * seen and skipped counts are still kept.
+	 */
+	function saveStats(all = false): void {
 		try {
-			if (!stats.changed() || typeof pi.appendEntry !== "function") return;
+			if (!(all ? stats.changed() : stats.worthSaving()) || typeof pi.appendEntry !== "function") return;
 			pi.appendEntry(STATS_ENTRY, stats.snapshot());
 			stats.saved();
 		} catch {
@@ -748,8 +756,11 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		// untouched, so an idle extension never appends an entry (§10.5).
 		let tally = tallyFor(undefined);
 		let bucket: BucketName | undefined;
+		// Built once per result: each call merges the file, the environment and defaults.
+		let effective: ReturnType<SettingsStore["effective"]> | undefined;
 		try {
-			bucket = bucketFor(event.toolName, event.input ?? {}, settings.effective().extraTools);
+			effective = settings.effective();
+			bucket = bucketFor(event.toolName, event.input ?? {}, effective.extraTools);
 		} catch {
 			/* counted in the session counters only */
 		}
@@ -778,6 +789,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 		let text = "";
 		try {
 			const hookMeta = meta(ctx, event.toolCallId);
+			const current = effective ?? settings.effective();
 			text = textOf(event.content);
 			// Gathered lazily, in the router's order: when off, readiness is not
 			// even checked; until ready, config.toml is not read.
@@ -796,7 +808,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				off,
 				ready,
 				paused: ready && breaker.state().kind === "open",
-				shellOn: ready && shellOn(),
+				shellOn: ready && shellOn(current.shell),
 				fullOutputPath,
 				boostVersion: readiness.version(),
 				// Read from config.toml only for an MCP result that may be sent.
@@ -804,7 +816,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 					ready && isMcpTool(event.toolName)
 						? resolveFlag(config.read(), MCP_FILTERING_FLAG, env).value
 						: "unknown",
-				settings: settings.effective(),
+				settings: current,
 			});
 			const idle = decision.kind === "skip" && (decision.reason === "off" || decision.reason === "not-ready");
 			if (bucket && !idle) {
@@ -860,7 +872,12 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				// in place of ~50 KB of decoded binary saved the user nothing they
 				// could have used.
 				if (outcome.kind === "page") tally.processed(text.length, outcome.text.length, "converted");
-				else tally.skip(LEGACY_OFFICE.has(outcome.ext) ? "advisory" : "offset");
+				else {
+					tally.skip(LEGACY_OFFICE.has(outcome.ext) ? "advisory" : "offset");
+					// Boost answered and the result was replaced, though with nothing
+					// to measure: worth persisting, at zero size (no saving).
+					tally.processed(0, 0);
+				}
 				return asResult(documentPatch(event, outcome));
 			}
 			const signal = ctx.signal;
@@ -1048,7 +1065,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 	// there first; the branch arrived at then says what it has saved (§10.5).
 	// Neither handler returns anything: session_before_tree may cancel.
 	pi.on("session_before_tree", () => {
-		saveStats();
+		saveStats(true);
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
@@ -1088,7 +1105,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 			/* fail open: what was not uploaded goes with the next session's sync */
 		}
 		sync.dispose();
-		saveStats();
+		saveStats(true);
 		// A filter still running for an abandoned turn has nobody to answer.
 		try {
 			client.killAll();

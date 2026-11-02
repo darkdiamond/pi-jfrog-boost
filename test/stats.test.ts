@@ -225,3 +225,19 @@ test("/boost stats lists each bucket that saw anything, then the totals", () => 
 	);
 	assert.match(formatStats(emptySnapshot(), String), /\nnothing seen yet\n/);
 });
+
+test("only processing or failing is worth a session entry; seen and skipped counts ride along", () => {
+	const stats = createStats();
+	stats.seen("bash");
+	stats.skip("bash", "shell-off");
+	assert.equal(stats.changed(), true);
+	assert.equal(stats.worthSaving(), false, "a default install skipping every shell result writes nothing");
+	stats.processed("bash", 5_000, 500, "compacted");
+	assert.equal(stats.worthSaving(), true);
+	stats.saved();
+	assert.equal(stats.worthSaving(), false);
+	stats.failed("mcp");
+	assert.equal(stats.worthSaving(), true);
+	stats.restore();
+	assert.equal(stats.worthSaving(), false);
+});

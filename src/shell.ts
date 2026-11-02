@@ -34,7 +34,7 @@ import {
 	splitNotices,
 	stripAnsi,
 } from "./content.ts";
-import { PI_MAX_BYTES, PI_MAX_LINES } from "./documents.ts";
+import { PI_MAX_BYTES, PI_MAX_LINES, splitLinesForCounting } from "./documents.ts";
 
 // ---------------------------------------------------------------------------
 // Command parsing
@@ -488,12 +488,8 @@ export async function readPiTempFile(
 	}
 }
 
-/** Lines in `text` as pi counts a run's output: a final newline ends the last line, it does not start one. */
-function lineCount(text: string): number {
-	if (!text) return 0;
-	const lines = text.split("\n").length;
-	return text.endsWith("\n") ? lines - 1 : lines;
-}
+/** Lines in `text` as pi counts a run's output. */
+const lineCount = (text: string): number => splitLinesForCounting(text).length;
 
 /** Whether `text` fits the page pi's own truncation leaves the model: 2000 lines and 50 KiB. */
 function fitsPiPage(text: string): boolean {

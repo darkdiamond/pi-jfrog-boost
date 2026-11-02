@@ -197,6 +197,14 @@ export interface Stats {
 	snapshot(): StatsSnapshot;
 	/** Whether anything changed since the last {@link Stats.saved} or {@link Stats.restore}. */
 	changed(): boolean;
+	/**
+	 * Whether Boost processed or failed on anything since then: what is worth
+	 * a session entry. Counts of results that were only seen or skipped (on a
+	 * default v0.15 install every shell result is skipped as `shell-off`)
+	 * would otherwise append a snapshot to the session file on every prompt
+	 * while saving nothing; they ride along with the next entry instead.
+	 */
+	worthSaving(): boolean;
 	/** The snapshot was persisted. */
 	saved(): void;
 	/** Start from `snapshot` (a restored session), or from zero. */
@@ -206,6 +214,7 @@ export interface Stats {
 export function createStats(): Stats {
 	let state = emptySnapshot();
 	let dirty = false;
+	let material = false;
 	return {
 		seen(bucket) {
 			state.buckets[bucket].seen++;
@@ -221,6 +230,7 @@ export function createStats(): Stats {
 		failed(bucket) {
 			state.buckets[bucket].failed++;
 			dirty = true;
+			material = true;
 		},
 		processed(bucket, before, after, applied) {
 			const b = state.buckets[bucket];
@@ -231,15 +241,19 @@ export function createStats(): Stats {
 			b.saved += Math.max(0, inChars - outChars);
 			if (applied) b[applied]++;
 			dirty = true;
+			material = true;
 		},
 		snapshot: () => structuredClone(state),
 		changed: () => dirty,
+		worthSaving: () => material,
 		saved() {
 			dirty = false;
+			material = false;
 		},
 		restore(snapshot) {
 			state = snapshot ? structuredClone(snapshot) : emptySnapshot();
 			dirty = false;
+			material = false;
 		},
 	};
 }
