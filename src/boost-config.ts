@@ -402,16 +402,18 @@ export function createConfigReader(options: ConfigReaderOptions = {}): ConfigRea
 }
 
 /**
- * Whether Boost records telemetry for upload: `BOOST_TELEMETRY` in the
- * environment Boost inherits (`0`/`false` off, `1`/`true` on), then
- * `[tracing] telemetry`, then Boost's default, on. Measured on v0.16.11:
- * with it off Boost writes no trace rows at all, so `boost sync` has nothing
- * to upload — the opt-out is Boost's to enforce, and this only reports it.
+ * Whether Boost records telemetry for upload, decided as Boost v0.16.11
+ * decides it (measured): a non-empty `BOOST_TELEMETRY` in the environment
+ * Boost inherits wins, and is on only when it is exactly `1` or `true` in any
+ * case, untrimmed — every other value, `0`, `off`, `no`, ` 1` or `maybe`
+ * alike, turns it off. Unset or empty: `[tracing] telemetry`, then Boost's
+ * default, on. With it off Boost writes no trace rows at all, so `boost sync`
+ * has nothing to upload; the opt-out is Boost's to enforce, and this only
+ * reports it.
  */
 export function telemetryOn(config: BoostConfig, env: NodeJS.ProcessEnv): boolean {
-	const value = env.BOOST_TELEMETRY?.trim().toLowerCase();
-	if (value === "0" || value === "false") return false;
-	if (value === "1" || value === "true") return true;
+	const value = env.BOOST_TELEMETRY;
+	if (value) return /^(?:1|true)$/i.test(value);
 	return config.telemetry ?? true;
 }
 

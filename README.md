@@ -266,7 +266,12 @@ What leaves your machine, and how to stop it:
   source: with `boost init --no-telemetry` (`[tracing] telemetry = false` in
   `~/.boost/config.toml`) or `BOOST_TELEMETRY=0`, Boost records no trace rows
   and sync has nothing to upload (measured on v0.16.11). `/boost status`
-  shows when that is the case.
+  shows when that is the case. Sync is also where Boost maintains itself: on
+  v0.16.11 a `boost sync` runs Boost's own update check (and updates the
+  binary while its `boost-auto-update` flag is on, as it is by default) and
+  refreshes the Boost skill files of agent integrations installed with
+  `boost init`. That is Boost's behaviour, not this extension's; with sync on,
+  pi going idle is one of the things that triggers it.
 - **MCP bodies.** For every MCP call it filters, Boost stores the full request
   and response in its local database, and sync uploads them. Keep a server
   away from Boost with `mcpExclude` (e.g. `["mcp__secrets__*"]`) or turn MCP
@@ -330,7 +335,7 @@ What leaves your machine, and how to stop it:
 | | Tested | Accepted, untested | Notes |
 |---|---|---|---|
 | **pi** | 0.86.1, 1.2.0, 1.4.0 | other versions from 0.86.1 | CI typechecks and unit-tests 0.86.1 and ^1.4.0, plus pi@latest weekly |
-| **Boost** | 0.15.4, 0.16.11 | 0.13.13 – 0.16.x, and newer than 0.16.x | `/boost status` says "newer than validated" past 0.16.11 |
+| **Boost** | 0.15.4, 0.16.11 | every other release from 0.13.13 on, including newer than 0.16.11 | `/boost status` says "newer than validated" past 0.16.11 |
 | **Node** | 22.23 | 22.19 and newer | CI matrix (unit tests): 22.19, 24 — pending until CI is green on the release commit |
 | **OS** | macOS | Linux, Windows | CI matrix (unit tests): Linux, Windows, macOS — pending until CI is green on the release commit |
 | **Forks** (oh-my-pi and others) | — | unsupported | `extraTools` can route renamed shell tools |

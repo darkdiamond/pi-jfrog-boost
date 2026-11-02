@@ -34,7 +34,11 @@ access pi has. Concretely, it:
   Boost's local measurements to JFrog, and then prunes them locally. Turn it
   off with `sync: false` or `PI_BOOST_SYNC=0`. Boost's own opt-out
   (`boost init --no-telemetry`, or `BOOST_TELEMETRY=0`) stops Boost recording
-  trace rows at all, leaving sync nothing to upload (measured on v0.16.11);
+  trace rows at all, leaving sync nothing to upload (measured on v0.16.11).
+  A `boost sync` also runs Boost's own update check (updating the binary
+  while its `boost-auto-update` flag is on, the default) and refreshes the
+  Boost skills of agent integrations installed with `boost init`; that is
+  Boost's behaviour, which pi's idle sync triggers like any other;
 - with the opt-in `observe` setting, sends tool argument and output excerpts
   (up to 16k characters each) and the assistant's last reply to Boost, which
   stores them and sync uploads them;

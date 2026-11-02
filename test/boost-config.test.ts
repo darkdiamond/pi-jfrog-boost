@@ -279,7 +279,10 @@ test("telemetry: [tracing] telemetry, overridden by BOOST_TELEMETRY, on by defau
 	const none = parseBoostConfig("");
 	assert.equal(none.telemetry, undefined);
 	assert.equal(telemetryOn(none, {}), true, "Boost's default");
-	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: "0" }), false);
-	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: " FALSE " }), false);
-	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: "maybe" }), true, "not a value Boost reads");
+	assert.equal(telemetryOn(off, { BOOST_TELEMETRY: "TRUE" }), true);
+	assert.equal(telemetryOn(off, { BOOST_TELEMETRY: "" }), false, "empty falls back to the config");
+	// Measured on v0.16.11: any other non-empty value turns telemetry off.
+	for (const value of ["0", "false", "f", "no", "off", "on", "yes", "maybe", " 1", " true "]) {
+		assert.equal(telemetryOn(none, { BOOST_TELEMETRY: value }), false, JSON.stringify(value));
+	}
 });

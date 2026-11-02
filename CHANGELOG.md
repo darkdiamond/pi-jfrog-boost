@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-10-15
+## [0.4.0] - 2026-11-02
 
 Validated against Boost v0.16.11 and v0.15.4, and pi 1.4.0 and 1.2.0; the
 oldest supported pi is now 0.86.1. Boost 0.13.13 is still the oldest Boost

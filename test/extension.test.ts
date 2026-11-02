@@ -2221,3 +2221,17 @@ test("/boost off survives a reload, resume and fork of the session; a new sessio
 	await start(fresh.stub, "new");
 	assert.equal(fresh.statusTexts().at(-1), "boost ✓");
 });
+
+test("/boost status reads Boost's telemetry opt-out from its config and environment", async () => {
+	const optedOut = uiExtension({ config: `${TERMS}\n[tracing]\ntelemetry = false\n` });
+	await start(optedOut.stub);
+	assert.match(optedOut.ext.statusReport(), /sync on \(Boost telemetry off: nothing uploaded\)/);
+
+	const byEnv = uiExtension({ env: { BOOST_TELEMETRY: "off" } });
+	await start(byEnv.stub);
+	assert.match(byEnv.ext.statusReport(), /sync on \(Boost telemetry off: nothing uploaded\)/);
+
+	const recording = uiExtension();
+	await start(recording.stub);
+	assert.doesNotMatch(recording.ext.statusReport(), /telemetry off/);
+});
