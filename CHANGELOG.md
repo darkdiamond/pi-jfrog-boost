@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-10-15
 
-Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
-0.86.1. Boost 0.13.13 is still the oldest Boost accepted.
+Validated against Boost v0.16.11 and v0.15.4, and pi 1.4.0 and 1.2.0; the
+oldest supported pi is now 0.86.1. Boost 0.13.13 is still the oldest Boost
+accepted. Boost 0.16 keeps CLI filtering opt-in, and its Half Boost
+experiment does not affect pi; pi 1.3 and 1.4 change nothing this extension
+relies on.
 
 ### Fixed
 
@@ -104,6 +107,9 @@ Validated against Boost v0.15.4 and pi 1.2.0; the oldest supported pi is now
 
 ### Added
 
+- `/boost status` says when Boost's own telemetry opt-out
+  (`boost init --no-telemetry`, `BOOST_TELEMETRY=0`) leaves `boost sync`
+  nothing to upload.
 - MCP compaction: `mcp__*` results go through Boost's MCP filters (Slack,
   GitHub, browser snapshots and more), keeping images and
   `structuredContent`. `mcpExclude` keeps chosen servers away from Boost.

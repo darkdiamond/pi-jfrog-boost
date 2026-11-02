@@ -262,6 +262,8 @@ export interface StatusView {
 	mcpFlag: FlagResolution;
 	config: BoostConfig;
 	flags: FlagsFreshness;
+	/** Whether Boost records telemetry (boost-config.ts `telemetryOn`); absent counts as on. */
+	telemetry?: boolean;
 	stats: StatsSnapshot;
 	/** This session's skip reasons and errors (health.ts counters). */
 	skips: Readonly<Record<string, number>>;
@@ -471,6 +473,16 @@ function errorsLine(view: StatusView): string {
  * readiness, config.toml as last read, and this session's counters, so it
  * answers instantly and works when Boost is hung.
  */
+/**
+ * `sync on`, unless Boost's own telemetry is off: then sync still runs (it
+ * refreshes Boost's flags) but has nothing to upload, and the user who opted
+ * out should see that their choice holds.
+ */
+function syncText(view: StatusView): string {
+	if (!view.settings.sync) return "off";
+	return view.telemetry === false ? "on (Boost telemetry off: nothing uploaded)" : "on";
+}
+
 export function statusReport(view: StatusView): string {
 	const s = view.settings;
 	const filters = view.config.disabledFilters;
@@ -480,7 +492,7 @@ export function statusReport(view: StatusView): string {
 		line("shell", shellLine(view)),
 		...documentsLines(view),
 		line("mcp", mcpLine(view)),
-		line("breaker", `${breakerText(view)}${GAP}sync ${onOff(s.sync)}${GAP}observe ${onOff(s.observe)}`),
+		line("breaker", `${breakerText(view)}${GAP}sync ${syncText(view)}${GAP}observe ${onOff(s.observe)}`),
 		line(
 			"filters",
 			filters.length

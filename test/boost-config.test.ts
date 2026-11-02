@@ -18,6 +18,7 @@ import {
 	parseToml,
 	resolveFlag,
 	shellGate,
+	telemetryOn,
 } from "../src/boost-config.ts";
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "config");
@@ -268,4 +269,17 @@ test("reading the config never writes to the file system", () => {
 	}
 	assert.deepEqual(calls, []);
 	assert.equal(readFileSync(path, "utf8"), fixture("filters-disabled.toml"));
+});
+
+test("telemetry: [tracing] telemetry, overridden by BOOST_TELEMETRY, on by default", () => {
+	const off = parseBoostConfig('accept_terms = "yes"\n[tracing]\ntelemetry = false\n');
+	assert.equal(off.telemetry, false);
+	assert.equal(telemetryOn(off, {}), false, "boost init --no-telemetry");
+	assert.equal(telemetryOn(off, { BOOST_TELEMETRY: "1" }), true);
+	const none = parseBoostConfig("");
+	assert.equal(none.telemetry, undefined);
+	assert.equal(telemetryOn(none, {}), true, "Boost's default");
+	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: "0" }), false);
+	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: " FALSE " }), false);
+	assert.equal(telemetryOn(none, { BOOST_TELEMETRY: "maybe" }), true, "not a value Boost reads");
 });

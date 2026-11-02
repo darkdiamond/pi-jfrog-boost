@@ -404,3 +404,9 @@ test("the session total is the sum of its parts, never less, whatever a conversi
 	};
 	assert.match(statusReport(view({ stats })), /\n {2}session {3}~9\.0k tokens saved \(90%\) — bash 9\.0k\n/);
 });
+
+test("the sync line says when Boost's own telemetry leaves nothing to upload", () => {
+	assert.match(statusReport(view()), / {3}sync on {4}observe /);
+	assert.match(statusReport(view({ telemetry: false })), /sync on \(Boost telemetry off: nothing uploaded\)/);
+	assert.match(statusReport(view({ telemetry: false }, { sync: false })), / {3}sync off {4}/);
+});

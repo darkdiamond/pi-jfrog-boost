@@ -299,6 +299,11 @@ export interface BoostConfig {
 	disabledFilters: string[];
 	/** `[measurement] boost_off_sessions`, shown in status only. */
 	boostOffSessions?: boolean;
+	/**
+	 * `[tracing] telemetry` (v0.15.6+; `boost init --no-telemetry` writes
+	 * `false`). Absent means Boost's default, on.
+	 */
+	telemetry?: boolean;
 }
 
 function get(doc: TomlDocument, path: readonly string[], key: string): TomlValue | undefined {
@@ -318,6 +323,7 @@ export function parseBoostConfig(text: string): BoostConfig {
 	const flagsUpdatedAt = asString(get(doc, ["feature_flags", "_metadata"], "last_updated_at"));
 	const disabled = get(doc, ["filters"], "disabled");
 	const boostOffSessions = asBool(get(doc, ["measurement"], "boost_off_sessions"));
+	const telemetry = asBool(get(doc, ["tracing"], "telemetry"));
 	return {
 		termsAccepted,
 		...(termsAt ? { termsAt } : {}),
@@ -331,6 +337,7 @@ export function parseBoostConfig(text: string): BoostConfig {
 			? disabled.filter((item): item is string => typeof item === "string")
 			: [],
 		...(boostOffSessions !== undefined ? { boostOffSessions } : {}),
+		...(telemetry !== undefined ? { telemetry } : {}),
 	};
 }
 
@@ -392,6 +399,20 @@ export function createConfigReader(options: ConfigReaderOptions = {}): ConfigRea
 			}
 		},
 	};
+}
+
+/**
+ * Whether Boost records telemetry for upload: `BOOST_TELEMETRY` in the
+ * environment Boost inherits (`0`/`false` off, `1`/`true` on), then
+ * `[tracing] telemetry`, then Boost's default, on. Measured on v0.16.11:
+ * with it off Boost writes no trace rows at all, so `boost sync` has nothing
+ * to upload — the opt-out is Boost's to enforce, and this only reports it.
+ */
+export function telemetryOn(config: BoostConfig, env: NodeJS.ProcessEnv): boolean {
+	const value = env.BOOST_TELEMETRY?.trim().toLowerCase();
+	if (value === "0" || value === "false") return false;
+	if (value === "1" || value === "true") return true;
+	return config.telemetry ?? true;
 }
 
 /** Where a flag's effective value came from, highest precedence first. */

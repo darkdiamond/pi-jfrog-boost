@@ -143,7 +143,7 @@ version.
 ### CI
 
 The `check` job runs typecheck and unit tests on Linux, Windows and macOS ×
-Node 22.19 and 24 × pi `dev` (the ^1.2.0 devDependency) and `min` (0.86.1,
+Node 22.19 and 24 × pi `dev` (the ^1.4.0 devDependency) and `min` (0.86.1,
 installed with `npm install --no-save --ignore-scripts`); min × Node 22.19 runs
 on Linux only. Lint runs once. The `package` job verifies registry signatures
 and runs `npm run check:pack`, which asserts the tarball holds exactly

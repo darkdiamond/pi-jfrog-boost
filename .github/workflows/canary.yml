@@ -1,7 +1,7 @@
 name: Canary
 
 # Early warning for upstream changes that CI cannot see. CI pins pi to the
-# validated ^1.2.0 line (the lockfile) and to the 0.86.1 floor; this checks the
+# validated ^1.4.0 line (the lockfile) and to the 0.86.1 floor; this checks the
 # extension against whatever pi is `latest` on npm today, once a week, so a
 # breaking pi release shows up as one open `canary` issue instead of as a user
 # report. The extension imports only types from pi, so "typechecks and passes
@@ -59,7 +59,7 @@ jobs:
       - run: npm test
 
   boost-e2e:
-    name: hermetic e2e against Boost v0.15.4 (no terms)
+    name: hermetic e2e against Boost v0.16.11 (no terms)
     if: vars.BOOST_CANARY == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -68,9 +68,9 @@ jobs:
       # A pinned release, never `latest` and never install.sh: the tarball is
       # checked against the SHA-256 GitHub published for it when this pin was
       # recorded. Bump all three together.
-      BOOST_VERSION: v0.15.4
+      BOOST_VERSION: v0.16.11
       BOOST_ASSET: boost-linux-amd64.tar.gz
-      BOOST_SHA256: 53a6e02d6f70a7913f6ad154134386778fd07063356f0fb6342b18aa4d6d8fbb
+      BOOST_SHA256: 883dbfa13020f5805cbcbe5e14ff7324e15c49941fc2ccfce43032a6434aae5b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -63,6 +63,7 @@ import {
 	MCP_FILTERING_FLAG,
 	resolveFlag,
 	shellGate,
+	telemetryOn,
 } from "./boost-config.ts";
 import { type CommandHost, completions, createBoostCommand } from "./commands.ts";
 import {
@@ -1286,6 +1287,7 @@ export function createBoostExtension(pi: ExtensionAPI, deps: BoostExtensionDeps 
 				mcpFlag: resolveFlag(cfg, MCP_FILTERING_FLAG, env),
 				config: cfg,
 				flags: flagsFreshness(cfg, env, Date.now()),
+				telemetry: telemetryOn(cfg, env),
 				stats: stats.snapshot(),
 				skips: counters.skips(),
 				errors: counters.errors(),

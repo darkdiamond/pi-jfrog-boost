@@ -36,7 +36,7 @@ jobs:
         # The lowest Node pi supports, and current. Both run TypeScript
         # directly, which is how pi loads this extension.
         node: ["22.19", "24"]
-        # dev: the devDependency (pi ^1.2.0, the validated line).
+        # dev: the devDependency (pi ^1.4.0, the validated line).
         # min: pi 0.86.1, the oldest supported release. Only types are
         # imported from pi, so the extension must typecheck and pass its unit
         # tests against both API shapes; see src/compat.ts.

@@ -262,7 +262,11 @@ What leaves your machine, and how to stop it:
   Boost's local measurements to JFrog, as every Boost integration does, then
   prunes the synced rows locally. It never runs while Boost is too old, not
   responding or otherwise not ready. Turn it off with `sync: false` or
-  `PI_BOOST_SYNC=0`.
+  `PI_BOOST_SYNC=0`. Boost's own telemetry opt-out also stops it at the
+  source: with `boost init --no-telemetry` (`[tracing] telemetry = false` in
+  `~/.boost/config.toml`) or `BOOST_TELEMETRY=0`, Boost records no trace rows
+  and sync has nothing to upload (measured on v0.16.11). `/boost status`
+  shows when that is the case.
 - **MCP bodies.** For every MCP call it filters, Boost stores the full request
   and response in its local database, and sync uploads them. Keep a server
   away from Boost with `mcpExclude` (e.g. `["mcp__secrets__*"]`) or turn MCP
@@ -279,6 +283,19 @@ What leaves your machine, and how to stop it:
   settles, and compaction events in Boost's local database, which sync
   uploads. It never sends your prompts, nested tool calls, or anything about
   a tool in `mcpExclude`.
+
+### Boost features pi does not use
+
+- **Half Boost** (Boost's with/without-Boost experiment, the
+  `boost-measurement-mode` flag) assigns some sessions of Boost's own agent
+  integrations to a control group. It does not reach pi: on v0.16.11 every
+  pi session tested was filtered, and Boost recorded no measurement mode for
+  it.
+- **`BOOST.md` lessons** (v0.16.0+), which Boost Pro's local models write from
+  past sessions, reach other agents through Boost's Claude Code
+  `SessionStart` hook. That hook also indexes the workspace for BoostGraph,
+  writing into the project, so pi does not call it, and the lessons are not
+  added to pi's prompt.
 
 ## Performance
 
@@ -312,8 +329,8 @@ What leaves your machine, and how to stop it:
 
 | | Tested | Accepted, untested | Notes |
 |---|---|---|---|
-| **pi** | 0.86.1, 1.2.0 | other versions from 0.86.1 | CI typechecks and unit-tests 0.86.1 and ^1.2.0, plus pi@latest weekly |
-| **Boost** | 0.15.4 | 0.13.13 – 0.15.3, and newer than 0.15.4 | `/boost status` says "newer than validated" for newer versions |
+| **pi** | 0.86.1, 1.2.0, 1.4.0 | other versions from 0.86.1 | CI typechecks and unit-tests 0.86.1 and ^1.4.0, plus pi@latest weekly |
+| **Boost** | 0.15.4, 0.16.11 | 0.13.13 – 0.16.x, and newer than 0.16.x | `/boost status` says "newer than validated" past 0.16.11 |
 | **Node** | 22.23 | 22.19 and newer | CI matrix (unit tests): 22.19, 24 — pending until CI is green on the release commit |
 | **OS** | macOS | Linux, Windows | CI matrix (unit tests): Linux, Windows, macOS — pending until CI is green on the release commit |
 | **Forks** (oh-my-pi and others) | — | unsupported | `extraTools` can route renamed shell tools |
